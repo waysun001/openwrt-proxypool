@@ -1,0 +1,15 @@
+#!/bin/sh
+
+# 添加 LuCI 菜单
+uci -q batch << EOF
+delete ucitrack.@proxypool[-1]
+add ucitrack proxypool
+set ucitrack.@proxypool[-1].init=proxypool
+commit ucitrack
+EOF
+
+# 清理缓存
+rm -f /tmp/luci-indexcache
+rm -rf /tmp/luci-modulecache
+
+exit 0

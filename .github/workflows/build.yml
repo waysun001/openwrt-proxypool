@@ -1,0 +1,129 @@
+name: Build OpenWrt
+
+on:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - '**.md'
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      openwrt_version:
+        description: 'OpenWrt版本'
+        required: true
+        default: '23.05.3'
+        type: choice
+        options:
+          - '23.05.3'
+          - '23.05.2'
+          - 'snapshot'
+
+env:
+  REPO_URL: https://github.com/openwrt/openwrt
+  REPO_BRANCH: v23.05.3
+  DEVICE: gl-mt6000
+  TARGET: mediatek
+  SUBTARGET: filogic
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: 初始化编译环境
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install build-essential clang flex bison g++ gawk \
+          gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
+          python3-distutils rsync unzip zlib1g-dev file wget qemu-utils
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
+        sudo timedatectl set-timezone "$TZ"
+        sudo mkdir -p /workdir
+        sudo chown $USER:$GROUPS /workdir
+
+    - name: 克隆 OpenWrt 源码
+      working-directory: /workdir
+      run: |
+        git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
+        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+
+    - name: 加载自定义 feeds
+      run: |
+        # 添加自定义 feeds
+        echo "src-link proxypool $GITHUB_WORKSPACE" >> openwrt/feeds.conf.default
+
+    - name: 更新 feeds
+      run: |
+        cd openwrt
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+    - name: 安装自定义软件包
+      run: |
+        cd openwrt
+        ./scripts/feeds install luci-app-proxypool proxypool-core
+
+    - name: 加载编译配置
+      run: |
+        cp config/gl-mt6000.config openwrt/.config
+        cd openwrt
+        make defconfig
+
+    - name: 下载依赖包
+      run: |
+        cd openwrt
+        make download -j8
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
+
+    - name: 编译固件
+      id: compile
+      run: |
+        cd openwrt
+        echo -e "$(nproc) thread compile"
+        make -j$(nproc) || make -j1 || make -j1 V=s
+        echo "status=success" >> $GITHUB_OUTPUT
+        grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
+        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
+        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+
+    - name: 整理输出文件
+      id: organize
+      if: steps.compile.outputs.status == 'success'
+      run: |
+        cd openwrt/bin/targets/$TARGET/$SUBTARGET
+        rm -rf packages
+        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: 上传固件
+      uses: actions/upload-artifact@v4
+      if: steps.organize.outputs.status == 'success'
+      with:
+        name: OpenWrt_ProxyPool_${{ env.DEVICE }}${{ env.FILE_DATE }}
+        path: ${{ env.FIRMWARE }}
+
+    - name: 创建 Release
+      uses: softprops/action-gh-release@v1
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      with:
+        tag_name: v${{ github.run_number }}
+        files: ${{ env.FIRMWARE }}/*
+        body: |
+          ## OpenWrt ProxyPool 固件
+
+          - 设备: GL-MT6000
+          - 编译时间: ${{ env.FILE_DATE }}
+          - OpenWrt版本: ${{ env.REPO_BRANCH }}
+
+          ### 更新日志
+          ${{ github.event.head_commit.message }}

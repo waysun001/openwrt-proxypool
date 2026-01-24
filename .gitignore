@@ -1,0 +1,23 @@
+# Build output
+build/
+bin/
+*.ipk
+
+# Temporary files
+*.tmp
+*.log
+*.bak
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Backup files
+*.tar.gz
+*.backup
