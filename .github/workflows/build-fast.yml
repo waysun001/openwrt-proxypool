@@ -163,6 +163,11 @@ jobs:
           ls -la imagebuilder/packages/
         fi
 
+        # 添加本地仓库到 ImageBuilder
+        cd imagebuilder
+        echo "src/gz custom file:packages" >> repositories.conf
+        cat repositories.conf
+
     - name: 生成固件
       run: |
         cd imagebuilder
@@ -179,6 +184,8 @@ jobs:
         PACKAGES="$PACKAGES nftables kmod-nft-tproxy kmod-nft-socket"
         PACKAGES="$PACKAGES ip-full bash jq curl wget-ssl"
         PACKAGES="$PACKAGES openssh-sftp-server nano htop"
+        # 自定义包
+        PACKAGES="$PACKAGES proxypool-core luci-app-proxypool"
 
         # 生成固件
         make image PROFILE="${{ env.DEVICE_PROFILE }}" PACKAGES="$PACKAGES" FILES="../files" \
