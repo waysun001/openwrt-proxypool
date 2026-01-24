@@ -1,0 +1,162 @@
+name: Build OpenWrt (Fast - ImageBuilder)
+
+on:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - '**.md'
+  workflow_dispatch:
+    inputs:
+      openwrt_version:
+        description: 'OpenWrt版本'
+        required: true
+        default: '23.05.3'
+        type: choice
+        options:
+          - '23.05.3'
+          - '23.05.2'
+
+env:
+  OPENWRT_VERSION: '23.05.3'
+  TARGET: mediatek
+  SUBTARGET: filogic
+  DEVICE_PROFILE: glinet_gl-mt6000
+  TZ: Asia/Shanghai
+
+jobs:
+  build-packages:
+    name: 编译自定义软件包
+    runs-on: ubuntu-22.04
+    outputs:
+      packages_url: ${{ steps.upload.outputs.artifact-url }}
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: 下载 OpenWrt SDK
+      run: |
+        SDK_URL="https://downloads.openwrt.org/releases/${{ env.OPENWRT_VERSION }}/targets/${{ env.TARGET }}/${{ env.SUBTARGET }}/openwrt-sdk-${{ env.OPENWRT_VERSION }}-${{ env.TARGET }}-${{ env.SUBTARGET }}_gcc-*.Linux-x86_64.tar.xz"
+        wget -q $(curl -s "https://downloads.openwrt.org/releases/${{ env.OPENWRT_VERSION }}/targets/${{ env.TARGET }}/${{ env.SUBTARGET }}/" | grep -oP 'openwrt-sdk[^"]+\.tar\.xz' | head -1 | sed "s|^|https://downloads.openwrt.org/releases/${{ env.OPENWRT_VERSION }}/targets/${{ env.TARGET }}/${{ env.SUBTARGET }}/|")
+        tar -xf openwrt-sdk-*.tar.xz
+        mv openwrt-sdk-* sdk
+
+    - name: 准备软件包源码
+      run: |
+        mkdir -p sdk/package/proxypool
+        cp -r proxypool-core sdk/package/proxypool/
+        cp -r luci-app-proxypool sdk/package/proxypool/
+
+    - name: 编译软件包
+      run: |
+        cd sdk
+        # 更新 feeds
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+        # 配置
+        echo "CONFIG_PACKAGE_proxypool-core=m" >> .config
+        echo "CONFIG_PACKAGE_luci-app-proxypool=m" >> .config
+        make defconfig
+
+        # 编译
+        make package/proxypool/proxypool-core/compile V=s -j$(nproc)
+        make package/proxypool/luci-app-proxypool/compile V=s -j$(nproc)
+
+        # 整理输出
+        mkdir -p ../packages
+        find bin/packages -name "*.ipk" -exec cp {} ../packages/ \;
+        find bin/targets -name "*.ipk" -exec cp {} ../packages/ \;
+
+    - name: 上传软件包
+      id: upload
+      uses: actions/upload-artifact@v4
+      with:
+        name: proxypool-packages
+        path: packages/*.ipk
+
+  build-firmware:
+    name: 生成固件
+    runs-on: ubuntu-22.04
+    needs: build-packages
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: 下载 OpenWrt ImageBuilder
+      run: |
+        IB_URL="https://downloads.openwrt.org/releases/${{ env.OPENWRT_VERSION }}/targets/${{ env.TARGET }}/${{ env.SUBTARGET }}/openwrt-imagebuilder-${{ env.OPENWRT_VERSION }}-${{ env.TARGET }}-${{ env.SUBTARGET }}.Linux-x86_64.tar.xz"
+        wget -q "$IB_URL"
+        tar -xf openwrt-imagebuilder-*.tar.xz
+        mv openwrt-imagebuilder-* imagebuilder
+
+    - name: 下载自定义软件包
+      uses: actions/download-artifact@v4
+      with:
+        name: proxypool-packages
+        path: custom-packages
+
+    - name: 准备自定义软件包
+      run: |
+        mkdir -p imagebuilder/packages
+        cp custom-packages/*.ipk imagebuilder/packages/ 2>/dev/null || true
+
+    - name: 生成固件
+      run: |
+        cd imagebuilder
+
+        # 添加自定义仓库
+        echo "src custom file://$(pwd)/packages" >> repositories.conf
+
+        # 基础包 + 自定义包
+        PACKAGES="luci luci-i18n-base-zh-cn"
+        PACKAGES="$PACKAGES xl2tpd ppp ppp-mod-pppol2tp"
+        PACKAGES="$PACKAGES redsocks"
+        PACKAGES="$PACKAGES nftables kmod-nft-tproxy"
+        PACKAGES="$PACKAGES ip-full bash jq curl"
+        PACKAGES="$PACKAGES proxypool-core luci-app-proxypool"
+
+        # 生成固件
+        make image PROFILE="${{ env.DEVICE_PROFILE }}" PACKAGES="$PACKAGES" FILES="../files" || make image PROFILE="${{ env.DEVICE_PROFILE }}" PACKAGES="$PACKAGES"
+
+    - name: 整理输出
+      run: |
+        mkdir -p output
+        cp imagebuilder/bin/targets/${{ env.TARGET }}/${{ env.SUBTARGET }}/*sysupgrade* output/ 2>/dev/null || true
+        cp imagebuilder/bin/targets/${{ env.TARGET }}/${{ env.SUBTARGET }}/*factory* output/ 2>/dev/null || true
+        cp imagebuilder/bin/targets/${{ env.TARGET }}/${{ env.SUBTARGET }}/sha256sums output/ 2>/dev/null || true
+
+        # 显示文件
+        ls -la output/
+
+    - name: 上传固件
+      uses: actions/upload-artifact@v4
+      with:
+        name: OpenWrt_ProxyPool_GL-MT6000_${{ github.run_number }}
+        path: output/*
+
+    - name: 创建 Release
+      if: github.event_name == 'push'
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: v1.0.${{ github.run_number }}
+        name: ProxyPool Firmware v1.0.${{ github.run_number }}
+        files: output/*
+        body: |
+          ## OpenWrt ProxyPool 固件 (GL-MT6000)
+
+          **编译信息:**
+          - OpenWrt: ${{ env.OPENWRT_VERSION }}
+          - 编译时间: ${{ github.event.head_commit.timestamp }}
+
+          **包含功能:**
+          - 60个代理客户端支持 (L2TP/SOCKS5)
+          - 内网设备绑定
+          - 严格网络隔离
+          - LuCI 管理界面
+          - 备份/恢复
+
+          **刷机方式:**
+          - 从官方固件升级: 使用 `*-factory.bin`
+          - 从 OpenWrt 升级: 使用 `*-sysupgrade.bin`
