@@ -173,6 +173,7 @@ jobs:
 
         # 基础包
         PACKAGES="luci luci-i18n-base-zh-cn luci-i18n-firewall-zh-cn"
+        PACKAGES="$PACKAGES luci-lua-runtime luci-compat luci-lib-ipkg"
         PACKAGES="$PACKAGES xl2tpd ppp ppp-mod-pppol2tp kmod-l2tp kmod-pppol2tp"
         PACKAGES="$PACKAGES redsocks"
         PACKAGES="$PACKAGES nftables kmod-nft-tproxy kmod-nft-socket"
