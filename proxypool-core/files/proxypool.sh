@@ -1,14 +1,10 @@
 #!/bin/bash
-# ProxyPool 主控脚本
-# 管理 L2TP 和 SOCKS5 代理客户端
-
-set -e
+# 智联盒子 - 代理池主控脚本
 
 SCRIPT_DIR="/usr/lib/proxypool"
 CONFIG_FILE="/etc/config/proxypool"
 RUN_DIR="/var/run/proxypool"
 LOG_FILE="/var/log/proxypool.log"
-STATUS_FILE="/var/run/proxypool/status.json"
 
 # 日志函数
 log() {
@@ -27,7 +23,6 @@ init_dirs() {
     mkdir -p "$RUN_DIR"
     mkdir -p "/var/run/proxypool/clients"
     mkdir -p "/var/run/proxypool/redsocks"
-    mkdir -p "/var/log/proxypool"
     touch "$LOG_FILE"
 }
 
@@ -41,13 +36,7 @@ get_config() {
 
 # 获取所有客户端
 get_clients() {
-    uci show proxypool | grep "=client" | cut -d'.' -f2 | cut -d'=' -f1
-}
-
-# 获取客户端绑定的IP列表
-get_bind_ips() {
-    local client="$1"
-    uci -q get "proxypool.$client.bind_ip" 2>/dev/null || true
+    uci show proxypool 2>/dev/null | grep "=client" | cut -d'.' -f2 | cut -d'=' -f1
 }
 
 # 检查客户端是否启用
@@ -66,12 +55,11 @@ start_all_clients() {
 
     for client in $clients; do
         if is_client_enabled "$client"; then
-            start_client "$client" &
-            ((count++))
+            start_client "$client"
+            count=$((count + 1))
         fi
     done
 
-    wait
     log_info "Started $count clients"
 }
 
@@ -117,8 +105,8 @@ stop_client() {
             ;;
     esac
 
-    # 移除防火墙规则
-    "$SCRIPT_DIR/firewall.sh" remove_client "$client"
+    # 重建防火墙规则（移除该客户端绑定IP的访问权限）
+    "$SCRIPT_DIR/firewall.sh" rebuild
 }
 
 # 停止所有客户端
@@ -128,10 +116,9 @@ stop_all_clients() {
     local clients=$(get_clients)
 
     for client in $clients; do
-        stop_client "$client" &
+        stop_client "$client"
     done
 
-    wait
     log_info "All clients stopped"
 }
 
@@ -206,7 +193,6 @@ main() {
 
     case "$action" in
         start)
-            # 初始化防火墙
             "$SCRIPT_DIR/firewall.sh" init
             start_all_clients
             ;;

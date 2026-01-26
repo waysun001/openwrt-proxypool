@@ -1,0 +1,411 @@
+<%+header%>
+
+<style>
+.pp-container { max-width: 1200px; margin: 0 auto; }
+.pp-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding: 15px; background: #f8f9fa; border-radius: 8px; }
+.pp-header h2 { margin: 0; color: #333; }
+.pp-stats { display: flex; gap: 20px; }
+.pp-stat { text-align: center; padding: 10px 20px; background: #fff; border-radius: 6px; border: 1px solid #ddd; }
+.pp-stat-value { font-size: 24px; font-weight: bold; }
+.pp-stat-label { font-size: 12px; color: #666; }
+.pp-stat.connected .pp-stat-value { color: #28a745; }
+.pp-stat.disconnected .pp-stat-value { color: #dc3545; }
+
+.pp-toolbar { margin-bottom: 15px; display: flex; gap: 10px; flex-wrap: wrap; }
+.pp-btn { padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
+.pp-btn-primary { background: #007bff; color: #fff; }
+.pp-btn-success { background: #28a745; color: #fff; }
+.pp-btn-danger { background: #dc3545; color: #fff; }
+.pp-btn-secondary { background: #6c757d; color: #fff; }
+.pp-btn:hover { opacity: 0.9; }
+
+.pp-tabs { display: flex; border-bottom: 2px solid #ddd; margin-bottom: 15px; }
+.pp-tab { padding: 10px 20px; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -2px; }
+.pp-tab.active { border-bottom-color: #007bff; color: #007bff; font-weight: bold; }
+
+.pp-table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+.pp-table th, .pp-table td { padding: 12px; text-align: left; border-bottom: 1px solid #eee; }
+.pp-table th { background: #f8f9fa; font-weight: 600; }
+.pp-table tr:hover { background: #f8f9fa; }
+
+.pp-status { display: inline-block; padding: 4px 10px; border-radius: 12px; font-size: 12px; }
+.pp-status.connected { background: #d4edda; color: #155724; }
+.pp-status.disconnected { background: #f8d7da; color: #721c24; }
+.pp-status.disabled { background: #e2e3e5; color: #383d41; }
+
+.pp-actions { display: flex; gap: 5px; }
+.pp-actions button { padding: 4px 8px; font-size: 12px; border: 1px solid #ddd; background: #fff; border-radius: 3px; cursor: pointer; }
+.pp-actions button:hover { background: #f0f0f0; }
+
+.pp-modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; }
+.pp-modal.active { display: flex; justify-content: center; align-items: center; }
+.pp-modal-content { background: #fff; padding: 25px; border-radius: 8px; width: 500px; max-width: 90%; max-height: 90vh; overflow-y: auto; }
+.pp-modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+.pp-modal-header h3 { margin: 0; }
+.pp-modal-close { background: none; border: none; font-size: 24px; cursor: pointer; color: #666; }
+
+.pp-form-group { margin-bottom: 15px; }
+.pp-form-group label { display: block; margin-bottom: 5px; font-weight: 500; }
+.pp-form-group input, .pp-form-group select, .pp-form-group textarea { width: 100%; padding: 8px 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; box-sizing: border-box; }
+.pp-form-group textarea { min-height: 80px; resize: vertical; }
+.pp-form-row { display: flex; gap: 15px; }
+.pp-form-row .pp-form-group { flex: 1; }
+
+.pp-log { background: #1e1e1e; color: #d4d4d4; font-family: monospace; font-size: 12px; padding: 15px; border-radius: 4px; height: 400px; overflow-y: auto; white-space: pre-wrap; }
+
+.pp-panel { display: none; }
+.pp-panel.active { display: block; }
+
+.pp-switch { position: relative; display: inline-block; width: 50px; height: 26px; }
+.pp-switch input { opacity: 0; width: 0; height: 0; }
+.pp-switch-slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background: #ccc; border-radius: 26px; transition: 0.3s; }
+.pp-switch-slider:before { position: absolute; content: ""; height: 20px; width: 20px; left: 3px; bottom: 3px; background: white; border-radius: 50%; transition: 0.3s; }
+.pp-switch input:checked + .pp-switch-slider { background: #28a745; }
+.pp-switch input:checked + .pp-switch-slider:before { transform: translateX(24px); }
+</style>
+
+<div class="pp-container">
+    <div class="pp-header">
+        <h2>智联盒子</h2>
+        <div class="pp-stats">
+            <div class="pp-stat">
+                <div class="pp-stat-value" id="stat-total">-</div>
+                <div class="pp-stat-label">总客户端</div>
+            </div>
+            <div class="pp-stat connected">
+                <div class="pp-stat-value" id="stat-connected">-</div>
+                <div class="pp-stat-label">已连接</div>
+            </div>
+            <div class="pp-stat disconnected">
+                <div class="pp-stat-value" id="stat-disconnected">-</div>
+                <div class="pp-stat-label">未连接</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="pp-tabs">
+        <div class="pp-tab active" onclick="switchTab('clients')">客户端管理</div>
+        <div class="pp-tab" onclick="switchTab('log')">系统日志</div>
+    </div>
+
+    <div id="panel-clients" class="pp-panel active">
+        <div class="pp-toolbar">
+            <button class="pp-btn pp-btn-primary" onclick="showAddModal()">+ 添加客户端</button>
+            <button class="pp-btn pp-btn-success" onclick="reloadConfig()">应用配置</button>
+            <button class="pp-btn pp-btn-secondary" onclick="refreshStatus()">刷新状态</button>
+        </div>
+
+        <table class="pp-table">
+            <thead>
+                <tr>
+                    <th style="width:50px">启用</th>
+                    <th>名称</th>
+                    <th>类型</th>
+                    <th>服务器</th>
+                    <th>绑定IP</th>
+                    <th>状态</th>
+                    <th style="width:220px">操作</th>
+                </tr>
+            </thead>
+            <tbody id="client-list">
+                <tr><td colspan="7" style="text-align:center;padding:40px;color:#666;">加载中...</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <div id="panel-log" class="pp-panel">
+        <div class="pp-toolbar">
+            <select id="log-lines" onchange="refreshLog()">
+                <option value="50">50行</option>
+                <option value="100" selected>100行</option>
+                <option value="200">200行</option>
+                <option value="500">500行</option>
+            </select>
+            <button class="pp-btn pp-btn-secondary" onclick="refreshLog()">刷新</button>
+            <button class="pp-btn pp-btn-danger" onclick="clearLog()">清空日志</button>
+        </div>
+        <div class="pp-log" id="log-content">加载中...</div>
+    </div>
+</div>
+
+<!-- 编辑弹窗 -->
+<div class="pp-modal" id="edit-modal">
+    <div class="pp-modal-content">
+        <div class="pp-modal-header">
+            <h3 id="modal-title">添加客户端</h3>
+            <button class="pp-modal-close" onclick="closeModal()">&times;</button>
+        </div>
+        <form id="client-form" onsubmit="saveClient(event)">
+            <input type="hidden" id="form-id">
+
+            <div class="pp-form-row">
+                <div class="pp-form-group">
+                    <label>名称</label>
+                    <input type="text" id="form-name" required placeholder="客户端名称">
+                </div>
+                <div class="pp-form-group">
+                    <label>类型</label>
+                    <select id="form-type">
+                        <option value="socks5">SOCKS5</option>
+                        <option value="l2tp">L2TP</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="pp-form-row">
+                <div class="pp-form-group">
+                    <label>服务器地址</label>
+                    <input type="text" id="form-server" required placeholder="IP或域名">
+                </div>
+                <div class="pp-form-group">
+                    <label>端口</label>
+                    <input type="number" id="form-port" required placeholder="端口号">
+                </div>
+            </div>
+
+            <div class="pp-form-row">
+                <div class="pp-form-group">
+                    <label>用户名</label>
+                    <input type="text" id="form-username" placeholder="认证用户名">
+                </div>
+                <div class="pp-form-group">
+                    <label>密码</label>
+                    <input type="text" id="form-password" placeholder="认证密码">
+                </div>
+            </div>
+
+            <div class="pp-form-group">
+                <label>绑定IP（每行一个）</label>
+                <textarea id="form-bindip" placeholder="192.168.1.100&#10;192.168.1.101"></textarea>
+            </div>
+
+            <div class="pp-form-group">
+                <label style="display:flex;align-items:center;gap:10px;">
+                    <span>启用</span>
+                    <label class="pp-switch">
+                        <input type="checkbox" id="form-enabled" checked>
+                        <span class="pp-switch-slider"></span>
+                    </label>
+                </label>
+            </div>
+
+            <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:20px;">
+                <button type="button" class="pp-btn pp-btn-secondary" onclick="closeModal()">取消</button>
+                <button type="submit" class="pp-btn pp-btn-primary">保存</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script>
+var apiUrl = '<%=luci.dispatcher.build_url("admin", "services", "proxypool", "api")%>';
+var clientData = [];
+var nextClientId = 1;
+
+function switchTab(tab) {
+    document.querySelectorAll('.pp-tab').forEach(function(t) { t.classList.remove('active'); });
+    document.querySelectorAll('.pp-panel').forEach(function(p) { p.classList.remove('active'); });
+    document.querySelector('.pp-tab[onclick*="' + tab + '"]').classList.add('active');
+    document.getElementById('panel-' + tab).classList.add('active');
+
+    if (tab === 'log') refreshLog();
+}
+
+function refreshStatus() {
+    fetch(apiUrl + '?action=status')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data && data.summary) {
+                document.getElementById('stat-total').textContent = data.summary.total;
+                document.getElementById('stat-connected').textContent = data.summary.connected;
+                document.getElementById('stat-disconnected').textContent = data.summary.disconnected;
+            }
+
+            if (data && data.clients) {
+                clientData = data.clients;
+                renderClients();
+
+                // 计算下一个客户端ID
+                var maxId = 0;
+                data.clients.forEach(function(c) {
+                    var num = parseInt(c.id.replace(/[^0-9]/g, '')) || 0;
+                    if (num > maxId) maxId = num;
+                });
+                nextClientId = maxId + 1;
+            }
+        })
+        .catch(function(e) {
+            console.error('Error:', e);
+        });
+}
+
+function renderClients() {
+    var tbody = document.getElementById('client-list');
+
+    if (clientData.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:40px;color:#666;">暂无客户端，点击上方按钮添加</td></tr>';
+        return;
+    }
+
+    var html = '';
+    clientData.forEach(function(c) {
+        var statusClass = c.status === 'connected' ? 'connected' : (c.enabled ? 'disconnected' : 'disabled');
+        var statusText = c.status === 'connected' ? '已连接' : (c.enabled ? '未连接' : '已禁用');
+        var bindIps = (c.bind_ips && c.bind_ips.length > 0) ? c.bind_ips.join(', ') : '-';
+
+        var connectBtn = c.status === 'connected'
+            ? '<button onclick="stopClient(\'' + c.id + '\')" style="color:#dc3545;">断开</button>'
+            : '<button onclick="startClient(\'' + c.id + '\')" style="color:#28a745;">连接</button>';
+
+        html += '<tr>' +
+            '<td><label class="pp-switch"><input type="checkbox" ' + (c.enabled ? 'checked' : '') + ' onchange="toggleClient(\'' + c.id + '\', this.checked)"><span class="pp-switch-slider"></span></label></td>' +
+            '<td><strong>' + (c.name || c.id) + '</strong></td>' +
+            '<td>' + (c.type || '').toUpperCase() + '</td>' +
+            '<td>' + (c.server || '-') + ':' + (c.port || '-') + '</td>' +
+            '<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;">' + bindIps + '</td>' +
+            '<td><span class="pp-status ' + statusClass + '">' + statusText + '</span></td>' +
+            '<td class="pp-actions">' +
+                connectBtn +
+                '<button onclick="editClient(\'' + c.id + '\')">编辑</button>' +
+                '<button onclick="deleteClient(\'' + c.id + '\')" style="color:#999;">删除</button>' +
+            '</td>' +
+        '</tr>';
+    });
+
+    tbody.innerHTML = html;
+}
+
+function showAddModal() {
+    document.getElementById('modal-title').textContent = '添加客户端';
+    document.getElementById('form-id').value = 's' + nextClientId;
+    document.getElementById('form-name').value = '';
+    document.getElementById('form-type').value = 'socks5';
+    document.getElementById('form-server').value = '';
+    document.getElementById('form-port').value = '';
+    document.getElementById('form-username').value = '';
+    document.getElementById('form-password').value = '';
+    document.getElementById('form-bindip').value = '';
+    document.getElementById('form-enabled').checked = true;
+    document.getElementById('edit-modal').classList.add('active');
+}
+
+function editClient(id) {
+    fetch(apiUrl + '?action=get_client&client=' + id)
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            document.getElementById('modal-title').textContent = '编辑客户端';
+            document.getElementById('form-id').value = data.id;
+            document.getElementById('form-name').value = data.name || '';
+            document.getElementById('form-type').value = data.type || 'socks5';
+            document.getElementById('form-server').value = data.server || '';
+            document.getElementById('form-port').value = data.port || '';
+            document.getElementById('form-username').value = data.username || '';
+            document.getElementById('form-password').value = data.password || '';
+            document.getElementById('form-bindip').value = (data.bind_ip || []).join('\n');
+            document.getElementById('form-enabled').checked = data.enabled === '1';
+            document.getElementById('edit-modal').classList.add('active');
+        });
+}
+
+function closeModal() {
+    document.getElementById('edit-modal').classList.remove('active');
+}
+
+function saveClient(e) {
+    e.preventDefault();
+
+    var id = document.getElementById('form-id').value;
+    var bindIps = document.getElementById('form-bindip').value.split('\n').filter(function(ip) { return ip.trim(); });
+
+    var data = {
+        enabled: document.getElementById('form-enabled').checked ? '1' : '0',
+        name: document.getElementById('form-name').value,
+        type: document.getElementById('form-type').value,
+        server: document.getElementById('form-server').value,
+        port: document.getElementById('form-port').value,
+        username: document.getElementById('form-username').value,
+        password: document.getElementById('form-password').value,
+        bind_ip: bindIps
+    };
+
+    fetch(apiUrl + '?action=save_client&client=' + id + '&data=' + encodeURIComponent(JSON.stringify(data)))
+        .then(function(r) { return r.json(); })
+        .then(function(result) {
+            if (result.success) {
+                closeModal();
+                refreshStatus();
+            }
+        });
+}
+
+function toggleClient(id, enabled) {
+    fetch(apiUrl + '?action=get_client&client=' + id)
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            data.enabled = enabled ? '1' : '0';
+            return fetch(apiUrl + '?action=save_client&client=' + id + '&data=' + encodeURIComponent(JSON.stringify(data)));
+        })
+        .then(function() {
+            refreshStatus();
+        });
+}
+
+function startClient(id) {
+    fetch(apiUrl + '?action=start_client&client=' + id)
+        .then(function() {
+            setTimeout(refreshStatus, 2000);
+        });
+}
+
+function stopClient(id) {
+    fetch(apiUrl + '?action=stop_client&client=' + id)
+        .then(function() {
+            setTimeout(refreshStatus, 2000);
+        });
+}
+
+function deleteClient(id) {
+    if (confirm('确定要删除这个客户端吗？')) {
+        fetch(apiUrl + '?action=delete_client&client=' + id)
+            .then(function() {
+                refreshStatus();
+            });
+    }
+}
+
+function reloadConfig() {
+    fetch(apiUrl + '?action=reload')
+        .then(function(r) { return r.json(); })
+        .then(function(result) {
+            if (result.success) {
+                alert('配置已应用');
+                setTimeout(refreshStatus, 2000);
+            }
+        });
+}
+
+function refreshLog() {
+    var lines = document.getElementById('log-lines').value;
+    fetch(apiUrl + '?action=log&lines=' + lines)
+        .then(function(r) { return r.text(); })
+        .then(function(text) {
+            document.getElementById('log-content').textContent = text || '暂无日志';
+            document.getElementById('log-content').scrollTop = document.getElementById('log-content').scrollHeight;
+        });
+}
+
+function clearLog() {
+    if (confirm('确定要清空日志吗？')) {
+        fetch(apiUrl + '?action=clear_log')
+            .then(function() {
+                refreshLog();
+            });
+    }
+}
+
+// 初始化
+refreshStatus();
+setInterval(refreshStatus, 30000);
+</script>
+
+<%+footer%>

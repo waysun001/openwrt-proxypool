@@ -1,14 +1,10 @@
 #!/bin/bash
-# SOCKS5 客户端管理脚本
-# 使用 redsocks 实现透明代理
-
-set -e
+# 智联盒子 - SOCKS5 客户端管理脚本
 
 RUN_DIR="/var/run/proxypool"
 REDSOCKS_DIR="/var/run/proxypool/redsocks"
 LOG_FILE="/var/log/proxypool.log"
 
-# 基础端口，每个客户端递增
 BASE_TCP_PORT=12300
 BASE_UDP_PORT=12400
 
@@ -21,7 +17,6 @@ log_error() {
     echo "[ERROR] $*" >&2
 }
 
-# 读取UCI配置
 get_config() {
     local section="$1"
     local option="$2"
@@ -29,11 +24,10 @@ get_config() {
     uci -q get "proxypool.$section.$option" || echo "$default"
 }
 
-# 计算客户端端口
 get_client_port() {
     local client="$1"
-    local type="$2"  # tcp or udp
-    local num=$(echo "$client" | sed 's/client_//' | sed 's/^0*//')
+    local type="$2"
+    local num=$(echo "$client" | sed 's/[^0-9]//g')
     [ -z "$num" ] && num=0
 
     if [ "$type" = "tcp" ]; then
@@ -43,14 +37,12 @@ get_client_port() {
     fi
 }
 
-# 生成 redsocks 配置
 generate_redsocks_config() {
     local client="$1"
-    local server=$(get_config "$client" "server" "")
-    local port=$(get_config "$client" "port" "1080")
-    local auth=$(get_config "$client" "auth" "0")
-    local username=$(get_config "$client" "username" "")
-    local password=$(get_config "$client" "password" "")
+    local server=$(get_config "$client" "server" "" | tr -d '[:space:]')
+    local port=$(get_config "$client" "port" "1080" | tr -d '[:space:]')
+    local username=$(get_config "$client" "username" "" | tr -d '[:space:]')
+    local password=$(get_config "$client" "password" "" | tr -d '[:space:]')
 
     if [ -z "$server" ]; then
         log_error "No server configured for $client"
@@ -63,10 +55,9 @@ generate_redsocks_config() {
     local local_tcp_port=$(get_client_port "$client" "tcp")
     local local_udp_port=$(get_client_port "$client" "udp")
 
-    # 认证配置
     local login_line=""
     local password_line=""
-    if [ "$auth" = "1" ] && [ -n "$username" ]; then
+    if [ -n "$username" ]; then
         login_line="login = \"${username}\";"
         password_line="password = \"${password}\";"
     fi
@@ -105,36 +96,37 @@ EOF
     log_info "Generated redsocks config for $client: $config_file"
 }
 
-# 启动 SOCKS5 客户端
 start() {
     local client="$1"
     local name=$(get_config "$client" "name" "$client")
 
     log_info "Starting SOCKS5 client: $name"
 
-    # 生成配置
     generate_redsocks_config "$client" || return 1
 
     local config_file="$REDSOCKS_DIR/${client}.conf"
     local pid_file="$REDSOCKS_DIR/${client}.pid"
 
-    # 启动 redsocks
+    # 先停止已有进程
+    if [ -f "$pid_file" ]; then
+        local old_pid=$(cat "$pid_file")
+        kill "$old_pid" 2>/dev/null || true
+        rm -f "$pid_file"
+    fi
+
     redsocks -c "$config_file" -p "$pid_file"
 
     sleep 1
 
-    # 检查是否启动成功
     if [ -f "$pid_file" ]; then
         local pid=$(cat "$pid_file")
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
             log_info "SOCKS5 client started: $name (PID: $pid)"
 
-            # 保存运行状态
             mkdir -p "$RUN_DIR/clients"
             local config_hash=$(uci show "proxypool.$client" | md5sum | cut -d' ' -f1)
             echo "$config_hash" > "$RUN_DIR/clients/$client"
 
-            # 保存端口信息
             local tcp_port=$(get_client_port "$client" "tcp")
             local udp_port=$(get_client_port "$client" "udp")
             echo "${tcp_port}:${udp_port}" > "$REDSOCKS_DIR/${client}.ports"
@@ -147,7 +139,6 @@ start() {
     return 1
 }
 
-# 停止 SOCKS5 客户端
 stop() {
     local client="$1"
     local name=$(get_config "$client" "name" "$client")
@@ -166,7 +157,6 @@ stop() {
         rm -f "$pid_file"
     fi
 
-    # 清理文件
     rm -f "$REDSOCKS_DIR/${client}.conf"
     rm -f "$REDSOCKS_DIR/${client}.log"
     rm -f "$REDSOCKS_DIR/${client}.ports"
@@ -175,7 +165,6 @@ stop() {
     log_info "SOCKS5 client stopped: $name"
 }
 
-# 获取状态
 status() {
     local client="$1"
     local pid_file="$REDSOCKS_DIR/${client}.pid"
@@ -184,8 +173,6 @@ status() {
         local pid=$(cat "$pid_file")
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
             echo "connected"
-
-            # 返回本地端口信息
             if [ -f "$REDSOCKS_DIR/${client}.ports" ]; then
                 cat "$REDSOCKS_DIR/${client}.ports"
             fi
@@ -196,13 +183,11 @@ status() {
     echo "disconnected"
 }
 
-# 测试连接
 test_connection() {
     local client="$1"
-    local server=$(get_config "$client" "server" "")
-    local port=$(get_config "$client" "port" "1080")
+    local server=$(get_config "$client" "server" "" | tr -d '[:space:]')
+    local port=$(get_config "$client" "port" "1080" | tr -d '[:space:]')
 
-    # 简单的端口测试
     if timeout 5 bash -c "echo >/dev/tcp/${server}/${port}" 2>/dev/null; then
         echo "ok"
     else
@@ -210,14 +195,12 @@ test_connection() {
     fi
 }
 
-# 获取本地端口
 get_local_port() {
     local client="$1"
-    local type="${2:-tcp}"  # tcp or udp
+    local type="${2:-tcp}"
     get_client_port "$client" "$type"
 }
 
-# 主入口
 case "$1" in
     start)
         start "$2"

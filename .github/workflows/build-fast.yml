@@ -1,4 +1,4 @@
-name: Build OpenWrt (Fast - ImageBuilder)
+name: Build 智联盒子 (Fast - ImageBuilder)
 
 on:
   push:
@@ -43,7 +43,6 @@ jobs:
       run: |
         BASE_URL="https://downloads.openwrt.org/releases/${{ env.OPENWRT_VERSION }}/targets/${{ env.TARGET }}/${{ env.SUBTARGET }}"
 
-        # 获取 SDK 文件名
         SDK_FILE=$(curl -s "$BASE_URL/" | grep -oE 'openwrt-sdk-[^"]+\.tar\.xz' | head -1)
 
         if [ -z "$SDK_FILE" ]; then
@@ -57,7 +56,6 @@ jobs:
         echo "Extracting SDK..."
         tar -xf "$SDK_FILE"
 
-        # 重命名目录
         SDK_DIR=$(ls -d openwrt-sdk-* 2>/dev/null | head -1)
         if [ -n "$SDK_DIR" ] && [ -d "$SDK_DIR" ]; then
           mv "$SDK_DIR" sdk
@@ -77,20 +75,16 @@ jobs:
       run: |
         cd sdk
 
-        # 更新 feeds
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-        # 配置
         echo "CONFIG_PACKAGE_proxypool-core=m" >> .config
         echo "CONFIG_PACKAGE_luci-app-proxypool=m" >> .config
         make defconfig
 
-        # 编译
         make package/proxypool/proxypool-core/compile V=s -j$(nproc) || make package/proxypool/proxypool-core/compile V=s -j1
         make package/proxypool/luci-app-proxypool/compile V=s -j$(nproc) || make package/proxypool/luci-app-proxypool/compile V=s -j1
 
-        # 整理输出
         mkdir -p ../packages
         find bin -name "*.ipk" -exec cp {} ../packages/ \; 2>/dev/null || true
 
@@ -123,7 +117,6 @@ jobs:
       run: |
         BASE_URL="https://downloads.openwrt.org/releases/${{ env.OPENWRT_VERSION }}/targets/${{ env.TARGET }}/${{ env.SUBTARGET }}"
 
-        # 获取 ImageBuilder 文件名
         IB_FILE=$(curl -s "$BASE_URL/" | grep -oE 'openwrt-imagebuilder-[^"]+\.tar\.xz' | head -1)
 
         if [ -z "$IB_FILE" ]; then
@@ -137,7 +130,6 @@ jobs:
         echo "Extracting ImageBuilder..."
         tar -xf "$IB_FILE"
 
-        # 重命名目录
         IB_DIR=$(ls -d openwrt-imagebuilder-* 2>/dev/null | head -1)
         if [ -n "$IB_DIR" ] && [ -d "$IB_DIR" ]; then
           mv "$IB_DIR" imagebuilder
@@ -163,7 +155,6 @@ jobs:
           ls -la imagebuilder/packages/
         fi
 
-        # 添加本地仓库到 ImageBuilder
         cd imagebuilder
         echo "src/gz custom file:packages" >> repositories.conf
         cat repositories.conf
@@ -172,22 +163,20 @@ jobs:
       run: |
         cd imagebuilder
 
-        # 查看可用 profile
         echo "=== Available profiles ==="
         make info | grep -i gl-mt6000 || make info | head -50
 
         # 基础包
         PACKAGES="luci luci-i18n-base-zh-cn luci-i18n-firewall-zh-cn"
-        PACKAGES="$PACKAGES luci-lua-runtime luci-compat luci-lib-ipkg"
+        PACKAGES="$PACKAGES luci-lua-runtime luci-compat luci-lib-jsonc"
         PACKAGES="$PACKAGES xl2tpd ppp ppp-mod-pppol2tp kmod-l2tp kmod-pppol2tp"
         PACKAGES="$PACKAGES redsocks"
         PACKAGES="$PACKAGES nftables kmod-nft-tproxy kmod-nft-socket"
-        PACKAGES="$PACKAGES ip-full bash jq curl wget-ssl"
+        PACKAGES="$PACKAGES ip-full bash conntrack"
         PACKAGES="$PACKAGES openssh-sftp-server nano htop"
         # 自定义包
         PACKAGES="$PACKAGES proxypool-core luci-app-proxypool"
 
-        # 生成固件
         make image PROFILE="${{ env.DEVICE_PROFILE }}" PACKAGES="$PACKAGES" FILES="../files" \
           || make image PROFILE="glinet_gl-mt6000" PACKAGES="$PACKAGES" FILES="../files" \
           || make image PROFILE="gl-mt6000" PACKAGES="$PACKAGES" FILES="../files"
@@ -205,7 +194,7 @@ jobs:
     - name: 上传固件
       uses: actions/upload-artifact@v4
       with:
-        name: OpenWrt_ProxyPool_GL-MT6000_${{ github.run_number }}
+        name: 智联盒子_GL-MT6000_${{ github.run_number }}
         path: output/*
         if-no-files-found: error
 
@@ -214,10 +203,10 @@ jobs:
       uses: softprops/action-gh-release@v1
       with:
         tag_name: v1.0.${{ github.run_number }}
-        name: ProxyPool Firmware v1.0.${{ github.run_number }}
+        name: 智联盒子 v1.0.${{ github.run_number }}
         files: output/*
         body: |
-          ## OpenWrt ProxyPool 固件 (GL-MT6000)
+          ## 智联盒子固件 (GL-MT6000)
 
           **编译信息:**
           - OpenWrt: ${{ env.OPENWRT_VERSION }}

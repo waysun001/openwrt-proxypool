@@ -1,6 +1,5 @@
 #!/bin/sh
-# PPP 连接断开后的回调脚本
-# 当 L2TP 连接断开后更新防火墙规则（阻止绑定的IP上网）
+# 智联盒子 - PPP 连接断开回调脚本
 
 INTERFACE="$1"
 TTY_DEVICE="$2"
@@ -15,14 +14,14 @@ log_info() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [ppp-down] $*" >> "$LOG_FILE"
 }
 
-# 检查是否是 proxypool 的接口
-if echo "$INTERFACE" | grep -q "^ppp-client_"; then
+# 检查是否是智联盒子的接口
+if echo "$INTERFACE" | grep -q "^ppp-"; then
     client=$(echo "$INTERFACE" | sed 's/^ppp-//')
 
     log_info "PPP interface down: $INTERFACE (client: $client)"
 
-    # 更新防火墙规则（会阻止绑定的IP上网）
-    /usr/lib/proxypool/firewall.sh update_client "$client" &
+    # 重建防火墙规则（会阻止绑定的IP上网）
+    /usr/lib/proxypool/firewall.sh rebuild &
 fi
 
 exit 0

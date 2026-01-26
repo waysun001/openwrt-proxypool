@@ -4,7 +4,7 @@ PKG_NAME:=proxypool-core
 PKG_VERSION:=1.0.0
 PKG_RELEASE:=1
 
-PKG_MAINTAINER:=ProxyPool <proxypool@local>
+PKG_MAINTAINER:=智联盒子
 PKG_LICENSE:=MIT
 
 include $(INCLUDE_DIR)/package.mk
@@ -12,14 +12,14 @@ include $(INCLUDE_DIR)/package.mk
 define Package/proxypool-core
   SECTION:=net
   CATEGORY:=Network
-  TITLE:=ProxyPool Core Service
-  DEPENDS:=+xl2tpd +ppp +ppp-mod-pppol2tp +redsocks +nftables +ip-full +bash +jq
+  TITLE:=智联盒子核心服务
+  DEPENDS:=+xl2tpd +ppp +ppp-mod-pppol2tp +redsocks +nftables +ip-full +bash +conntrack
   PKGARCH:=all
 endef
 
 define Package/proxypool-core/description
-  Core service for ProxyPool - Multi-proxy client management system
-  Supports L2TP and SOCKS5 protocols with strict network isolation
+  智联盒子核心服务 - 多代理客户端管理系统
+  支持 L2TP 和 SOCKS5 协议，严格网络隔离
 endef
 
 define Package/proxypool-core/conffiles
@@ -43,12 +43,6 @@ define Package/proxypool-core/install
 	$(INSTALL_BIN) ./files/firewall.sh $(1)/usr/lib/proxypool/firewall.sh
 	$(INSTALL_BIN) ./files/status.sh $(1)/usr/lib/proxypool/status.sh
 	$(INSTALL_BIN) ./files/backup.sh $(1)/usr/lib/proxypool/backup.sh
-
-	$(INSTALL_DIR) $(1)/etc/uci-defaults
-	$(INSTALL_BIN) ./files/99-proxypool $(1)/etc/uci-defaults/99-proxypool
-
-	$(INSTALL_DIR) $(1)/usr/share/proxypool
-	$(INSTALL_DATA) ./files/firewall.nft $(1)/usr/share/proxypool/firewall.nft
 
 	$(INSTALL_DIR) $(1)/etc/ppp/ip-up.d
 	$(INSTALL_DIR) $(1)/etc/ppp/ip-down.d

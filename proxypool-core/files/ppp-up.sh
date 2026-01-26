@@ -1,6 +1,5 @@
 #!/bin/sh
-# PPP 连接建立后的回调脚本
-# 当 L2TP 连接建立后更新防火墙规则
+# 智联盒子 - PPP 连接建立回调脚本
 
 INTERFACE="$1"
 TTY_DEVICE="$2"
@@ -15,14 +14,14 @@ log_info() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [ppp-up] $*" >> "$LOG_FILE"
 }
 
-# 检查是否是 proxypool 的接口
-if echo "$INTERFACE" | grep -q "^ppp-client_"; then
+# 检查是否是智联盒子的接口
+if echo "$INTERFACE" | grep -q "^ppp-"; then
     client=$(echo "$INTERFACE" | sed 's/^ppp-//')
 
     log_info "PPP interface up: $INTERFACE (client: $client, IP: $LOCAL_IP)"
 
     # 更新防火墙规则
-    /usr/lib/proxypool/firewall.sh update_client "$client" &
+    /usr/lib/proxypool/firewall.sh rebuild &
 fi
 
 exit 0
