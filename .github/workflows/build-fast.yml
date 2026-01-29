@@ -75,6 +75,9 @@ jobs:
       run: |
         cd sdk
 
+        # 移除 SDK 中不可用的 telephony feed，避免索引失败
+        sed -i '/telephony/d' feeds.conf.default
+
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
