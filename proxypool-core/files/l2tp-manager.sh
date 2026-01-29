@@ -8,8 +8,8 @@ L2TP_RUN_DIR="/var/run/proxypool/l2tp"
 PPP_DIR="/etc/ppp/peers"
 LOG_FILE="/var/log/proxypool.log"
 
-# 每个客户端使用独立的随机源端口（非1701）
-BASE_PORT=21701
+# 端口设置（0 = 系统自动分配随机端口）
+LOCAL_PORT=0
 
 log_info() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [l2tp] $*" >> "$LOG_FILE"
@@ -27,17 +27,11 @@ get_config() {
     uci -q get "proxypool.$section.$option" || echo "$default"
 }
 
-# 从客户端 ID 中提取编号，用于分配端口
+# 从客户端 ID 中提取编号
 get_client_num() {
     local num=$(echo "$1" | sed 's/[^0-9]//g')
     [ -z "$num" ] && num=0
     echo "$num"
-}
-
-# 获取客户端独立的源端口
-get_client_port() {
-    local num=$(get_client_num "$1")
-    echo $((BASE_PORT + num))
 }
 
 # 确保系统 xl2tpd 已禁用（避免占用 1701 端口）
@@ -71,7 +65,6 @@ generate_xl2tpd_config() {
     mkdir -p "$client_dir"
 
     local lac_name="lac_${client}"
-    local local_port=$(get_client_port "$client")
 
     # 如果端口不是默认的1701，则附加到服务器地址
     local lns_addr="${server}"
@@ -81,7 +74,7 @@ generate_xl2tpd_config() {
 
     cat > "$client_dir/xl2tpd.conf" << EOF
 [global]
-port = ${local_port}
+port = ${LOCAL_PORT}
 access control = no
 auth file = /etc/ppp/chap-secrets
 
@@ -101,7 +94,7 @@ length bit = yes
 flow bit = yes
 EOF
 
-    log_info "Generated xl2tpd config for $client (port: $local_port)"
+    log_info "Generated xl2tpd config for $client"
 }
 
 # 生成 PPP 配置和 chap-secrets
@@ -136,8 +129,8 @@ usepeerdns
 persist
 maxfail 0
 holdoff 10
-lcp-echo-interval 10
-lcp-echo-failure 6
+lcp-echo-interval 30
+lcp-echo-failure 10
 nodefaultroute
 mtu 1200
 mru 1200
@@ -164,12 +157,22 @@ start() {
     # 确保系统 xl2tpd 已禁用
     ensure_system_xl2tpd_disabled
 
-    # 如果该客户端已有进程在运行，先停止
+    # 如果该客户端已连接，跳过（防止重复点击导致断线）
+    local ppp_iface="ppp-${client}"
+    if ip link show "$ppp_iface" &>/dev/null; then
+        local existing_ip=$(ip -4 addr show "$ppp_iface" 2>/dev/null | grep -o 'inet [0-9.]*' | cut -d' ' -f2)
+        if [ -n "$existing_ip" ]; then
+            log_info "Client $name already connected (IP: $existing_ip), skipping"
+            return 0
+        fi
+    fi
+
+    # 如果有旧的 xl2tpd 进程在运行（但未连接），先停止
     local pid_file="$client_dir/xl2tpd.pid"
     if [ -f "$pid_file" ]; then
         local old_pid=$(cat "$pid_file")
         if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
-            log_info "Stopping existing xl2tpd for $client (PID: $old_pid)"
+            log_info "Stopping stale xl2tpd for $client (PID: $old_pid)"
             kill "$old_pid" 2>/dev/null
             sleep 2
             kill -9 "$old_pid" 2>/dev/null || true
@@ -187,9 +190,8 @@ start() {
     # 清理旧的控制文件
     rm -f "$control_file"
 
-    # 启动独立的 xl2tpd 实例
-    xl2tpd -c "$config_file" -C "$control_file" -p "$pid_file" -D &
-    local xl2tpd_pid=$!
+    # 启动独立的 xl2tpd 实例（后台守护模式）
+    xl2tpd -c "$config_file" -C "$control_file" -p "$pid_file"
 
     # 等待控制文件创建
     local wait_count=0
@@ -200,7 +202,8 @@ start() {
 
     if [ ! -e "$control_file" ]; then
         log_error "Control file not created for $client"
-        kill "$xl2tpd_pid" 2>/dev/null || true
+        # 尝试杀掉进程
+        [ -f "$pid_file" ] && kill "$(cat "$pid_file")" 2>/dev/null
         return 1
     fi
 
@@ -215,7 +218,9 @@ start() {
     local config_hash=$(uci show "proxypool.$client" | md5sum | cut -d' ' -f1)
     echo "$config_hash" > "$RUN_DIR/clients/$client"
 
-    log_info "L2TP client started: $name (PID: $xl2tpd_pid)"
+    local running_pid=""
+    [ -f "$pid_file" ] && running_pid=$(cat "$pid_file")
+    log_info "L2TP client started: $name (PID: $running_pid)"
 }
 
 stop() {

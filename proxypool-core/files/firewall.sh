@@ -31,6 +31,45 @@ get_client_port() {
     fi
 }
 
+# 从客户端 ID 中提取编号，用于路由表 ID
+get_client_num() {
+    local num=$(echo "$1" | sed 's/[^0-9]//g')
+    [ -z "$num" ] && num=0
+    echo "$num"
+}
+
+# 清理所有策略路由规则（路由表 100-199）
+cleanup_policy_routing() {
+    local i
+    for i in $(seq 100 199); do
+        while ip rule del table "$i" 2>/dev/null; do :; done
+        ip route flush table "$i" 2>/dev/null || true
+    done
+}
+
+# 为 L2TP 客户端设置策略路由
+setup_l2tp_routing() {
+    local client="$1"
+    local num=$(get_client_num "$client")
+    local table_id=$((100 + num))
+    local ppp_iface="ppp-${client}"
+
+    # 检查 PPP 接口是否存在
+    if ! ip link show "$ppp_iface" &>/dev/null; then
+        return 1
+    fi
+
+    # 添加默认路由到路由表
+    ip route add default dev "$ppp_iface" table "$table_id" 2>/dev/null || true
+
+    # 为每个绑定 IP 添加策略路由规则
+    local bind_ips=$(uci -q get "proxypool.$client.bind_ip" 2>/dev/null || true)
+    for ip in $bind_ips; do
+        ip rule add from "$ip" table "$table_id" priority "$table_id" 2>/dev/null || true
+        log_info "Policy route: $ip -> $ppp_iface (table $table_id)"
+    done
+}
+
 is_client_online() {
     local client="$1"
     local type=$(get_config "$client" "type" "")
@@ -114,8 +153,12 @@ init() {
     # 创建 forward 链 - 优先级 -1，在 fw4 之前处理
     nft add chain inet proxypool forward { type filter hook forward priority -1 \; }
 
-    # 创建 NAT prerouting 链
+    # 创建 NAT prerouting 链（SOCKS5 重定向）
     nft add chain ip proxypool_nat prerouting { type nat hook prerouting priority -100 \; }
+
+    # 创建 NAT postrouting 链（L2TP masquerade）
+    nft add chain ip proxypool_nat postrouting { type nat hook postrouting priority 100 \; }
+    nft add rule ip proxypool_nat postrouting oifname "ppp-*" masquerade
 
     # 基础规则：允许内网互访
     nft add rule inet proxypool forward ip saddr 192.168.0.0/16 ip daddr 192.168.0.0/16 accept
@@ -137,6 +180,7 @@ cleanup() {
     log_info "Cleaning up firewall..."
     nft delete table inet proxypool 2>/dev/null || true
     nft delete table ip proxypool_nat 2>/dev/null || true
+    cleanup_policy_routing
     log_info "Firewall cleaned up"
 }
 
@@ -155,6 +199,13 @@ rebuild() {
     # 创建链
     nft add chain inet proxypool forward { type filter hook forward priority -1 \; }
     nft add chain ip proxypool_nat prerouting { type nat hook prerouting priority -100 \; }
+    nft add chain ip proxypool_nat postrouting { type nat hook postrouting priority 100 \; }
+
+    # L2TP PPP 接口流量 masquerade（将 LAN IP 伪装为 PPP 分配的 IP）
+    nft add rule ip proxypool_nat postrouting oifname "ppp-*" masquerade
+
+    # 清理旧的策略路由
+    cleanup_policy_routing
 
     # 收集所有允许的 IP 和 NAT 规则
     local data=$(collect_allowed_ips)
@@ -188,7 +239,17 @@ rebuild() {
     nft add rule inet proxypool forward ip saddr 192.168.0.0/16 ip daddr != { 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12 } drop
     nft add rule inet proxypool forward ip saddr 10.0.0.0/8 ip daddr != { 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12 } drop
 
-    # 清除 conntrack 缓存
+    # 设置 L2TP 策略路由（将绑定 IP 的流量路由到对应 PPP 接口）
+    local all_clients=$(get_clients)
+    for client in $all_clients; do
+        local c_enabled=$(get_config "$client" "enabled" "0")
+        local c_type=$(get_config "$client" "type" "")
+        if [ "$c_enabled" = "1" ] && [ "$c_type" = "l2tp" ] && is_client_online "$client"; then
+            setup_l2tp_routing "$client"
+        fi
+    done
+
+    # 清除 conntrack 缓存（确保旧连接使用新路由）
     conntrack -F 2>/dev/null || true
 
     log_info "Firewall rules rebuilt"

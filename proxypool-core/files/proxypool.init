@@ -13,6 +13,19 @@ start() {
 
     [ "$enabled" = "0" ] && return 0
 
+    # 禁用系统 xl2tpd，避免占用 1701 端口导致独立实例冲突
+    if /etc/init.d/xl2tpd enabled 2>/dev/null; then
+        /etc/init.d/xl2tpd stop 2>/dev/null
+        /etc/init.d/xl2tpd disable 2>/dev/null
+    fi
+    # 确保系统 xl2tpd 进程已停止
+    local sys_pid
+    sys_pid=$(cat /var/run/xl2tpd.pid 2>/dev/null)
+    if [ -n "$sys_pid" ] && kill -0 "$sys_pid" 2>/dev/null; then
+        kill "$sys_pid" 2>/dev/null
+        sleep 1
+    fi
+
     echo "Starting 智联盒子..."
     $PROG start
 }

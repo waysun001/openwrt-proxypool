@@ -8,6 +8,12 @@ set ucitrack.@proxypool[-1].init=proxypool
 commit ucitrack
 EOF
 
+# 禁用系统 xl2tpd 自启动（智联盒子使用独立 xl2tpd 实例）
+if [ -x /etc/init.d/xl2tpd ]; then
+    /etc/init.d/xl2tpd stop 2>/dev/null
+    /etc/init.d/xl2tpd disable 2>/dev/null
+fi
+
 # 清理缓存
 rm -f /tmp/luci-indexcache
 rm -rf /tmp/luci-modulecache
