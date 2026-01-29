@@ -36,12 +36,16 @@ get_client_status() {
     local status="offline"
     local rx=0
     local tx=0
+    local ip_addr=""
 
     if [ "$enabled" = "1" ]; then
         case "$type" in
             l2tp)
                 local result=$(/usr/lib/proxypool/l2tp-manager.sh status "$client" 2>/dev/null || echo "disconnected")
                 status=$(echo "$result" | head -1)
+                if [ "$status" = "connected" ]; then
+                    ip_addr=$(echo "$result" | sed -n '2p')
+                fi
                 ;;
             socks5)
                 local result=$(/usr/lib/proxypool/socks5-manager.sh status "$client" 2>/dev/null || echo "disconnected")
@@ -53,6 +57,17 @@ get_client_status() {
         esac
     else
         status="disabled"
+    fi
+
+    # 读取接口流量统计
+    local iface=""
+    case "$type" in
+        l2tp)   iface="ppp-${client}" ;;
+    esac
+
+    if [ -n "$iface" ] && [ -d "/sys/class/net/$iface/statistics" ]; then
+        rx=$(cat "/sys/class/net/$iface/statistics/rx_bytes" 2>/dev/null || echo 0)
+        tx=$(cat "/sys/class/net/$iface/statistics/tx_bytes" 2>/dev/null || echo 0)
     fi
 
     local bind_ips_json="[]"
@@ -69,6 +84,7 @@ get_client_status() {
   "port": "$port",
   "enabled": $enabled,
   "status": "$status",
+  "ip_addr": "$ip_addr",
   "bind_ips": $bind_ips_json,
   "rx_bytes": $rx,
   "tx_bytes": $tx,

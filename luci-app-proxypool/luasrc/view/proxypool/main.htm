@@ -104,11 +104,12 @@
                     <th>服务器</th>
                     <th>绑定IP</th>
                     <th>状态</th>
+                    <th>流量 ↓/↑</th>
                     <th style="width:220px">操作</th>
                 </tr>
             </thead>
             <tbody id="client-list">
-                <tr><td colspan="7" style="text-align:center;padding:40px;color:#666;">加载中...</td></tr>
+                <tr><td colspan="8" style="text-align:center;padding:40px;color:#666;">加载中...</td></tr>
             </tbody>
         </table>
     </div>
@@ -201,6 +202,7 @@
 var apiUrl = '<%=luci.dispatcher.build_url("admin", "services", "proxypool", "api")%>';
 var clientData = [];
 var nextClientId = 1;
+var pendingActions = {};
 
 function switchTab(tab) {
     document.querySelectorAll('.pp-tab').forEach(function(t) { t.classList.remove('active'); });
@@ -211,59 +213,54 @@ function switchTab(tab) {
     if (tab === 'log') refreshLog();
 }
 
-function refreshStatus() {
-    fetch(apiUrl + '?action=status')
-        .then(function(r) { return r.json(); })
-        .then(function(data) {
-            if (data && data.summary) {
-                document.getElementById('stat-total').textContent = data.summary.total;
-                document.getElementById('stat-connected').textContent = data.summary.connected;
-                document.getElementById('stat-disconnected').textContent = data.summary.disconnected;
-            }
-
-            if (data && data.clients) {
-                clientData = data.clients;
-                renderClients();
-
-                // 计算下一个客户端ID
-                var maxId = 0;
-                data.clients.forEach(function(c) {
-                    var num = parseInt(c.id.replace(/[^0-9]/g, '')) || 0;
-                    if (num > maxId) maxId = num;
-                });
-                nextClientId = maxId + 1;
-            }
-        })
-        .catch(function(e) {
-            console.error('Error:', e);
-        });
-}
+function refreshStatus() { refreshStatusFull(); }
 
 function renderClients() {
     var tbody = document.getElementById('client-list');
 
     if (clientData.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:40px;color:#666;">暂无客户端，点击上方按钮添加</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:40px;color:#666;">暂无客户端，点击上方按钮添加</td></tr>';
         return;
     }
 
     var html = '';
     clientData.forEach(function(c) {
-        var statusClass = c.status === 'connected' ? 'connected' : (c.enabled ? 'disconnected' : 'disabled');
-        var statusText = c.status === 'connected' ? '已连接' : (c.enabled ? '未连接' : '已禁用');
+        var statusClass = c.status === 'connected' ? 'connected' : (c.status === 'connecting' ? 'disconnected' : (c.enabled ? 'disconnected' : 'disabled'));
+        var statusText = c.status === 'connected' ? '已连接' : (c.status === 'connecting' ? '连接中...' : (c.enabled ? '未连接' : '已禁用'));
         var bindIps = (c.bind_ips && c.bind_ips.length > 0) ? c.bind_ips.join(', ') : '-';
 
-        var connectBtn = c.status === 'connected'
-            ? '<button onclick="stopClient(\'' + c.id + '\')" style="color:#dc3545;">断开</button>'
-            : '<button onclick="startClient(\'' + c.id + '\')" style="color:#28a745;">连接</button>';
+        // 显示分配的 IP
+        if (c.status === 'connected' && c.ip_addr) {
+            statusText = '已连接<br><small style="color:#666;">' + c.ip_addr + '</small>';
+        }
+
+        // 流量显示
+        var trafficText = '-';
+        if (c.status === 'connected' && (c.rx_bytes > 0 || c.tx_bytes > 0)) {
+            trafficText = c.rx_human + ' / ' + c.tx_human;
+        }
+
+        // 连接/断开按钮（带防重复点击）
+        var btnId = 'btn-' + c.id;
+        var connectBtn = '';
+        if (pendingActions[c.id]) {
+            connectBtn = '<button disabled style="color:#999;">处理中...</button>';
+        } else if (c.status === 'connected') {
+            connectBtn = '<button id="' + btnId + '" onclick="stopClient(\'' + c.id + '\')" style="color:#dc3545;">断开</button>';
+        } else if (c.status === 'connecting') {
+            connectBtn = '<button disabled style="color:#999;">连接中...</button>';
+        } else {
+            connectBtn = '<button id="' + btnId + '" onclick="startClient(\'' + c.id + '\')" style="color:#28a745;">连接</button>';
+        }
 
         html += '<tr>' +
             '<td><label class="pp-switch"><input type="checkbox" ' + (c.enabled ? 'checked' : '') + ' onchange="toggleClient(\'' + c.id + '\', this.checked)"><span class="pp-switch-slider"></span></label></td>' +
             '<td><strong>' + (c.name || c.id) + '</strong></td>' +
             '<td>' + (c.type || '').toUpperCase() + '</td>' +
             '<td>' + (c.server || '-') + ':' + (c.port || '-') + '</td>' +
-            '<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;">' + bindIps + '</td>' +
+            '<td style="max-width:200px;font-size:12px;line-height:1.6;">' + getBindIpHtml(c.bind_ips) + '</td>' +
             '<td><span class="pp-status ' + statusClass + '">' + statusText + '</span></td>' +
+            '<td style="font-size:12px;color:#666;white-space:nowrap;">' + trafficText + '</td>' +
             '<td class="pp-actions">' +
                 connectBtn +
                 '<button onclick="editClient(\'' + c.id + '\')">编辑</button>' +
@@ -333,7 +330,7 @@ function saveClient(e) {
         .then(function(result) {
             if (result.success) {
                 closeModal();
-                refreshStatus();
+                refreshStatusFull();
             }
         });
 }
@@ -346,21 +343,43 @@ function toggleClient(id, enabled) {
             return fetch(apiUrl + '?action=save_client&client=' + id + '&data=' + encodeURIComponent(JSON.stringify(data)));
         })
         .then(function() {
-            refreshStatus();
+            refreshStatusFull();
         });
 }
 
 function startClient(id) {
+    if (pendingActions[id]) return;
+    pendingActions[id] = true;
+    renderClients();
+
     fetch(apiUrl + '?action=start_client&client=' + id)
         .then(function() {
-            setTimeout(refreshStatus, 2000);
+            setTimeout(function() {
+                delete pendingActions[id];
+                refreshStatusFull();
+            }, 5000);
+        })
+        .catch(function() {
+            delete pendingActions[id];
+            renderClients();
         });
 }
 
 function stopClient(id) {
+    if (pendingActions[id]) return;
+    pendingActions[id] = true;
+    renderClients();
+
     fetch(apiUrl + '?action=stop_client&client=' + id)
         .then(function() {
-            setTimeout(refreshStatus, 2000);
+            setTimeout(function() {
+                delete pendingActions[id];
+                refreshStatusFull();
+            }, 3000);
+        })
+        .catch(function() {
+            delete pendingActions[id];
+            renderClients();
         });
 }
 
@@ -368,7 +387,7 @@ function deleteClient(id) {
     if (confirm('确定要删除这个客户端吗？')) {
         fetch(apiUrl + '?action=delete_client&client=' + id)
             .then(function() {
-                refreshStatus();
+                refreshStatusFull();
             });
     }
 }
@@ -379,7 +398,7 @@ function reloadConfig() {
         .then(function(result) {
             if (result.success) {
                 alert('配置已应用');
-                setTimeout(refreshStatus, 2000);
+                setTimeout(refreshStatusFull, 2000);
             }
         });
 }
@@ -403,9 +422,67 @@ function clearLog() {
     }
 }
 
+// 绑定 IP 在线状态（从 devices 数据中获取）
+var deviceData = [];
+
+function refreshStatusFull() {
+    fetch(apiUrl + '?action=status')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data && data.summary) {
+                document.getElementById('stat-total').textContent = data.summary.total;
+                document.getElementById('stat-connected').textContent = data.summary.connected;
+                document.getElementById('stat-disconnected').textContent = data.summary.disconnected;
+            }
+
+            if (data && data.devices) {
+                deviceData = data.devices;
+            }
+
+            if (data && data.clients) {
+                clientData = data.clients;
+                renderClients();
+
+                var maxId = 0;
+                data.clients.forEach(function(c) {
+                    var num = parseInt(c.id.replace(/[^0-9]/g, '')) || 0;
+                    if (num > maxId) maxId = num;
+                });
+                nextClientId = maxId + 1;
+            }
+        })
+        .catch(function(e) {
+            console.error('Error:', e);
+        });
+}
+
+function getBindIpHtml(bindIps) {
+    if (!bindIps || bindIps.length === 0) return '-';
+
+    var onlineCount = 0;
+    var totalCount = bindIps.length;
+    var details = [];
+
+    bindIps.forEach(function(ip) {
+        var online = false;
+        deviceData.forEach(function(d) {
+            if (d.ip === ip && d.online) online = true;
+        });
+        if (online) {
+            onlineCount++;
+            details.push('<span style="color:#28a745;" title="在线">' + ip + ' ●</span>');
+        } else {
+            details.push('<span style="color:#dc3545;" title="离线">' + ip + ' ○</span>');
+        }
+    });
+
+    var summary = '<small style="color:#666;">' + onlineCount + '/' + totalCount + ' 在线</small>';
+    return details.join('<br>') + '<br>' + summary;
+}
+
 // 初始化
-refreshStatus();
-setInterval(refreshStatus, 30000);
+refreshStatusFull();
+setInterval(refreshStatusFull, 10000);
 </script>
 
 <%+footer%>

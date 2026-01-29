@@ -39,10 +39,10 @@ get_client_port() {
 
 generate_redsocks_config() {
     local client="$1"
-    local server=$(get_config "$client" "server" "" | tr -d '[:space:]')
-    local port=$(get_config "$client" "port" "1080" | tr -d '[:space:]')
-    local username=$(get_config "$client" "username" "" | tr -d '[:space:]')
-    local password=$(get_config "$client" "password" "" | tr -d '[:space:]')
+    local server=$(get_config "$client" "server" "" | tr -d ' \t\n\r')
+    local port=$(get_config "$client" "port" "1080" | tr -d ' \t\n\r')
+    local username=$(get_config "$client" "username" "" | tr -d ' \t\n\r')
+    local password=$(get_config "$client" "password" "" | tr -d ' \t\n\r')
 
     if [ -z "$server" ]; then
         log_error "No server configured for $client"
@@ -185,8 +185,8 @@ status() {
 
 test_connection() {
     local client="$1"
-    local server=$(get_config "$client" "server" "" | tr -d '[:space:]')
-    local port=$(get_config "$client" "port" "1080" | tr -d '[:space:]')
+    local server=$(get_config "$client" "server" "" | tr -d ' \t\n\r')
+    local port=$(get_config "$client" "port" "1080" | tr -d ' \t\n\r')
 
     if timeout 5 bash -c "echo >/dev/tcp/${server}/${port}" 2>/dev/null; then
         echo "ok"
