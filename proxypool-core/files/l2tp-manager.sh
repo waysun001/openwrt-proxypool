@@ -157,7 +157,7 @@ start() {
     # 确保系统 xl2tpd 已禁用
     ensure_system_xl2tpd_disabled
 
-    # 如果该客户端已连接，跳过（防止重复点击导致断线）
+    # 防重复：如果 PPP 接口已连接，直接跳过
     local ppp_iface="ppp-${client}"
     if ip link show "$ppp_iface" &>/dev/null; then
         local existing_ip=$(ip -4 addr show "$ppp_iface" 2>/dev/null | grep -o 'inet [0-9.]*' | cut -d' ' -f2)
@@ -167,17 +167,32 @@ start() {
         fi
     fi
 
-    # 如果有旧的 xl2tpd 进程在运行（但未连接），先停止
+    # 防重复：如果 xl2tpd 进程已在运行（正在连接中），直接跳过
+    # 只有 stop() 才有权杀进程，start() 绝不杀正在运行的进程
     local pid_file="$client_dir/xl2tpd.pid"
     if [ -f "$pid_file" ]; then
         local old_pid=$(cat "$pid_file")
         if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
-            log_info "Stopping stale xl2tpd for $client (PID: $old_pid)"
-            kill "$old_pid" 2>/dev/null
-            sleep 2
-            kill -9 "$old_pid" 2>/dev/null || true
+            log_info "xl2tpd already running for $client (PID: $old_pid), skipping"
+            return 0
         fi
+        # 进程已死，清理残留 pid 文件
         rm -f "$pid_file"
+    fi
+
+    # 启动前清理：如果存在残留的 PPP 接口（无对应 xl2tpd 进程），先删除
+    if ip link show "$ppp_iface" &>/dev/null; then
+        log_info "Cleaning stale PPP interface: $ppp_iface"
+        ip link delete "$ppp_iface" 2>/dev/null || true
+    fi
+
+    # 清理残留的 pppd 进程（匹配 ifname）
+    local stale_pppd=$(ps w 2>/dev/null | grep "pppd" | grep "ifname $ppp_iface" | grep -v grep | awk '{print $1}')
+    if [ -n "$stale_pppd" ]; then
+        log_info "Killing stale pppd for $ppp_iface: $stale_pppd"
+        echo "$stale_pppd" | xargs kill 2>/dev/null || true
+        sleep 1
+        echo "$stale_pppd" | xargs kill -9 2>/dev/null || true
     fi
 
     # 生成配置
@@ -251,10 +266,33 @@ stop() {
         rm -f "$pid_file"
     fi
 
-    # 关闭 PPP 接口
+    # 杀死该客户端关联的 pppd 进程（xl2tpd 死后 pppd 可能残留）
     local ppp_iface="ppp-${client}"
+    local pppd_pids=$(ps w 2>/dev/null | grep "pppd" | grep "ifname $ppp_iface" | grep -v grep | awk '{print $1}')
+    if [ -n "$pppd_pids" ]; then
+        log_info "Killing pppd processes for $ppp_iface: $pppd_pids"
+        echo "$pppd_pids" | xargs kill 2>/dev/null || true
+        sleep 1
+        echo "$pppd_pids" | xargs kill -9 2>/dev/null || true
+    fi
+
+    # 强制删除 PPP 接口（确保内核层面完全清理）
     if ip link show "$ppp_iface" &>/dev/null; then
-        ip link set "$ppp_iface" down 2>/dev/null || true
+        ip link delete "$ppp_iface" 2>/dev/null || true
+        log_info "Deleted PPP interface: $ppp_iface"
+    fi
+
+    # 清理内核 L2TP 隧道（防止残留的内核 l2tp session 阻碍重连）
+    if command -v ip l2tp >/dev/null 2>&1; then
+        local tunnel_ids=$(ip l2tp show tunnel 2>/dev/null | grep -v "^$" | awk '/Tunnel/{print $2}' | tr -d ',')
+        for tid in $tunnel_ids; do
+            # 删除隧道下的所有 session，再删除隧道
+            local session_ids=$(ip l2tp show session 2>/dev/null | grep "tunnel $tid" | awk '{print $2}' | tr -d ',')
+            for sid in $session_ids; do
+                ip l2tp del session tunnel_id "$tid" session_id "$sid" 2>/dev/null || true
+            done
+            ip l2tp del tunnel tunnel_id "$tid" 2>/dev/null || true
+        done
     fi
 
     # 清理该客户端的运行文件（不影响其他客户端）

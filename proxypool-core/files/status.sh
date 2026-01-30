@@ -41,14 +41,14 @@ get_client_status() {
     if [ "$enabled" = "1" ]; then
         case "$type" in
             l2tp)
-                local result=$(/usr/lib/proxypool/l2tp-manager.sh status "$client" 2>/dev/null || echo "disconnected")
+                local result=$(timeout 5 /usr/lib/proxypool/l2tp-manager.sh status "$client" 2>/dev/null || echo "disconnected")
                 status=$(echo "$result" | head -1)
                 if [ "$status" = "connected" ]; then
                     ip_addr=$(echo "$result" | sed -n '2p')
                 fi
                 ;;
             socks5)
-                local result=$(/usr/lib/proxypool/socks5-manager.sh status "$client" 2>/dev/null || echo "disconnected")
+                local result=$(timeout 5 /usr/lib/proxypool/socks5-manager.sh status "$client" 2>/dev/null || echo "disconnected")
                 status=$(echo "$result" | head -1)
                 ;;
             *)

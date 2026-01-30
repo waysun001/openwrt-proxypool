@@ -301,7 +301,8 @@ function editClient(id) {
             document.getElementById('form-bindip').value = (data.bind_ip || []).join('\n');
             document.getElementById('form-enabled').checked = data.enabled === '1';
             document.getElementById('edit-modal').classList.add('active');
-        });
+        })
+        .catch(function(e) { console.error('Edit fetch error:', e); });
 }
 
 function closeModal() {
@@ -332,18 +333,25 @@ function saveClient(e) {
                 closeModal();
                 refreshStatusFull();
             }
-        });
+        })
+        .catch(function(e) { console.error('Save error:', e); });
 }
 
 function toggleClient(id, enabled) {
-    fetch(apiUrl + '?action=get_client&client=' + id)
+    if (pendingActions[id]) return;
+    pendingActions[id] = true;
+    renderClients();
+
+    fetch(apiUrl + '?action=toggle_client&client=' + id + '&enabled=' + (enabled ? '1' : '0'))
         .then(function(r) { return r.json(); })
-        .then(function(data) {
-            data.enabled = enabled ? '1' : '0';
-            return fetch(apiUrl + '?action=save_client&client=' + id + '&data=' + encodeURIComponent(JSON.stringify(data)));
-        })
         .then(function() {
+            delete pendingActions[id];
             refreshStatusFull();
+        })
+        .catch(function(e) {
+            console.error('Toggle error:', e);
+            delete pendingActions[id];
+            renderClients();
         });
 }
 
@@ -384,10 +392,20 @@ function stopClient(id) {
 }
 
 function deleteClient(id) {
+    if (pendingActions[id]) return;
     if (confirm('确定要删除这个客户端吗？')) {
+        pendingActions[id] = true;
+        renderClients();
+
         fetch(apiUrl + '?action=delete_client&client=' + id)
             .then(function() {
+                delete pendingActions[id];
                 refreshStatusFull();
+            })
+            .catch(function(e) {
+                console.error('Delete error:', e);
+                delete pendingActions[id];
+                renderClients();
             });
     }
 }
@@ -400,7 +418,8 @@ function reloadConfig() {
                 alert('配置已应用');
                 setTimeout(refreshStatusFull, 2000);
             }
-        });
+        })
+        .catch(function(e) { console.error('Reload error:', e); });
 }
 
 function refreshLog() {
@@ -410,7 +429,8 @@ function refreshLog() {
         .then(function(text) {
             document.getElementById('log-content').textContent = text || '暂无日志';
             document.getElementById('log-content').scrollTop = document.getElementById('log-content').scrollHeight;
-        });
+        })
+        .catch(function(e) { console.error('Log fetch error:', e); });
 }
 
 function clearLog() {
@@ -418,7 +438,8 @@ function clearLog() {
         fetch(apiUrl + '?action=clear_log')
             .then(function() {
                 refreshLog();
-            });
+            })
+            .catch(function(e) { console.error('Clear log error:', e); });
     }
 }
 

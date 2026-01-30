@@ -14,6 +14,12 @@ if [ -x /etc/init.d/xl2tpd ]; then
     /etc/init.d/xl2tpd disable 2>/dev/null
 fi
 
+# 将 PPP 接口加入 WAN 防火墙 zone（fw4 默认不认识 ppp 接口，会丢弃转发流量）
+uci -q batch << 'FWEOF'
+add_list firewall.@zone[1].device='ppp-+'
+commit firewall
+FWEOF
+
 # 清理缓存
 rm -f /tmp/luci-indexcache
 rm -rf /tmp/luci-modulecache

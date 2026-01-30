@@ -102,17 +102,21 @@ start() {
 
     log_info "Starting SOCKS5 client: $name"
 
-    generate_redsocks_config "$client" || return 1
-
     local config_file="$REDSOCKS_DIR/${client}.conf"
     local pid_file="$REDSOCKS_DIR/${client}.pid"
 
-    # 先停止已有进程
+    # 防重复：如果进程已存活，跳过而非杀掉（只有 stop() 才有权杀进程）
     if [ -f "$pid_file" ]; then
         local old_pid=$(cat "$pid_file")
-        kill "$old_pid" 2>/dev/null || true
+        if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+            log_info "SOCKS5 client $name already running (PID: $old_pid), skipping"
+            return 0
+        fi
+        # 进程已死，清理残留 pid 文件
         rm -f "$pid_file"
     fi
+
+    generate_redsocks_config "$client" || return 1
 
     redsocks -c "$config_file" -p "$pid_file"
 

@@ -46,25 +46,12 @@ is_client_enabled() {
     [ "$enabled" = "1" ]
 }
 
-# 启动所有客户端
-start_all_clients() {
-    log_info "Starting all proxy clients..."
+# ============================================================
+# 内部函数：启停客户端但不触发 firewall rebuild
+# 供批量操作使用，避免 N+1 次 rebuild
+# ============================================================
 
-    local clients=$(get_clients)
-    local count=0
-
-    for client in $clients; do
-        if is_client_enabled "$client"; then
-            start_client "$client"
-            count=$((count + 1))
-        fi
-    done
-
-    log_info "Started $count clients"
-}
-
-# 启动单个客户端
-start_client() {
+_start_client_nofirewall() {
     local client="$1"
     local type=$(get_config "$client" "type" "")
     local name=$(get_config "$client" "name" "$client")
@@ -83,13 +70,9 @@ start_client() {
             return 1
             ;;
     esac
-
-    # 更新防火墙规则
-    "$SCRIPT_DIR/firewall.sh" update_client "$client"
 }
 
-# 停止单个客户端
-stop_client() {
+_stop_client_nofirewall() {
     local client="$1"
     local type=$(get_config "$client" "type" "")
     local name=$(get_config "$client" "name" "$client")
@@ -104,33 +87,86 @@ stop_client() {
             "$SCRIPT_DIR/socks5-manager.sh" stop "$client"
             ;;
     esac
+}
 
-    # 重建防火墙规则（移除该客户端绑定IP的访问权限）
+# ============================================================
+# 公开函数：启停客户端 + 单次 firewall rebuild
+# ============================================================
+
+# 启动单个客户端
+start_client() {
+    local client="$1"
+    _start_client_nofirewall "$client"
     "$SCRIPT_DIR/firewall.sh" rebuild
 }
 
-# 停止所有客户端
+# 停止单个客户端
+stop_client() {
+    local client="$1"
+    _stop_client_nofirewall "$client"
+    "$SCRIPT_DIR/firewall.sh" rebuild
+}
+
+# 重启单个客户端
+restart_client() {
+    local client="$1"
+    _stop_client_nofirewall "$client"
+    sleep 2
+    _start_client_nofirewall "$client"
+    "$SCRIPT_DIR/firewall.sh" rebuild
+}
+
+# 切换客户端启用/禁用状态（LuCI toggle 开关专用）
+# 读取当前 enabled 状态，执行对应的 stop/start + 单次 rebuild
+toggle_client() {
+    local client="$1"
+    local enabled=$(get_config "$client" "enabled" "0")
+
+    if [ "$enabled" = "1" ]; then
+        log_info "Toggle: enabling client $client"
+        _start_client_nofirewall "$client"
+    else
+        log_info "Toggle: disabling client $client"
+        _stop_client_nofirewall "$client"
+    fi
+
+    "$SCRIPT_DIR/firewall.sh" rebuild
+}
+
+# 启动所有客户端（批量启动后单次 rebuild）
+start_all_clients() {
+    log_info "Starting all proxy clients..."
+
+    local clients=$(get_clients)
+    local count=0
+
+    for client in $clients; do
+        if is_client_enabled "$client"; then
+            _start_client_nofirewall "$client"
+            count=$((count + 1))
+        fi
+    done
+
+    # 批量启动完成后单次 rebuild
+    "$SCRIPT_DIR/firewall.sh" rebuild
+
+    log_info "Started $count clients"
+}
+
+# 停止所有客户端（批量停止，不单独 rebuild，由 caller 统一处理）
 stop_all_clients() {
     log_info "Stopping all proxy clients..."
 
     local clients=$(get_clients)
 
     for client in $clients; do
-        stop_client "$client"
+        _stop_client_nofirewall "$client"
     done
 
     log_info "All clients stopped"
 }
 
-# 重启单个客户端
-restart_client() {
-    local client="$1"
-    stop_client "$client"
-    sleep 2
-    start_client "$client"
-}
-
-# 重载配置
+# 重载配置（所有变更用 _nofirewall，最后单次 rebuild）
 reload_config() {
     log_info "Reloading configuration..."
 
@@ -147,7 +183,7 @@ reload_config() {
     for client in $running_clients; do
         if ! echo "$config_clients" | grep -q "^${client}$"; then
             log_info "Removing deleted client: $client"
-            stop_client "$client"
+            _stop_client_nofirewall "$client"
         fi
     done
 
@@ -160,20 +196,22 @@ reload_config() {
                 local new_hash=$(uci show "proxypool.$client" | md5sum | cut -d' ' -f1)
                 if [ "$current_hash" != "$new_hash" ]; then
                     log_info "Config changed for $client, restarting..."
-                    restart_client "$client"
+                    _stop_client_nofirewall "$client"
+                    sleep 2
+                    _start_client_nofirewall "$client"
                 fi
             else
-                start_client "$client"
+                _start_client_nofirewall "$client"
             fi
         else
             # 客户端被禁用
             if [ -f "$RUN_DIR/clients/$client" ]; then
-                stop_client "$client"
+                _stop_client_nofirewall "$client"
             fi
         fi
     done
 
-    # 重建防火墙规则
+    # 所有变更完成后单次 rebuild
     "$SCRIPT_DIR/firewall.sh" rebuild
 
     log_info "Configuration reloaded"
@@ -219,11 +257,14 @@ main() {
         restart_client)
             restart_client "$1"
             ;;
+        toggle_client)
+            toggle_client "$1"
+            ;;
         status)
             status
             ;;
         *)
-            echo "Usage: $0 {start|stop|restart|reload|start_client|stop_client|restart_client|status} [client_id]"
+            echo "Usage: $0 {start|stop|restart|reload|start_client|stop_client|restart_client|toggle_client|status} [client_id]"
             exit 1
             ;;
     esac

@@ -20,8 +20,8 @@ if echo "$INTERFACE" | grep -q "^ppp-"; then
 
     log_info "PPP interface down: $INTERFACE (client: $client)"
 
-    # 重建防火墙规则（会阻止绑定的IP上网）
-    /usr/lib/proxypool/firewall.sh rebuild &
+    # 同步重建防火墙规则（立即阻止绑定的IP上网，防止泄露到本地网络）
+    /usr/lib/proxypool/firewall.sh rebuild
 fi
 
 exit 0

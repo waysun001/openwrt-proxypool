@@ -20,8 +20,9 @@ if echo "$INTERFACE" | grep -q "^ppp-"; then
 
     log_info "PPP interface up: $INTERFACE (client: $client, IP: $LOCAL_IP)"
 
-    # 更新防火墙规则
-    /usr/lib/proxypool/firewall.sh rebuild &
+    # 同步更新防火墙规则（PPP 回调本身已在后台执行，无需再异步；
+    # 异步调用会导致竞态：防火墙规则未就绪时流量已开始转发）
+    /usr/lib/proxypool/firewall.sh rebuild
 fi
 
 exit 0

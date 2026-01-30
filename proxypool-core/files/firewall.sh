@@ -1,9 +1,11 @@
 #!/bin/bash
 # 智联盒子 - 防火墙管理脚本
 # 使用 nftables 实现严格的网络隔离
+# 所有规则通过 nft -f 原子化加载，杜绝重建时的安全空窗期
 
 RUN_DIR="/var/run/proxypool"
 LOG_FILE="/var/log/proxypool.log"
+LOCK_FILE="/var/lock/proxypool-fw.lock"
 
 log_info() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [firewall] $*" >> "$LOG_FILE"
@@ -85,37 +87,36 @@ is_client_online() {
             fi
             ;;
         l2tp)
+            # 仅检查接口存在不够：PPP 握手完成前接口已存在但无 IP，此时流量无法通过隧道
             local ppp_iface="ppp-${client}"
             if ip link show "$ppp_iface" &>/dev/null; then
-                return 0
+                local ppp_ip=$(ip -4 addr show "$ppp_iface" 2>/dev/null | grep -o 'inet [0-9.]*' | cut -d' ' -f2)
+                if [ -n "$ppp_ip" ]; then
+                    return 0
+                fi
             fi
             ;;
     esac
     return 1
 }
 
-# 收集所有需要允许的 IP 和对应的端口
-collect_allowed_ips() {
+# 构建 nftables 规则文件（原子化加载）
+build_nft_ruleset() {
+    local nft_file="$1"
     local clients=$(get_clients)
+
+    # 收集允许的 IP 和 NAT 规则
     local allowed_ips=""
-    local nat_rules=""
+    local socks5_rules=""
 
     for client in $clients; do
         local enabled=$(get_config "$client" "enabled" "0")
-        if [ "$enabled" != "1" ]; then
-            continue
-        fi
-
-        if ! is_client_online "$client"; then
-            continue
-        fi
+        [ "$enabled" != "1" ] && continue
+        is_client_online "$client" || continue
 
         local type=$(get_config "$client" "type" "")
         local bind_ips=$(uci -q get "proxypool.$client.bind_ip" 2>/dev/null || true)
-
-        if [ -z "$bind_ips" ]; then
-            continue
-        fi
+        [ -z "$bind_ips" ] && continue
 
         for ip in $bind_ips; do
             case "$type" in
@@ -123,54 +124,99 @@ collect_allowed_ips() {
                     local tcp_port=$(get_client_port "$client")
                     if [ -n "$tcp_port" ]; then
                         allowed_ips="$allowed_ips $ip"
-                        nat_rules="$nat_rules|$ip:$tcp_port"
+                        socks5_rules="$socks5_rules
+        ip saddr $ip tcp dport != 22 redirect to :$tcp_port"
                     fi
                     ;;
                 l2tp)
-                    local ppp_iface="ppp-${client}"
                     allowed_ips="$allowed_ips $ip"
-                    # L2TP 使用策略路由
                     ;;
             esac
         done
     done
 
-    echo "$allowed_ips|$nat_rules"
+    # 构建允许 IP 的 nft 规则行
+    local allow_lines=""
+    for ip in $allowed_ips; do
+        allow_lines="$allow_lines
+        ip saddr $ip accept"
+        log_info "Allowing IP: $ip"
+    done
+
+    # 写入原子化 nft 规则文件
+    cat > "$nft_file" << NFTEOF
+table inet proxypool;
+delete table inet proxypool;
+table ip proxypool_nat;
+delete table ip proxypool_nat;
+
+table inet proxypool {
+    chain forward {
+        type filter hook forward priority -1; policy accept;
+
+        # 允许内网互访
+        ip saddr 192.168.0.0/16 ip daddr 192.168.0.0/16 accept
+        ip saddr 10.0.0.0/8 ip daddr 10.0.0.0/8 accept
+        ip saddr 172.16.0.0/12 ip daddr 172.16.0.0/12 accept
+
+        # 允许绑定了在线客户端的 IP（不使用 ct state，确保断开后立即阻断）
+${allow_lines}
+
+        # 阻止所有其他内网到外网的流量（包括已建立的连接）
+        ip saddr 192.168.0.0/16 ip daddr != { 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12 } drop
+        ip saddr 10.0.0.0/8 ip daddr != { 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12 } drop
+    }
 }
 
-# 初始化防火墙表
+table ip proxypool_nat {
+    chain prerouting {
+        type nat hook prerouting priority -100; policy accept;
+${socks5_rules}
+    }
+    chain postrouting {
+        type nat hook postrouting priority 100; policy accept;
+        oifname "ppp-*" masquerade
+    }
+}
+NFTEOF
+}
+
+# 初始化防火墙表（启动时调用，阻止所有内网外出流量）
 init() {
     log_info "Initializing firewall..."
 
-    # 删除旧表
-    nft delete table inet proxypool 2>/dev/null || true
-    nft delete table ip proxypool_nat 2>/dev/null || true
+    local nft_file=$(mktemp /tmp/proxypool-nft.XXXXXX)
 
-    # 创建新表
-    nft add table inet proxypool
-    nft add table ip proxypool_nat
+    cat > "$nft_file" << 'NFTEOF'
+table inet proxypool;
+delete table inet proxypool;
+table ip proxypool_nat;
+delete table ip proxypool_nat;
 
-    # 创建 forward 链 - 优先级 -1，在 fw4 之前处理
-    nft add chain inet proxypool forward { type filter hook forward priority -1 \; }
+table inet proxypool {
+    chain forward {
+        type filter hook forward priority -1; policy accept;
+        ip saddr 192.168.0.0/16 ip daddr 192.168.0.0/16 accept
+        ip saddr 10.0.0.0/8 ip daddr 10.0.0.0/8 accept
+        ip saddr 172.16.0.0/12 ip daddr 172.16.0.0/12 accept
+        ip saddr 192.168.0.0/16 ip daddr != { 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12 } drop
+        ip saddr 10.0.0.0/8 ip daddr != { 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12 } drop
+    }
+}
 
-    # 创建 NAT prerouting 链（SOCKS5 重定向）
-    nft add chain ip proxypool_nat prerouting { type nat hook prerouting priority -100 \; }
+table ip proxypool_nat {
+    chain prerouting {
+        type nat hook prerouting priority -100; policy accept;
+    }
+    chain postrouting {
+        type nat hook postrouting priority 100; policy accept;
+        oifname "ppp-*" masquerade
+    }
+}
+NFTEOF
 
-    # 创建 NAT postrouting 链（L2TP masquerade）
-    nft add chain ip proxypool_nat postrouting { type nat hook postrouting priority 100 \; }
-    nft add rule ip proxypool_nat postrouting oifname "ppp-*" masquerade
-
-    # 基础规则：允许内网互访
-    nft add rule inet proxypool forward ip saddr 192.168.0.0/16 ip daddr 192.168.0.0/16 accept
-    nft add rule inet proxypool forward ip saddr 10.0.0.0/8 ip daddr 10.0.0.0/8 accept
-    nft add rule inet proxypool forward ip saddr 172.16.0.0/12 ip daddr 172.16.0.0/12 accept
-
-    # 允许已建立的连接
-    nft add rule inet proxypool forward ct state established,related accept
-
-    # 默认阻止所有内网到外网的新连接
-    nft add rule inet proxypool forward ip saddr 192.168.0.0/16 ip daddr != { 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12 } drop
-    nft add rule inet proxypool forward ip saddr 10.0.0.0/8 ip daddr != { 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12 } drop
+    nft -f "$nft_file"
+    rm -f "$nft_file"
 
     log_info "Firewall initialized - all LAN devices blocked by default"
 }
@@ -184,60 +230,36 @@ cleanup() {
     log_info "Firewall cleaned up"
 }
 
-# 重建所有规则
+# 重建所有规则（原子化，无安全空窗期）
+# 使用 flock 防止并发 rebuild 竞态（ppp-up/down 回调可能同时触发）
 rebuild() {
+    exec 200>"$LOCK_FILE"
+    flock -w 10 200 || {
+        log_error "Failed to acquire firewall lock, skipping rebuild"
+        return 1
+    }
+
+    _rebuild_locked
+
+    flock -u 200
+    exec 200>&-
+}
+
+_rebuild_locked() {
     log_info "Rebuilding firewall rules..."
-
-    # 删除旧表
-    nft delete table inet proxypool 2>/dev/null || true
-    nft delete table ip proxypool_nat 2>/dev/null || true
-
-    # 创建新表
-    nft add table inet proxypool
-    nft add table ip proxypool_nat
-
-    # 创建链
-    nft add chain inet proxypool forward { type filter hook forward priority -1 \; }
-    nft add chain ip proxypool_nat prerouting { type nat hook prerouting priority -100 \; }
-    nft add chain ip proxypool_nat postrouting { type nat hook postrouting priority 100 \; }
-
-    # L2TP PPP 接口流量 masquerade（将 LAN IP 伪装为 PPP 分配的 IP）
-    nft add rule ip proxypool_nat postrouting oifname "ppp-*" masquerade
 
     # 清理旧的策略路由
     cleanup_policy_routing
 
-    # 收集所有允许的 IP 和 NAT 规则
-    local data=$(collect_allowed_ips)
-    local allowed_ips=$(echo "$data" | cut -d'|' -f1)
-    local nat_data=$(echo "$data" | cut -d'|' -f2-)
+    # 构建并原子化加载 nft 规则
+    local nft_file=$(mktemp /tmp/proxypool-nft.XXXXXX)
+    build_nft_ruleset "$nft_file"
 
-    # 基础规则
-    nft add rule inet proxypool forward ip saddr 192.168.0.0/16 ip daddr 192.168.0.0/16 accept
-    nft add rule inet proxypool forward ip saddr 10.0.0.0/8 ip daddr 10.0.0.0/8 accept
-    nft add rule inet proxypool forward ip saddr 172.16.0.0/12 ip daddr 172.16.0.0/12 accept
-    nft add rule inet proxypool forward ct state established,related accept
-
-    # 添加允许的 IP
-    for ip in $allowed_ips; do
-        log_info "Allowing IP: $ip"
-        nft add rule inet proxypool forward ip saddr $ip accept
-    done
-
-    # 添加 NAT 规则
-    echo "$nat_data" | tr '|' '\n' | while read rule; do
-        [ -z "$rule" ] && continue
-        local ip=$(echo "$rule" | cut -d: -f1)
-        local port=$(echo "$rule" | cut -d: -f2)
-        if [ -n "$ip" ] && [ -n "$port" ]; then
-            log_info "Adding NAT rule: $ip -> port $port"
-            nft add rule ip proxypool_nat prerouting ip saddr $ip tcp dport != 22 redirect to :$port
-        fi
-    done
-
-    # 默认阻止规则
-    nft add rule inet proxypool forward ip saddr 192.168.0.0/16 ip daddr != { 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12 } drop
-    nft add rule inet proxypool forward ip saddr 10.0.0.0/8 ip daddr != { 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12 } drop
+    if ! nft -f "$nft_file" 2>> "$LOG_FILE"; then
+        log_error "Failed to apply nft rules, check $nft_file"
+    else
+        rm -f "$nft_file"
+    fi
 
     # 设置 L2TP 策略路由（将绑定 IP 的流量路由到对应 PPP 接口）
     local all_clients=$(get_clients)

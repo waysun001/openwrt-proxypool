@@ -6,6 +6,13 @@ function index()
     entry({"admin", "services", "proxypool", "api"}, call("api_handler")).leaf = true
 end
 
+-- 输入清洗：只允许字母数字下划线（防止命令注入）
+local function sanitize_client(raw)
+    if not raw then return nil end
+    local clean = raw:match("^([%w_]+)$")
+    return clean
+end
+
 function api_handler()
     local http = require "luci.http"
     local sys = require "luci.sys"
@@ -20,7 +27,7 @@ function api_handler()
         http.write(result)
 
     elseif action == "get_client" then
-        local client = http.formvalue("client")
+        local client = sanitize_client(http.formvalue("client"))
         if client then
             local data = {}
             data.id = client
@@ -40,7 +47,7 @@ function api_handler()
         end
 
     elseif action == "save_client" then
-        local client = http.formvalue("client")
+        local client = sanitize_client(http.formvalue("client"))
         local data = http.formvalue("data")
         if client and data then
             local d = json.parse(data)
@@ -65,7 +72,7 @@ function api_handler()
         end
 
     elseif action == "delete_client" then
-        local client = http.formvalue("client")
+        local client = sanitize_client(http.formvalue("client"))
         if client then
             sys.exec("/usr/lib/proxypool/proxypool.sh stop_client " .. client .. " 2>/dev/null")
             uci:delete("proxypool", client)
@@ -74,8 +81,21 @@ function api_handler()
             http.write('{"success": true}')
         end
 
+    elseif action == "toggle_client" then
+        local client = sanitize_client(http.formvalue("client"))
+        local enabled = http.formvalue("enabled")
+        if client and enabled then
+            -- 保存 enabled 状态到 UCI
+            uci:set("proxypool", client, "enabled", enabled == "1" and "1" or "0")
+            uci:commit("proxypool")
+            -- 调用 proxypool.sh toggle_client 执行实际的 stop/start + firewall rebuild
+            sys.exec("/usr/lib/proxypool/proxypool.sh toggle_client " .. client .. " 2>/dev/null")
+            http.prepare_content("application/json")
+            http.write('{"success": true}')
+        end
+
     elseif action == "start_client" then
-        local client = http.formvalue("client")
+        local client = sanitize_client(http.formvalue("client"))
         if client then
             sys.exec("/usr/lib/proxypool/proxypool.sh start_client " .. client .. " 2>/dev/null")
             http.prepare_content("application/json")
@@ -83,7 +103,7 @@ function api_handler()
         end
 
     elseif action == "stop_client" then
-        local client = http.formvalue("client")
+        local client = sanitize_client(http.formvalue("client"))
         if client then
             sys.exec("/usr/lib/proxypool/proxypool.sh stop_client " .. client .. " 2>/dev/null")
             http.prepare_content("application/json")
@@ -91,7 +111,7 @@ function api_handler()
         end
 
     elseif action == "restart_client" then
-        local client = http.formvalue("client")
+        local client = sanitize_client(http.formvalue("client"))
         if client then
             sys.exec("/usr/lib/proxypool/proxypool.sh restart_client " .. client .. " 2>/dev/null")
             http.prepare_content("application/json")
@@ -104,7 +124,9 @@ function api_handler()
         http.write('{"success": true}')
 
     elseif action == "log" then
-        local lines = http.formvalue("lines") or "100"
+        local lines = tonumber(http.formvalue("lines")) or 100
+        -- 限制最大行数防止滥用
+        if lines > 1000 then lines = 1000 end
         local result = sys.exec("tail -n " .. lines .. " /var/log/proxypool.log 2>/dev/null || echo '暂无日志'")
         http.prepare_content("text/plain; charset=utf-8")
         http.write(result)
