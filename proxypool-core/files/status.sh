@@ -108,10 +108,16 @@ get_bound_devices() {
         local client_name=$(get_config "$client" "name" "$client")
 
         for ip in $bind_ips; do
-            local mac=$(ip neigh show 2>/dev/null | grep "^$ip " | awk '{print $5}')
+            local neigh_entry=$(ip neigh show "$ip" 2>/dev/null | head -1)
+            local mac=$(echo "$neigh_entry" | awk '{print $5}')
+            local state=$(echo "$neigh_entry" | awk '{print $NF}')
             local online="false"
+            # 只有 REACHABLE 和 DELAY 状态才算在线
+            # STALE=缓存过期 FAILED=不可达 INCOMPLETE=未完成 都不算在线
             if [ -n "$mac" ] && [ "$mac" != "FAILED" ]; then
-                online="true"
+                case "$state" in
+                    REACHABLE|DELAY|PROBE) online="true" ;;
+                esac
             fi
 
             if [ $first -eq 0 ]; then
