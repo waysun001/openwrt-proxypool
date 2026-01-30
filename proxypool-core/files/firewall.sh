@@ -1,11 +1,13 @@
-#!/bin/bash
+#!/bin/sh
 # 智联盒子 - 防火墙管理脚本
 # 使用 nftables 实现严格的网络隔离
 # 所有规则通过 nft -f 原子化加载，杜绝重建时的安全空窗期
 
 RUN_DIR="/var/run/proxypool"
 LOG_FILE="/var/log/proxypool.log"
-LOCK_FILE="/var/lock/proxypool-fw.lock"
+LOCK_DIR="/var/lock/proxypool-fw.lock"
+# 锁超时（秒）：超过此时间的残留锁视为 stale 并强制清除
+LOCK_TIMEOUT=15
 
 log_info() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [firewall] $*" >> "$LOG_FILE"
@@ -57,7 +59,7 @@ setup_l2tp_routing() {
     local ppp_iface="ppp-${client}"
 
     # 检查 PPP 接口是否存在
-    if ! ip link show "$ppp_iface" &>/dev/null; then
+    if ! ip link show "$ppp_iface" >/dev/null 2>&1; then
         return 1
     fi
 
@@ -89,7 +91,7 @@ is_client_online() {
         l2tp)
             # 仅检查接口存在不够：PPP 握手完成前接口已存在但无 IP，此时流量无法通过隧道
             local ppp_iface="ppp-${client}"
-            if ip link show "$ppp_iface" &>/dev/null; then
+            if ip link show "$ppp_iface" >/dev/null 2>&1; then
                 local ppp_ip=$(ip -4 addr show "$ppp_iface" 2>/dev/null | grep -o 'inet [0-9.]*' | cut -d' ' -f2)
                 if [ -n "$ppp_ip" ]; then
                     return 0
@@ -98,6 +100,33 @@ is_client_online() {
             ;;
     esac
     return 1
+}
+
+COUNTER_DIR="$RUN_DIR/counters"
+
+# 保存当前 nftables 计数器到持久化文件
+# 每个 IP 一个文件，格式：out_bytes in_bytes（累加值）
+_save_counters() {
+    mkdir -p "$COUNTER_DIR"
+    local nft_output=$(nft list chain inet proxypool forward 2>/dev/null) || return 0
+    [ -z "$nft_output" ] && return 0
+
+    # 解析每条带 comment 的规则，提取 IP 和 bytes
+    echo "$nft_output" | grep 'comment "out_' | while read -r line; do
+        local ip=$(echo "$line" | grep -o 'comment "out_[^"]*"' | sed 's/comment "out_//;s/"//')
+        local bytes=$(echo "$line" | grep -o 'bytes [0-9]*' | awk '{print $2}')
+        [ -z "$ip" ] || [ -z "$bytes" ] && continue
+        local old=$(cat "$COUNTER_DIR/${ip}.out" 2>/dev/null || echo 0)
+        echo $((old + bytes)) > "$COUNTER_DIR/${ip}.out"
+    done
+
+    echo "$nft_output" | grep 'comment "in_' | while read -r line; do
+        local ip=$(echo "$line" | grep -o 'comment "in_[^"]*"' | sed 's/comment "in_//;s/"//')
+        local bytes=$(echo "$line" | grep -o 'bytes [0-9]*' | awk '{print $2}')
+        [ -z "$ip" ] || [ -z "$bytes" ] && continue
+        local old=$(cat "$COUNTER_DIR/${ip}.in" 2>/dev/null || echo 0)
+        echo $((old + bytes)) > "$COUNTER_DIR/${ip}.in"
+    done
 }
 
 # 构建 nftables 规则文件（原子化加载）
@@ -135,11 +164,12 @@ build_nft_ruleset() {
         done
     done
 
-    # 构建允许 IP 的 nft 规则行
+    # 构建允许 IP 的 nft 规则行（带 counter 用于流量统计）
     local allow_lines=""
     for ip in $allowed_ips; do
         allow_lines="$allow_lines
-        ip saddr $ip accept"
+        ip saddr $ip counter accept comment \"out_$ip\"
+        ip daddr $ip counter accept comment \"in_$ip\""
         log_info "Allowing IP: $ip"
     done
 
@@ -231,22 +261,47 @@ cleanup() {
 }
 
 # 重建所有规则（原子化，无安全空窗期）
-# 使用 flock 防止并发 rebuild 竞态（ppp-up/down 回调可能同时触发）
+# 使用 mkdir 原子锁防止并发 rebuild 竞态（POSIX 兼容，busybox ash 可用）
 rebuild() {
-    exec 200>"$LOCK_FILE"
-    flock -w 10 200 || {
-        log_error "Failed to acquire firewall lock, skipping rebuild"
-        return 1
-    }
+    local waited=0
+
+    # 检测并清除 stale 锁（进程崩溃后残留）
+    # 使用 lock 目录内的时间戳文件（兼容 busybox，不依赖 date -r / stat）
+    if [ -d "$LOCK_DIR" ]; then
+        local lock_ts=$(cat "$LOCK_DIR/ts" 2>/dev/null || echo 0)
+        local now_ts=$(date +%s)
+        local lock_age=$((now_ts - lock_ts))
+        if [ "$lock_age" -gt "$LOCK_TIMEOUT" ]; then
+            log_info "Removing stale firewall lock (age: ${lock_age}s)"
+            rm -rf "$LOCK_DIR"
+        fi
+    fi
+
+    # 自旋等待获取锁
+    while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+        waited=$((waited + 1))
+        if [ $waited -ge $LOCK_TIMEOUT ]; then
+            log_error "Failed to acquire firewall lock after ${LOCK_TIMEOUT}s, forcing"
+            rm -rf "$LOCK_DIR"
+            mkdir "$LOCK_DIR" 2>/dev/null || true
+            break
+        fi
+        sleep 1
+    done
+
+    # 写入时间戳用于 stale 检测
+    echo "$(date +%s)" > "$LOCK_DIR/ts" 2>/dev/null
 
     _rebuild_locked
 
-    flock -u 200
-    exec 200>&-
+    rm -rf "$LOCK_DIR"
 }
 
 _rebuild_locked() {
     log_info "Rebuilding firewall rules..."
+
+    # 保存当前 nftables 计数器到持久化文件（防止 delete table 后归零）
+    _save_counters
 
     # 清理旧的策略路由
     cleanup_policy_routing
@@ -271,8 +326,9 @@ _rebuild_locked() {
         fi
     done
 
-    # 清除 conntrack 缓存（确保旧连接使用新路由）
-    conntrack -F 2>/dev/null || true
+    # 注意：不再执行 conntrack -F 全量清除
+    # nftables forward 链未使用 ct state，规则移除即立即阻断，无需清 conntrack
+    # 全量清除会导致其他在线客户端的 NAT 会话中断
 
     log_info "Firewall rules rebuilt"
 }

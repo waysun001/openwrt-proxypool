@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # 智联盒子 - 状态监控脚本
 
 RUN_DIR="/var/run/proxypool"
@@ -41,14 +41,14 @@ get_client_status() {
     if [ "$enabled" = "1" ]; then
         case "$type" in
             l2tp)
-                local result=$(timeout 5 /usr/lib/proxypool/l2tp-manager.sh status "$client" 2>/dev/null || echo "disconnected")
+                local result=$(/usr/lib/proxypool/l2tp-manager.sh status "$client" 2>/dev/null || echo "disconnected")
                 status=$(echo "$result" | head -1)
                 if [ "$status" = "connected" ]; then
                     ip_addr=$(echo "$result" | sed -n '2p')
                 fi
                 ;;
             socks5)
-                local result=$(timeout 5 /usr/lib/proxypool/socks5-manager.sh status "$client" 2>/dev/null || echo "disconnected")
+                local result=$(/usr/lib/proxypool/socks5-manager.sh status "$client" 2>/dev/null || echo "disconnected")
                 status=$(echo "$result" | head -1)
                 ;;
             *)
@@ -59,16 +59,20 @@ get_client_status() {
         status="disabled"
     fi
 
-    # 读取接口流量统计
-    local iface=""
-    case "$type" in
-        l2tp)   iface="ppp-${client}" ;;
-    esac
-
-    if [ -n "$iface" ] && [ -d "/sys/class/net/$iface/statistics" ]; then
-        rx=$(cat "/sys/class/net/$iface/statistics/rx_bytes" 2>/dev/null || echo 0)
-        tx=$(cat "/sys/class/net/$iface/statistics/tx_bytes" 2>/dev/null || echo 0)
-    fi
+    # 读取流量统计：持久化累加值 + 当前 nftables counter（适用于所有客户端类型）
+    local counter_dir="$RUN_DIR/counters"
+    local nft_fwd=$(nft list chain inet proxypool forward 2>/dev/null)
+    local bind_ip_list=$(echo "$bind_ips" | tr ',' ' ')
+    for bip in $bind_ip_list; do
+        # 持久化累加值（rebuild 前保存的历史流量）
+        local saved_out=$(cat "$counter_dir/${bip}.out" 2>/dev/null || echo 0)
+        local saved_in=$(cat "$counter_dir/${bip}.in" 2>/dev/null || echo 0)
+        # 当前 nftables counter（本次 rebuild 后的增量）
+        local cur_out=$(echo "$nft_fwd" | grep "comment \"out_$bip\"" | grep -o 'bytes [0-9]*' | awk '{print $2}')
+        local cur_in=$(echo "$nft_fwd" | grep "comment \"in_$bip\"" | grep -o 'bytes [0-9]*' | awk '{print $2}')
+        tx=$((tx + saved_out + ${cur_out:-0}))
+        rx=$((rx + saved_in + ${cur_in:-0}))
+    done
 
     local bind_ips_json="[]"
     if [ -n "$bind_ips" ]; then

@@ -1,0 +1,5 @@
+#!/bin/sh
+# pppd ip-up 主脚本 - 分发给 ip-up.d/ 下的所有可执行脚本
+for script in /etc/ppp/ip-up.d/*; do
+    [ -x "$script" ] && "$script" "$@"
+done

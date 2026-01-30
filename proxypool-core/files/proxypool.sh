@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # 智联盒子 - 代理池主控脚本
 
 SCRIPT_DIR="/usr/lib/proxypool"

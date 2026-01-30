@@ -1,0 +1,5 @@
+#!/bin/sh
+# pppd ip-down 主脚本 - 分发给 ip-down.d/ 下的所有可执行脚本
+for script in /etc/ppp/ip-down.d/*; do
+    [ -x "$script" ] && "$script" "$@"
+done

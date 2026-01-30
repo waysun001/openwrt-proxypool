@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # 智联盒子 - L2TP 客户端管理脚本（独立实例模式）
 # 每个客户端独立 xl2tpd 进程，互不影响
 # 禁用系统 xl2tpd，避免端口冲突
@@ -159,7 +159,7 @@ start() {
 
     # 防重复：如果 PPP 接口已连接，直接跳过
     local ppp_iface="ppp-${client}"
-    if ip link show "$ppp_iface" &>/dev/null; then
+    if ip link show "$ppp_iface" >/dev/null 2>&1; then
         local existing_ip=$(ip -4 addr show "$ppp_iface" 2>/dev/null | grep -o 'inet [0-9.]*' | cut -d' ' -f2)
         if [ -n "$existing_ip" ]; then
             log_info "Client $name already connected (IP: $existing_ip), skipping"
@@ -181,7 +181,7 @@ start() {
     fi
 
     # 启动前清理：如果存在残留的 PPP 接口（无对应 xl2tpd 进程），先删除
-    if ip link show "$ppp_iface" &>/dev/null; then
+    if ip link show "$ppp_iface" >/dev/null 2>&1; then
         log_info "Cleaning stale PPP interface: $ppp_iface"
         ip link delete "$ppp_iface" 2>/dev/null || true
     fi
@@ -277,7 +277,7 @@ stop() {
     fi
 
     # 强制删除 PPP 接口（确保内核层面完全清理）
-    if ip link show "$ppp_iface" &>/dev/null; then
+    if ip link show "$ppp_iface" >/dev/null 2>&1; then
         ip link delete "$ppp_iface" 2>/dev/null || true
         log_info "Deleted PPP interface: $ppp_iface"
     fi
@@ -313,7 +313,7 @@ status() {
     local client="$1"
     local ppp_iface="ppp-${client}"
 
-    if ip link show "$ppp_iface" &>/dev/null; then
+    if ip link show "$ppp_iface" >/dev/null 2>&1; then
         local ip=$(ip -4 addr show "$ppp_iface" 2>/dev/null | grep -o 'inet [0-9.]*' | cut -d' ' -f2)
         if [ -n "$ip" ]; then
             echo "connected"

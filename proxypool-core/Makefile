@@ -13,7 +13,7 @@ define Package/proxypool-core
   SECTION:=net
   CATEGORY:=Network
   TITLE:=智联盒子核心服务
-  DEPENDS:=+xl2tpd +ppp +ppp-mod-pppol2tp +redsocks +nftables +ip-full +bash +conntrack
+  DEPENDS:=+xl2tpd +ppp +ppp-mod-pppol2tp +redsocks +nftables +ip-full +conntrack
   PKGARCH:=all
 endef
 
@@ -43,6 +43,10 @@ define Package/proxypool-core/install
 	$(INSTALL_BIN) ./files/firewall.sh $(1)/usr/lib/proxypool/firewall.sh
 	$(INSTALL_BIN) ./files/status.sh $(1)/usr/lib/proxypool/status.sh
 	$(INSTALL_BIN) ./files/backup.sh $(1)/usr/lib/proxypool/backup.sh
+
+	$(INSTALL_DIR) $(1)/etc/ppp
+	$(INSTALL_BIN) ./files/ip-up $(1)/etc/ppp/ip-up
+	$(INSTALL_BIN) ./files/ip-down $(1)/etc/ppp/ip-down
 
 	$(INSTALL_DIR) $(1)/etc/ppp/ip-up.d
 	$(INSTALL_DIR) $(1)/etc/ppp/ip-down.d

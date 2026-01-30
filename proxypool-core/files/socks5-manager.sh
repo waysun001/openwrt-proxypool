@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # 智联盒子 - SOCKS5 客户端管理脚本
 
 RUN_DIR="/var/run/proxypool"
