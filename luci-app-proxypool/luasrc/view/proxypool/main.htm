@@ -17,7 +17,9 @@
 .pp-btn-success { background: #28a745; color: #fff; }
 .pp-btn-danger { background: #dc3545; color: #fff; }
 .pp-btn-secondary { background: #6c757d; color: #fff; }
+.pp-btn-warning { background: #fd7e14; color: #fff; }
 .pp-btn:hover { opacity: 0.9; }
+.pp-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .pp-tabs { display: flex; border-bottom: 2px solid #ddd; margin-bottom: 15px; }
 .pp-tab { padding: 10px 20px; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -2px; }
@@ -40,6 +42,7 @@
 .pp-modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; }
 .pp-modal.active { display: flex; justify-content: center; align-items: center; }
 .pp-modal-content { background: #fff; padding: 25px; border-radius: 8px; width: 500px; max-width: 90%; max-height: 90vh; overflow-y: auto; }
+.pp-modal-content.wide { width: 750px; }
 .pp-modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
 .pp-modal-header h3 { margin: 0; }
 .pp-modal-close { background: none; border: none; font-size: 24px; cursor: pointer; color: #666; }
@@ -62,6 +65,21 @@
 .pp-switch-slider:before { position: absolute; content: ""; height: 20px; width: 20px; left: 3px; bottom: 3px; background: white; border-radius: 50%; transition: 0.3s; }
 .pp-switch input:checked + .pp-switch-slider { background: #28a745; }
 .pp-switch input:checked + .pp-switch-slider:before { transform: translateX(24px); }
+
+/* R2 - 协议类型徽章 */
+.pp-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; letter-spacing: 0.5px; }
+.pp-badge-l2tp { background: #d0e4ff; color: #0050b3; }
+.pp-badge-socks5 { background: #fff3cd; color: #856404; }
+.pp-badge-pptp { background: #d4edda; color: #155724; }
+
+/* R3 - 批量导入预览表格 */
+.pp-preview-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 10px; }
+.pp-preview-table th, .pp-preview-table td { padding: 6px 8px; border: 1px solid #ddd; text-align: left; }
+.pp-preview-table th { background: #f0f0f0; }
+.pp-preview-row-ok { background: #d4edda; }
+.pp-preview-row-skip { background: #fff3cd; }
+.pp-import-step { display: none; }
+.pp-import-step.active { display: block; }
 </style>
 
 <div class="pp-container">
@@ -91,6 +109,7 @@
     <div id="panel-clients" class="pp-panel active">
         <div class="pp-toolbar">
             <button class="pp-btn pp-btn-primary" onclick="showAddModal()">+ 添加客户端</button>
+            <button class="pp-btn pp-btn-warning" onclick="showBatchImportModal()">批量导入</button>
             <button class="pp-btn pp-btn-success" onclick="reloadConfig()">应用配置</button>
             <button class="pp-btn pp-btn-secondary" onclick="refreshStatus()">刷新状态</button>
         </div>
@@ -176,6 +195,11 @@
             </div>
 
             <div class="pp-form-group">
+                <label>到期时间</label>
+                <input type="text" id="form-expiry" placeholder="如: 2026-12-31">
+            </div>
+
+            <div class="pp-form-group">
                 <label>绑定IP（每行一个）</label>
                 <textarea id="form-bindip" placeholder="192.168.1.100&#10;192.168.1.101"></textarea>
             </div>
@@ -198,11 +222,50 @@
     </div>
 </div>
 
+<!-- 批量导入弹窗 -->
+<div class="pp-modal" id="batch-modal">
+    <div class="pp-modal-content wide">
+        <div class="pp-modal-header">
+            <h3 id="batch-modal-title">批量导入</h3>
+            <button class="pp-modal-close" onclick="closeBatchModal()">&times;</button>
+        </div>
+
+        <!-- Step 1: 输入 -->
+        <div id="batch-step1" class="pp-import-step active">
+            <div class="pp-form-group">
+                <label>协议类型</label>
+                <select id="batch-type">
+                    <option value="l2tp">L2TP</option>
+                    <option value="socks5">SOCKS5</option>
+                </select>
+            </div>
+            <div class="pp-form-group">
+                <label>粘贴数据（每行一条，字段用 | 分隔）</label>
+                <textarea id="batch-text" style="min-height:160px;font-family:monospace;font-size:12px;" placeholder="L2TP 示例:&#10;59.36.216.195|用户名|密码|2026-01-30&#10;124.225.78.235|0|用户名|密码|2026-12-09&#10;124.225.163.189|2018|用户名|密码|2026-02-25&#10;&#10;SOCKS5 示例:&#10;1.2.3.4|1080|用户名|密码"></textarea>
+            </div>
+            <div style="display:flex;gap:10px;justify-content:flex-end;">
+                <button type="button" class="pp-btn pp-btn-secondary" onclick="closeBatchModal()">取消</button>
+                <button type="button" class="pp-btn pp-btn-primary" onclick="batchParse()">解析预览</button>
+            </div>
+        </div>
+
+        <!-- Step 2: 预览 -->
+        <div id="batch-step2" class="pp-import-step">
+            <div id="batch-preview"></div>
+            <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:15px;">
+                <button type="button" class="pp-btn pp-btn-secondary" onclick="batchBackToStep1()">返回修改</button>
+                <button type="button" class="pp-btn pp-btn-primary" id="batch-confirm-btn" onclick="batchConfirmImport()">确认导入</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script>
 var apiUrl = '<%=luci.dispatcher.build_url("admin", "services", "proxypool", "api")%>';
 var clientData = [];
 var nextClientId = 1;
 var pendingActions = {};
+var batchParsedItems = [];
 
 function switchTab(tab) {
     document.querySelectorAll('.pp-tab').forEach(function(t) { t.classList.remove('active'); });
@@ -214,6 +277,15 @@ function switchTab(tab) {
 }
 
 function refreshStatus() { refreshStatusFull(); }
+
+/* R2 - 协议类型徽章 */
+function getTypeBadge(type) {
+    var t = (type || '').toLowerCase();
+    if (t === 'l2tp') return '<span class="pp-badge pp-badge-l2tp">L2TP</span>';
+    if (t === 'socks5') return '<span class="pp-badge pp-badge-socks5">SK5</span>';
+    if (t === 'pptp') return '<span class="pp-badge pp-badge-pptp">PPTP</span>';
+    return '<span class="pp-badge">' + (type || '').toUpperCase() + '</span>';
+}
 
 function renderClients() {
     var tbody = document.getElementById('client-list');
@@ -227,7 +299,6 @@ function renderClients() {
     clientData.forEach(function(c) {
         var statusClass = c.status === 'connected' ? 'connected' : (c.status === 'connecting' ? 'disconnected' : (c.enabled ? 'disconnected' : 'disabled'));
         var statusText = c.status === 'connected' ? '已连接' : (c.status === 'connecting' ? '连接中...' : (c.enabled ? '未连接' : '已禁用'));
-        var bindIps = (c.bind_ips && c.bind_ips.length > 0) ? c.bind_ips.join(', ') : '-';
 
         // 显示分配的 IP
         if (c.status === 'connected' && c.ip_addr) {
@@ -239,6 +310,15 @@ function renderClients() {
         if (c.status === 'connected' && (c.rx_bytes > 0 || c.tx_bytes > 0)) {
             trafficText = c.rx_human + ' / ' + c.tx_human;
         }
+
+        // R4 - 到期时间显示
+        var nameHtml = '<strong>' + (c.name || c.id) + '</strong>';
+        if (c.expiry) {
+            nameHtml += '<br><small style="color:#999;">到期: ' + c.expiry + '</small>';
+        }
+
+        // R1 - 空绑定IP显示
+        var bindIpHtml = getBindIpHtml(c.bind_ips);
 
         // 连接/断开按钮（带防重复点击）
         var btnId = 'btn-' + c.id;
@@ -255,10 +335,10 @@ function renderClients() {
 
         html += '<tr>' +
             '<td><label class="pp-switch"><input type="checkbox" ' + (c.enabled ? 'checked' : '') + ' onchange="toggleClient(\'' + c.id + '\', this.checked)"><span class="pp-switch-slider"></span></label></td>' +
-            '<td><strong>' + (c.name || c.id) + '</strong></td>' +
-            '<td>' + (c.type || '').toUpperCase() + '</td>' +
+            '<td>' + nameHtml + '</td>' +
+            '<td>' + getTypeBadge(c.type) + '</td>' +
             '<td>' + (c.server || '-') + ':' + (c.port || '-') + '</td>' +
-            '<td style="max-width:200px;font-size:12px;line-height:1.6;">' + getBindIpHtml(c.bind_ips) + '</td>' +
+            '<td style="max-width:200px;font-size:12px;line-height:1.6;">' + bindIpHtml + '</td>' +
             '<td><span class="pp-status ' + statusClass + '">' + statusText + '</span></td>' +
             '<td style="font-size:12px;color:#666;white-space:nowrap;">' + trafficText + '</td>' +
             '<td class="pp-actions">' +
@@ -281,6 +361,7 @@ function showAddModal() {
     document.getElementById('form-port').value = '';
     document.getElementById('form-username').value = '';
     document.getElementById('form-password').value = '';
+    document.getElementById('form-expiry').value = '';
     document.getElementById('form-bindip').value = '';
     document.getElementById('form-enabled').checked = true;
     document.getElementById('edit-modal').classList.add('active');
@@ -298,6 +379,7 @@ function editClient(id) {
             document.getElementById('form-port').value = data.port || '';
             document.getElementById('form-username').value = data.username || '';
             document.getElementById('form-password').value = data.password || '';
+            document.getElementById('form-expiry').value = data.expiry || '';
             document.getElementById('form-bindip').value = (data.bind_ip || []).join('\n');
             document.getElementById('form-enabled').checked = data.enabled === '1';
             document.getElementById('edit-modal').classList.add('active');
@@ -323,6 +405,7 @@ function saveClient(e) {
         port: document.getElementById('form-port').value,
         username: document.getElementById('form-username').value,
         password: document.getElementById('form-password').value,
+        expiry: document.getElementById('form-expiry').value.trim(),
         bind_ip: bindIps
     };
 
@@ -477,8 +560,11 @@ function refreshStatusFull() {
         });
 }
 
+/* R1 - 空绑定IP显示「仅测试」 */
 function getBindIpHtml(bindIps) {
-    if (!bindIps || bindIps.length === 0) return '-';
+    if (!bindIps || bindIps.length === 0) {
+        return '<span style="color:#999;font-style:italic;">仅测试</span>';
+    }
 
     var onlineCount = 0;
     var totalCount = bindIps.length;
@@ -499,6 +585,246 @@ function getBindIpHtml(bindIps) {
 
     var summary = '<small style="color:#666;">' + onlineCount + '/' + totalCount + ' 在线</small>';
     return details.join('<br>') + '<br>' + summary;
+}
+
+/* ===== R3 - 批量导入 ===== */
+
+function showBatchImportModal() {
+    document.getElementById('batch-text').value = '';
+    document.getElementById('batch-type').value = 'l2tp';
+    batchParsedItems = [];
+    document.getElementById('batch-step1').classList.add('active');
+    document.getElementById('batch-step2').classList.remove('active');
+    document.getElementById('batch-modal').classList.add('active');
+}
+
+function closeBatchModal() {
+    document.getElementById('batch-modal').classList.remove('active');
+}
+
+function batchBackToStep1() {
+    document.getElementById('batch-step1').classList.add('active');
+    document.getElementById('batch-step2').classList.remove('active');
+}
+
+/* 构建已有客户端的去重 key 集合 */
+function buildExistingKeys() {
+    var keys = {};
+    clientData.forEach(function(c) {
+        var key = (c.server || '') + ':' + (c.port || '') + ':' + (c.username || '');
+        keys[key] = c.name || c.id;
+    });
+    return keys;
+}
+
+/* 解析单行 L2TP 数据 */
+function parseL2tpLine(line) {
+    var parts = line.split('|');
+    if (parts.length < 3) return null;
+
+    var server, port, username, password, expiry;
+
+    if (parts.length === 4) {
+        // 4字段：判断第2字段是否为纯数字且<=65535
+        var field2 = parts[1].trim();
+        if (/^\d+$/.test(field2) && parseInt(field2) <= 65535) {
+            // IP|端口|用户名|密码
+            server = parts[0].trim();
+            port = (parseInt(field2) === 0) ? '1701' : field2;
+            username = parts[2].trim();
+            password = parts[3].trim();
+            expiry = '';
+        } else {
+            // IP|用户名|密码|到期日（默认端口1701）
+            server = parts[0].trim();
+            port = '1701';
+            username = parts[1].trim();
+            password = parts[2].trim();
+            expiry = parts[3].trim();
+        }
+    } else if (parts.length >= 5) {
+        // 5字段：IP|端口|用户名|密码|到期日
+        server = parts[0].trim();
+        var rawPort = parts[1].trim();
+        port = (rawPort === '0' || rawPort === '') ? '1701' : rawPort;
+        username = parts[2].trim();
+        password = parts[3].trim();
+        expiry = parts[4].trim();
+    } else {
+        // 3字段：IP|用户名|密码
+        server = parts[0].trim();
+        port = '1701';
+        username = parts[1].trim();
+        password = parts[2].trim();
+        expiry = '';
+    }
+
+    // 只取日期部分（去掉时间）
+    if (expiry && expiry.indexOf(' ') > 0) {
+        expiry = expiry.split(' ')[0];
+    }
+
+    return { server: server, port: port, username: username, password: password, expiry: expiry };
+}
+
+/* 解析单行 SOCKS5 数据 */
+function parseSocks5Line(line) {
+    var parts = line.split('|');
+    if (parts.length < 2) return null;
+
+    return {
+        server: parts[0].trim(),
+        port: parts[1].trim(),
+        username: (parts[2] || '').trim(),
+        password: (parts[3] || '').trim(),
+        expiry: (parts[4] || '').trim()
+    };
+}
+
+/* 解析并预览 */
+function batchParse() {
+    var type = document.getElementById('batch-type').value;
+    var text = document.getElementById('batch-text').value.trim();
+
+    if (!text) {
+        alert('请粘贴导入数据');
+        return;
+    }
+
+    var lines = text.split('\n').filter(function(l) { return l.trim(); });
+    if (lines.length === 0) {
+        alert('未检测到有效数据');
+        return;
+    }
+
+    var existingKeys = buildExistingKeys();
+    var batchKeys = {};
+    var items = [];
+    var tempNextId = nextClientId;
+
+    lines.forEach(function(line, idx) {
+        var parsed = null;
+        if (type === 'l2tp') {
+            parsed = parseL2tpLine(line);
+        } else {
+            parsed = parseSocks5Line(line);
+        }
+
+        if (!parsed || !parsed.server) {
+            items.push({ line: line, status: 'skip', reason: '格式无法解析', parsed: null });
+            return;
+        }
+
+        var dedupKey = parsed.server + ':' + parsed.port + ':' + parsed.username;
+
+        if (existingKeys[dedupKey]) {
+            items.push({ line: line, status: 'skip', reason: '已存在: ' + existingKeys[dedupKey], parsed: parsed });
+            return;
+        }
+
+        if (batchKeys[dedupKey]) {
+            items.push({ line: line, status: 'skip', reason: '本批次重复（第' + batchKeys[dedupKey] + '行）', parsed: parsed });
+            return;
+        }
+
+        batchKeys[dedupKey] = idx + 1;
+        var clientId = 's' + tempNextId;
+        tempNextId++;
+        var name = type.toUpperCase() + '_' + parsed.server;
+
+        items.push({
+            line: line,
+            status: 'ok',
+            reason: '',
+            parsed: parsed,
+            clientId: clientId,
+            name: name,
+            type: type
+        });
+    });
+
+    batchParsedItems = items;
+
+    // 渲染预览表格
+    var okCount = items.filter(function(i) { return i.status === 'ok'; }).length;
+    var skipCount = items.filter(function(i) { return i.status === 'skip'; }).length;
+
+    var html = '<p>共 <strong>' + items.length + '</strong> 行，将导入 <strong style="color:#28a745;">' + okCount + '</strong> 条，跳过 <strong style="color:#856404;">' + skipCount + '</strong> 条</p>';
+    html += '<table class="pp-preview-table"><thead><tr><th>#</th><th>服务器</th><th>端口</th><th>用户名</th><th>到期</th><th>状态</th></tr></thead><tbody>';
+
+    items.forEach(function(item, idx) {
+        var rowClass = item.status === 'ok' ? 'pp-preview-row-ok' : 'pp-preview-row-skip';
+        var statusHtml = item.status === 'ok' ? '<span style="color:#155724;">✓ 将导入</span>' : '<span style="color:#856404;">⚠ ' + item.reason + '</span>';
+        var p = item.parsed;
+        html += '<tr class="' + rowClass + '">' +
+            '<td>' + (idx + 1) + '</td>' +
+            '<td>' + (p ? p.server : '-') + '</td>' +
+            '<td>' + (p ? p.port : '-') + '</td>' +
+            '<td>' + (p ? (p.username || '-') : '-') + '</td>' +
+            '<td>' + (p ? (p.expiry || '-') : '-') + '</td>' +
+            '<td>' + statusHtml + '</td>' +
+            '</tr>';
+    });
+
+    html += '</tbody></table>';
+
+    document.getElementById('batch-preview').innerHTML = html;
+    document.getElementById('batch-confirm-btn').disabled = (okCount === 0);
+    document.getElementById('batch-step1').classList.remove('active');
+    document.getElementById('batch-step2').classList.add('active');
+}
+
+/* 确认导入 */
+function batchConfirmImport() {
+    var toImport = batchParsedItems.filter(function(i) { return i.status === 'ok'; });
+    if (toImport.length === 0) return;
+
+    var payload = toImport.map(function(item) {
+        return {
+            id: item.clientId,
+            enabled: '1',
+            name: item.name,
+            type: item.type,
+            server: item.parsed.server,
+            port: item.parsed.port,
+            username: item.parsed.username || '',
+            password: item.parsed.password || '',
+            expiry: item.parsed.expiry || '',
+            bind_ip: []
+        };
+    });
+
+    var btn = document.getElementById('batch-confirm-btn');
+    btn.disabled = true;
+    btn.textContent = '导入中...';
+
+    // 使用 POST + FormData 提交，避免 URL 长度限制
+    var formData = new FormData();
+    formData.append('action', 'batch_import');
+    formData.append('data', JSON.stringify(payload));
+
+    fetch(apiUrl, {
+        method: 'POST',
+        body: formData
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(result) {
+        if (result.success) {
+            alert('成功导入 ' + result.imported + ' 条线路');
+            closeBatchModal();
+            refreshStatusFull();
+        } else {
+            alert('导入失败: ' + (result.error || '未知错误'));
+        }
+        btn.disabled = false;
+        btn.textContent = '确认导入';
+    })
+    .catch(function(e) {
+        console.error('Batch import error:', e);
+        alert('导入请求失败');
+        btn.disabled = false;
+        btn.textContent = '确认导入';
+    });
 }
 
 // 初始化

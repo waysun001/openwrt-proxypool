@@ -31,6 +31,8 @@ get_client_status() {
     local name=$(get_config "$client" "name" "$client")
     local server=$(get_config "$client" "server" "")
     local port=$(get_config "$client" "port" "")
+    local username=$(get_config "$client" "username" "")
+    local expiry=$(get_config "$client" "expiry" "")
     local enabled=$(get_config "$client" "enabled" "0")
     local bind_ips=$(uci -q get "proxypool.$client.bind_ip" 2>/dev/null | tr ' ' ',')
     local status="offline"
@@ -86,6 +88,8 @@ get_client_status() {
   "type": "$type",
   "server": "$server",
   "port": "$port",
+  "username": "$username",
+  "expiry": "$expiry",
   "enabled": $enabled,
   "status": "$status",
   "ip_addr": "$ip_addr",

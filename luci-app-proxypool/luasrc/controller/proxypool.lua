@@ -38,6 +38,7 @@ function api_handler()
             data.port = uci:get("proxypool", client, "port") or ""
             data.username = uci:get("proxypool", client, "username") or ""
             data.password = uci:get("proxypool", client, "password") or ""
+            data.expiry = uci:get("proxypool", client, "expiry") or ""
             data.bind_ip = uci:get("proxypool", client, "bind_ip") or {}
             if type(data.bind_ip) == "string" then
                 data.bind_ip = {data.bind_ip}
@@ -60,6 +61,11 @@ function api_handler()
                 uci:set("proxypool", client, "port", d.port or "")
                 uci:set("proxypool", client, "username", d.username or "")
                 uci:set("proxypool", client, "password", d.password or "")
+                if d.expiry and d.expiry ~= "" then
+                    uci:set("proxypool", client, "expiry", d.expiry)
+                else
+                    uci:delete("proxypool", client, "expiry")
+                end
                 if d.bind_ip and #d.bind_ip > 0 then
                     uci:set("proxypool", client, "bind_ip", d.bind_ip)
                 else
@@ -135,6 +141,45 @@ function api_handler()
         sys.exec("> /var/log/proxypool.log")
         http.prepare_content("application/json")
         http.write('{"success": true}')
+
+    elseif action == "batch_import" then
+        -- 批量导入：接收 JSON 数组，逐条写入 UCI，单次 commit
+        local raw = http.formvalue("data")
+        if raw then
+            local items = json.parse(raw)
+            if items and type(items) == "table" then
+                local imported = 0
+                for _, d in ipairs(items) do
+                    local cid = sanitize_client(d.id)
+                    if cid then
+                        uci:set("proxypool", cid, "client")
+                        uci:set("proxypool", cid, "enabled", d.enabled or "1")
+                        uci:set("proxypool", cid, "name", d.name or "")
+                        uci:set("proxypool", cid, "type", d.type or "socks5")
+                        uci:set("proxypool", cid, "server", d.server or "")
+                        uci:set("proxypool", cid, "port", d.port or "")
+                        uci:set("proxypool", cid, "username", d.username or "")
+                        uci:set("proxypool", cid, "password", d.password or "")
+                        if d.expiry and d.expiry ~= "" then
+                            uci:set("proxypool", cid, "expiry", d.expiry)
+                        end
+                        if d.bind_ip and type(d.bind_ip) == "table" and #d.bind_ip > 0 then
+                            uci:set("proxypool", cid, "bind_ip", d.bind_ip)
+                        end
+                        imported = imported + 1
+                    end
+                end
+                uci:commit("proxypool")
+                http.prepare_content("application/json")
+                http.write('{"success": true, "imported": ' .. imported .. '}')
+            else
+                http.prepare_content("application/json")
+                http.write('{"error": "Invalid JSON data"}')
+            end
+        else
+            http.prepare_content("application/json")
+            http.write('{"error": "No data provided"}')
+        end
 
     elseif action == "backup_create" then
         local file = "/tmp/proxypool_backup_" .. os.time() .. ".tar.gz"
