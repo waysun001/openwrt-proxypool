@@ -75,10 +75,27 @@ jobs:
       run: |
         cd sdk
 
-        # 只保留 packages、luci、base feed，移除 SDK 中不可用的其他 feed
+        # 移除 SDK 中不可用的 feed
         sed -i '/telephony/d; /routing/d' feeds.conf.default
 
-        ./scripts/feeds update -a
+        # 确保 luci feed 存在（SDK 可能未自带或 URL 失效）
+        if ! grep -q '^src-git luci' feeds.conf.default; then
+          echo "src-git luci https://github.com/openwrt/luci.git;openwrt-23.05" >> feeds.conf.default
+        fi
+
+        echo "=== feeds.conf.default ==="
+        cat feeds.conf.default
+
+        # 更新 feeds，带重试
+        ./scripts/feeds update -a || ./scripts/feeds update -a
+
+        # 验证 luci feed 是否存在
+        if [ ! -d "feeds/luci" ]; then
+          echo "Error: feeds/luci not found, retrying luci feed..."
+          ./scripts/feeds update luci
+        fi
+        ls -la feeds/
+
         ./scripts/feeds install -a
 
         echo "CONFIG_PACKAGE_proxypool-core=m" >> .config
