@@ -64,7 +64,34 @@ jobs:
     - name: 更新 feeds
       run: |
         cd openwrt
-        ./scripts/feeds update -a
+
+        # 优化 git 网络配置，防止大仓库克隆中断
+        git config --global http.postBuffer 524288000
+        git config --global http.lowSpeedLimit 1000
+        git config --global http.lowSpeedTime 60
+
+        # 将 git.openwrt.org 替换为 GitHub 镜像（避免 RPC/curl 18 断连）
+        sed -i 's|https://git.openwrt.org/openwrt/openwrt.git|https://github.com/openwrt/openwrt.git|g' feeds.conf.default
+        sed -i 's|https://git.openwrt.org/feed/packages.git|https://github.com/openwrt/packages.git|g' feeds.conf.default
+        sed -i 's|https://git.openwrt.org/project/luci.git|https://github.com/openwrt/luci.git|g' feeds.conf.default
+
+        # 更新 feeds，带重试
+        feeds_ok=0
+        for attempt in 1 2 3; do
+          echo "=== feeds update attempt $attempt ==="
+          if ./scripts/feeds update -a; then
+            feeds_ok=1
+            break
+          fi
+          echo "Attempt $attempt failed, waiting 30s..."
+          sleep 30
+        done
+
+        if [ "$feeds_ok" != "1" ]; then
+          echo "Error: feeds update failed after 3 attempts"
+          exit 1
+        fi
+
         ./scripts/feeds install -a
 
     - name: 安装自定义软件包

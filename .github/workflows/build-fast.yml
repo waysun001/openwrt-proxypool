@@ -78,6 +78,11 @@ jobs:
         # 移除 SDK 中不可用的 feed
         sed -i '/telephony/d; /routing/d' feeds.conf.default
 
+        # 将 git.openwrt.org 替换为 GitHub 镜像（避免 RPC/curl 18 断连）
+        sed -i 's|https://git.openwrt.org/openwrt/openwrt.git|https://github.com/openwrt/openwrt.git|g' feeds.conf.default
+        sed -i 's|https://git.openwrt.org/feed/packages.git|https://github.com/openwrt/packages.git|g' feeds.conf.default
+        sed -i 's|https://git.openwrt.org/project/luci.git|https://github.com/openwrt/luci.git|g' feeds.conf.default
+
         # 确保 luci feed 存在（SDK 可能未自带或 URL 失效）
         if ! grep -q '^src-git luci' feeds.conf.default; then
           echo "src-git luci https://github.com/openwrt/luci.git;openwrt-23.05" >> feeds.conf.default
@@ -86,14 +91,37 @@ jobs:
         echo "=== feeds.conf.default ==="
         cat feeds.conf.default
 
-        # 更新 feeds，带重试
-        ./scripts/feeds update -a || ./scripts/feeds update -a
+        # 优化 git 网络配置，防止大仓库克隆中断
+        git config --global http.postBuffer 524288000
+        git config --global http.lowSpeedLimit 1000
+        git config --global http.lowSpeedTime 60
+        git config --global advice.detachedHead false
 
-        # 验证 luci feed 是否存在
-        if [ ! -d "feeds/luci" ]; then
-          echo "Error: feeds/luci not found, retrying luci feed..."
-          ./scripts/feeds update luci
+        # 更新 feeds，带重试（最多3次，每次间隔30秒）
+        feeds_ok=0
+        for attempt in 1 2 3; do
+          echo "=== feeds update attempt $attempt ==="
+          if ./scripts/feeds update -a; then
+            feeds_ok=1
+            break
+          fi
+          echo "Attempt $attempt failed, waiting 30s..."
+          sleep 30
+        done
+
+        if [ "$feeds_ok" != "1" ]; then
+          echo "Error: feeds update failed after 3 attempts"
+          exit 1
         fi
+
+        # 验证关键 feeds 目录存在
+        for feed_dir in feeds/base feeds/luci feeds/packages; do
+          if [ ! -d "$feed_dir" ]; then
+            feed_name=$(basename "$feed_dir")
+            echo "Warning: $feed_dir not found, retrying $feed_name..."
+            ./scripts/feeds update "$feed_name" || { sleep 15 && ./scripts/feeds update "$feed_name"; }
+          fi
+        done
         ls -la feeds/
 
         ./scripts/feeds install -a
