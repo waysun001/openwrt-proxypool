@@ -80,6 +80,25 @@
 .pp-preview-row-skip { background: #fff3cd; }
 .pp-import-step { display: none; }
 .pp-import-step.active { display: block; }
+
+/* #5 - 到期预警徽章 */
+.pp-badge-expired { display: inline-block; padding: 2px 6px; border-radius: 8px; font-size: 10px; background: #f8d7da; color: #721c24; }
+.pp-badge-expiring { display: inline-block; padding: 2px 6px; border-radius: 8px; font-size: 10px; background: #fff3cd; color: #856404; }
+
+/* #6 - 搜索/筛选工具栏 */
+.pp-filter-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.pp-search-input { padding: 6px 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; width: 200px; }
+.pp-filter-select { padding: 6px 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; }
+.pp-table th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+.pp-table th.sortable:hover { background: #e9ecef; }
+.pp-sort-indicator { font-size: 10px; margin-left: 4px; color: #007bff; }
+
+/* #4 - 批量操作栏 */
+.pp-batch-bar { display: none; padding: 10px 15px; background: #e3f2fd; border-radius: 4px; align-items: center; gap: 10px; flex-wrap: wrap; }
+.pp-batch-bar.active { display: flex; }
+.pp-batch-bar span { font-weight: 600; color: #0d47a1; }
+.pp-table td.pp-checkbox-cell, .pp-table th.pp-checkbox-cell { width: 36px; text-align: center; }
+.pp-table td.pp-checkbox-cell input, .pp-table th.pp-checkbox-cell input { cursor: pointer; width: 16px; height: 16px; }
 </style>
 
 <div class="pp-container">
@@ -112,23 +131,49 @@
             <button class="pp-btn pp-btn-warning" onclick="showBatchImportModal()">批量导入</button>
             <button class="pp-btn pp-btn-success" onclick="reloadConfig()">应用配置</button>
             <button class="pp-btn pp-btn-secondary" onclick="refreshStatus()">刷新状态</button>
+            <button class="pp-btn pp-btn-secondary" onclick="showExportModal()">导出</button>
+        </div>
+
+        <!-- #6 - 搜索/筛选 -->
+        <div class="pp-filter-bar" style="margin-bottom:10px;">
+            <input type="text" class="pp-search-input" id="search-input" placeholder="搜索名称/服务器/用户名..." oninput="applyFilterAndSort()">
+            <select class="pp-filter-select" id="filter-select" onchange="applyFilterAndSort()">
+                <option value="all">全部</option>
+                <option value="l2tp">L2TP</option>
+                <option value="socks5">SOCKS5</option>
+                <option value="connected">已连接</option>
+                <option value="disconnected">未连接</option>
+                <option value="disabled">已禁用</option>
+            </select>
+        </div>
+
+        <!-- #4 - 批量操作栏 -->
+        <div class="pp-batch-bar" id="batch-action-bar">
+            <span id="batch-selected-count">已选 0 项</span>
+            <button class="pp-btn pp-btn-success" onclick="batchOp('enable')" style="padding:4px 12px;font-size:13px;">启用</button>
+            <button class="pp-btn pp-btn-secondary" onclick="batchOp('disable')" style="padding:4px 12px;font-size:13px;">禁用</button>
+            <button class="pp-btn pp-btn-primary" onclick="batchOp('connect')" style="padding:4px 12px;font-size:13px;">连接</button>
+            <button class="pp-btn pp-btn-warning" onclick="batchOp('disconnect')" style="padding:4px 12px;font-size:13px;">断开</button>
+            <button class="pp-btn pp-btn-danger" onclick="batchOp('delete')" style="padding:4px 12px;font-size:13px;">删除</button>
+            <button class="pp-btn pp-btn-secondary" onclick="clearSelection()" style="padding:4px 12px;font-size:13px;">取消选择</button>
         </div>
 
         <table class="pp-table">
             <thead>
                 <tr>
+                    <th class="pp-checkbox-cell"><input type="checkbox" id="select-all-cb" onchange="toggleSelectAll(this.checked)"></th>
                     <th style="width:50px">启用</th>
-                    <th>名称</th>
-                    <th>类型</th>
-                    <th>服务器</th>
+                    <th class="sortable" onclick="toggleSort('name')">名称<span id="sort-name" class="pp-sort-indicator"></span></th>
+                    <th class="sortable" onclick="toggleSort('type')">类型<span id="sort-type" class="pp-sort-indicator"></span></th>
+                    <th class="sortable" onclick="toggleSort('server')">服务器<span id="sort-server" class="pp-sort-indicator"></span></th>
                     <th>绑定IP</th>
-                    <th>状态</th>
+                    <th class="sortable" onclick="toggleSort('status')">状态<span id="sort-status" class="pp-sort-indicator"></span></th>
                     <th>流量 ↓/↑</th>
                     <th style="width:220px">操作</th>
                 </tr>
             </thead>
             <tbody id="client-list">
-                <tr><td colspan="8" style="text-align:center;padding:40px;color:#666;">加载中...</td></tr>
+                <tr><td colspan="9" style="text-align:center;padding:40px;color:#666;">加载中...</td></tr>
             </tbody>
         </table>
     </div>
@@ -260,12 +305,38 @@
     </div>
 </div>
 
+<!-- 导出弹窗 -->
+<div class="pp-modal" id="export-modal">
+    <div class="pp-modal-content wide">
+        <div class="pp-modal-header">
+            <h3>导出线路</h3>
+            <button class="pp-modal-close" onclick="closeExportModal()">&times;</button>
+        </div>
+        <div class="pp-form-group">
+            <textarea id="export-text" readonly style="min-height:300px;font-family:monospace;font-size:12px;width:100%;box-sizing:border-box;"></textarea>
+        </div>
+        <div style="display:flex;gap:10px;justify-content:flex-end;">
+            <button type="button" class="pp-btn pp-btn-primary" onclick="copyExportText()">复制到剪贴板</button>
+            <button type="button" class="pp-btn pp-btn-secondary" onclick="closeExportModal()">关闭</button>
+        </div>
+    </div>
+</div>
+
 <script>
 var apiUrl = '<%=luci.dispatcher.build_url("admin", "services", "proxypool", "api")%>';
 var clientData = [];
 var nextClientId = 1;
 var pendingActions = {};
 var batchParsedItems = [];
+
+// #6 - 搜索/筛选/排序状态
+var searchQuery = '';
+var filterType = 'all';
+var sortColumn = '';
+var sortAscending = true;
+
+// #4 - 批量选择
+var selectedClients = {};
 
 function switchTab(tab) {
     document.querySelectorAll('.pp-tab').forEach(function(t) { t.classList.remove('active'); });
@@ -287,16 +358,173 @@ function getTypeBadge(type) {
     return '<span class="pp-badge">' + (type || '').toUpperCase() + '</span>';
 }
 
+/* #6 - 获取过滤并排序后的客户端列表 */
+function getFilteredAndSortedClients() {
+    var list = clientData.slice();
+
+    // 搜索过滤
+    if (searchQuery) {
+        var q = searchQuery.toLowerCase();
+        list = list.filter(function(c) {
+            return (c.name || '').toLowerCase().indexOf(q) >= 0 ||
+                   (c.server || '').toLowerCase().indexOf(q) >= 0 ||
+                   (c.username || '').toLowerCase().indexOf(q) >= 0;
+        });
+    }
+
+    // 类型/状态筛选
+    if (filterType !== 'all') {
+        list = list.filter(function(c) {
+            if (filterType === 'l2tp' || filterType === 'socks5') return c.type === filterType;
+            if (filterType === 'connected') return c.status === 'connected';
+            if (filterType === 'disconnected') return c.enabled && c.status !== 'connected' && c.status !== 'disabled';
+            if (filterType === 'disabled') return !c.enabled || c.status === 'disabled';
+            return true;
+        });
+    }
+
+    // 排序
+    if (sortColumn) {
+        list.sort(function(a, b) {
+            var va = '', vb = '';
+            if (sortColumn === 'name') { va = (a.name || '').toLowerCase(); vb = (b.name || '').toLowerCase(); }
+            else if (sortColumn === 'type') { va = a.type || ''; vb = b.type || ''; }
+            else if (sortColumn === 'server') { va = (a.server || '') + ':' + (a.port || ''); vb = (b.server || '') + ':' + (b.port || ''); }
+            else if (sortColumn === 'status') { va = a.status || ''; vb = b.status || ''; }
+            if (va < vb) return sortAscending ? -1 : 1;
+            if (va > vb) return sortAscending ? 1 : -1;
+            return 0;
+        });
+    }
+
+    return list;
+}
+
+function applyFilterAndSort() {
+    searchQuery = document.getElementById('search-input').value.trim();
+    filterType = document.getElementById('filter-select').value;
+    renderClients();
+}
+
+function toggleSort(col) {
+    if (sortColumn === col) {
+        sortAscending = !sortAscending;
+    } else {
+        sortColumn = col;
+        sortAscending = true;
+    }
+    updateSortIndicators();
+    renderClients();
+}
+
+function updateSortIndicators() {
+    var cols = ['name', 'type', 'server', 'status'];
+    cols.forEach(function(c) {
+        var el = document.getElementById('sort-' + c);
+        if (el) el.textContent = (sortColumn === c) ? (sortAscending ? '▲' : '▼') : '';
+    });
+}
+
+/* #5 - 到期预警 HTML */
+function getExpiryHtml(expiry) {
+    if (!expiry) return '';
+    var now = new Date();
+    now.setHours(0, 0, 0, 0);
+    var parts = expiry.split('-');
+    if (parts.length < 3) return '<br><small style="color:#999;">到期: ' + expiry + '</small>';
+    var exp = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+    var diffDays = Math.floor((exp - now) / 86400000);
+
+    if (diffDays < 0) {
+        return '<br><span class="pp-badge-expired">已过期</span>';
+    } else if (diffDays <= 3) {
+        return '<br><span class="pp-badge-expiring">即将到期</span>';
+    } else {
+        return '<br><small style="color:#999;">到期: ' + expiry + '</small>';
+    }
+}
+
+/* #4 - 批量选择相关 */
+function toggleSelectAll(checked) {
+    var filtered = getFilteredAndSortedClients();
+    filtered.forEach(function(c) {
+        selectedClients[c.id] = checked;
+    });
+    renderClients();
+    updateBatchBar();
+}
+
+function toggleSelectClient(id, checked) {
+    selectedClients[id] = checked;
+    updateBatchBar();
+    // 更新全选复选框状态
+    var filtered = getFilteredAndSortedClients();
+    var allChecked = filtered.length > 0 && filtered.every(function(c) { return selectedClients[c.id]; });
+    document.getElementById('select-all-cb').checked = allChecked;
+}
+
+function clearSelection() {
+    selectedClients = {};
+    document.getElementById('select-all-cb').checked = false;
+    renderClients();
+    updateBatchBar();
+}
+
+function updateBatchBar() {
+    var count = 0;
+    for (var k in selectedClients) { if (selectedClients[k]) count++; }
+    var bar = document.getElementById('batch-action-bar');
+    if (count > 0) {
+        bar.classList.add('active');
+        document.getElementById('batch-selected-count').textContent = '已选 ' + count + ' 项';
+    } else {
+        bar.classList.remove('active');
+    }
+}
+
+function getSelectedIds() {
+    var ids = [];
+    for (var k in selectedClients) { if (selectedClients[k]) ids.push(k); }
+    return ids;
+}
+
+function batchOp(action) {
+    var ids = getSelectedIds();
+    if (ids.length === 0) return;
+
+    if (action === 'delete') {
+        if (!confirm('确定要删除选中的 ' + ids.length + ' 个客户端吗？')) return;
+    }
+
+    var formData = new FormData();
+    formData.append('action', 'batch_action');
+    formData.append('batch_action', action);
+    formData.append('clients', JSON.stringify(ids));
+
+    fetch(apiUrl, { method: 'POST', body: formData })
+        .then(function(r) { return r.json(); })
+        .then(function(result) {
+            if (result.success) {
+                clearSelection();
+                refreshStatusFull();
+            } else {
+                alert('操作失败: ' + (result.error || '未知错误'));
+            }
+        })
+        .catch(function(e) { console.error('Batch action error:', e); });
+}
+
 function renderClients() {
     var tbody = document.getElementById('client-list');
+    var filtered = getFilteredAndSortedClients();
 
-    if (clientData.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:40px;color:#666;">暂无客户端，点击上方按钮添加</td></tr>';
+    if (filtered.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:40px;color:#666;">暂无匹配客户端</td></tr>';
         return;
     }
 
     var html = '';
-    clientData.forEach(function(c) {
+    filtered.forEach(function(c) {
         var statusClass = c.status === 'connected' ? 'connected' : (c.status === 'connecting' ? 'disconnected' : (c.enabled ? 'disconnected' : 'disabled'));
         var statusText = c.status === 'connected' ? '已连接' : (c.status === 'connecting' ? '连接中...' : (c.enabled ? '未连接' : '已禁用'));
 
@@ -311,11 +539,9 @@ function renderClients() {
             trafficText = c.rx_human + ' / ' + c.tx_human;
         }
 
-        // R4 - 到期时间显示
+        // #5 - 到期预警
         var nameHtml = '<strong>' + (c.name || c.id) + '</strong>';
-        if (c.expiry) {
-            nameHtml += '<br><small style="color:#999;">到期: ' + c.expiry + '</small>';
-        }
+        nameHtml += getExpiryHtml(c.expiry);
 
         // R1 - 空绑定IP显示
         var bindIpHtml = getBindIpHtml(c.bind_ips);
@@ -333,7 +559,10 @@ function renderClients() {
             connectBtn = '<button id="' + btnId + '" onclick="startClient(\'' + c.id + '\')" style="color:#28a745;">连接</button>';
         }
 
+        var isChecked = selectedClients[c.id] ? 'checked' : '';
+
         html += '<tr>' +
+            '<td class="pp-checkbox-cell"><input type="checkbox" ' + isChecked + ' onchange="toggleSelectClient(\'' + c.id + '\', this.checked)"></td>' +
             '<td><label class="pp-switch"><input type="checkbox" ' + (c.enabled ? 'checked' : '') + ' onchange="toggleClient(\'' + c.id + '\', this.checked)"><span class="pp-switch-slider"></span></label></td>' +
             '<td>' + nameHtml + '</td>' +
             '<td>' + getTypeBadge(c.type) + '</td>' +
@@ -825,6 +1054,52 @@ function batchConfirmImport() {
         btn.disabled = false;
         btn.textContent = '确认导入';
     });
+}
+
+/* ===== #7 - 导出功能 ===== */
+
+function showExportModal() {
+    document.getElementById('export-text').value = '加载中...';
+    document.getElementById('export-modal').classList.add('active');
+
+    fetch(apiUrl + '?action=export_all')
+        .then(function(r) { return r.json(); })
+        .then(function(clients) {
+            var l2tp = clients.filter(function(c) { return c.type === 'l2tp'; });
+            var socks5 = clients.filter(function(c) { return c.type === 'socks5'; });
+            var lines = [];
+
+            if (l2tp.length > 0) {
+                lines.push('# L2TP 线路 (' + l2tp.length + ' 条)');
+                l2tp.forEach(function(c) {
+                    lines.push(c.server + '|' + (c.port || '1701') + '|' + c.username + '|' + c.password + (c.expiry ? '|' + c.expiry : ''));
+                });
+                lines.push('');
+            }
+
+            if (socks5.length > 0) {
+                lines.push('# SOCKS5 线路 (' + socks5.length + ' 条)');
+                socks5.forEach(function(c) {
+                    lines.push(c.server + '|' + (c.port || '1080') + '|' + c.username + '|' + c.password);
+                });
+            }
+
+            document.getElementById('export-text').value = lines.join('\n');
+        })
+        .catch(function(e) {
+            document.getElementById('export-text').value = '导出失败: ' + e.message;
+        });
+}
+
+function closeExportModal() {
+    document.getElementById('export-modal').classList.remove('active');
+}
+
+function copyExportText() {
+    var textarea = document.getElementById('export-text');
+    textarea.select();
+    document.execCommand('copy');
+    alert('已复制到剪贴板');
 }
 
 // 初始化

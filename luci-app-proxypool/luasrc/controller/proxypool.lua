@@ -181,6 +181,102 @@ function api_handler()
             http.write('{"error": "No data provided"}')
         end
 
+    elseif action == "batch_action" then
+        -- 批量操作：enable/disable/delete/connect/disconnect
+        local batch_action = http.formvalue("batch_action") or ""
+        local raw_clients = http.formvalue("clients")
+        if raw_clients then
+            local client_list = json.parse(raw_clients)
+            if client_list and type(client_list) == "table" then
+                local processed = 0
+                if batch_action == "enable" or batch_action == "disable" then
+                    local val = (batch_action == "enable") and "1" or "0"
+                    for _, cid in ipairs(client_list) do
+                        local clean = sanitize_client(cid)
+                        if clean then
+                            uci:set("proxypool", clean, "enabled", val)
+                            processed = processed + 1
+                        end
+                    end
+                    uci:commit("proxypool")
+                    for _, cid in ipairs(client_list) do
+                        local clean = sanitize_client(cid)
+                        if clean then
+                            sys.exec("/usr/lib/proxypool/proxypool.sh toggle_client " .. clean .. " 2>/dev/null")
+                        end
+                    end
+                elseif batch_action == "delete" then
+                    for _, cid in ipairs(client_list) do
+                        local clean = sanitize_client(cid)
+                        if clean then
+                            sys.exec("/usr/lib/proxypool/proxypool.sh stop_client " .. clean .. " 2>/dev/null")
+                        end
+                    end
+                    for _, cid in ipairs(client_list) do
+                        local clean = sanitize_client(cid)
+                        if clean then
+                            uci:delete("proxypool", clean)
+                            processed = processed + 1
+                        end
+                    end
+                    uci:commit("proxypool")
+                elseif batch_action == "connect" then
+                    for _, cid in ipairs(client_list) do
+                        local clean = sanitize_client(cid)
+                        if clean then
+                            sys.exec("/usr/lib/proxypool/proxypool.sh start_client " .. clean .. " 2>/dev/null")
+                            processed = processed + 1
+                        end
+                    end
+                elseif batch_action == "disconnect" then
+                    for _, cid in ipairs(client_list) do
+                        local clean = sanitize_client(cid)
+                        if clean then
+                            sys.exec("/usr/lib/proxypool/proxypool.sh stop_client " .. clean .. " 2>/dev/null")
+                            processed = processed + 1
+                        end
+                    end
+                end
+                http.prepare_content("application/json")
+                http.write('{"success": true, "processed": ' .. processed .. '}')
+            else
+                http.prepare_content("application/json")
+                http.write('{"error": "Invalid clients data"}')
+            end
+        else
+            http.prepare_content("application/json")
+            http.write('{"error": "No clients provided"}')
+        end
+
+    elseif action == "export_all" then
+        -- 导出所有客户端（含密码）
+        local clients = {}
+        uci:foreach("proxypool", "client", function(s)
+            local item = {
+                id = s[".name"] or "",
+                name = s.name or "",
+                type = s.type or "",
+                server = s.server or "",
+                port = s.port or "",
+                username = s.username or "",
+                password = s.password or "",
+                expiry = s.expiry or "",
+                enabled = s.enabled or "0"
+            }
+            if s.bind_ip then
+                if type(s.bind_ip) == "table" then
+                    item.bind_ip = s.bind_ip
+                else
+                    item.bind_ip = {s.bind_ip}
+                end
+            else
+                item.bind_ip = {}
+            end
+            clients[#clients + 1] = item
+        end)
+        http.prepare_content("application/json")
+        http.write(json.stringify(clients))
+
     elseif action == "backup_create" then
         local file = "/tmp/proxypool_backup_" .. os.time() .. ".tar.gz"
         sys.exec("/usr/lib/proxypool/backup.sh create " .. file .. " 2>/dev/null")

@@ -27,6 +27,7 @@ format_bytes() {
 
 get_client_status() {
     local client="$1"
+    local nft_fwd_cache="$2"
     local type=$(get_config "$client" "type" "")
     local name=$(get_config "$client" "name" "$client")
     local server=$(get_config "$client" "server" "")
@@ -63,7 +64,8 @@ get_client_status() {
 
     # 读取流量统计：持久化累加值 + 当前 nftables counter（适用于所有客户端类型）
     local counter_dir="$RUN_DIR/counters"
-    local nft_fwd=$(nft list chain inet proxypool forward 2>/dev/null)
+    # 使用调用方传入的 nft 缓存，避免每个客户端重复查询
+    local nft_fwd="$nft_fwd_cache"
     local bind_ip_list=$(echo "$bind_ips" | tr ',' ' ')
     for bip in $bind_ip_list; do
         # 持久化累加值（rebuild 前保存的历史流量）
@@ -147,8 +149,11 @@ get_full_status() {
     local clients_json="["
     local first=1
 
+    # 循环前查询一次 nft，缓存结果避免 N 次系统调用
+    local NFT_FWD_CACHE=$(nft list chain inet proxypool forward 2>/dev/null)
+
     for client in $clients; do
-        local status_json=$(get_client_status "$client")
+        local status_json=$(get_client_status "$client" "$NFT_FWD_CACHE")
 
         if [ $first -eq 0 ]; then
             clients_json="$clients_json,"
@@ -195,7 +200,7 @@ case "$1" in
         get_full_status
         ;;
     client)
-        get_client_status "$2"
+        get_client_status "$2" "$(nft list chain inet proxypool forward 2>/dev/null)"
         ;;
     devices)
         get_bound_devices

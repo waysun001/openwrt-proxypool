@@ -43,6 +43,7 @@ define Package/proxypool-core/install
 	$(INSTALL_BIN) ./files/firewall.sh $(1)/usr/lib/proxypool/firewall.sh
 	$(INSTALL_BIN) ./files/status.sh $(1)/usr/lib/proxypool/status.sh
 	$(INSTALL_BIN) ./files/backup.sh $(1)/usr/lib/proxypool/backup.sh
+	$(INSTALL_BIN) ./files/watchdog.sh $(1)/usr/lib/proxypool/watchdog.sh
 
 	$(INSTALL_DIR) $(1)/etc/ppp
 	$(INSTALL_BIN) ./files/ip-up $(1)/etc/ppp/ip-up
