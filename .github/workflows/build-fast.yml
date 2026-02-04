@@ -16,6 +16,9 @@ on:
           - '23.05.3'
           - '23.05.2'
 
+permissions:
+  contents: write
+
 env:
   OPENWRT_VERSION: '23.05.3'
   TARGET: mediatek

@@ -19,6 +19,9 @@ on:
           - '23.05.2'
           - 'snapshot'
 
+permissions:
+  contents: write
+
 env:
   REPO_URL: https://github.com/openwrt/openwrt
   REPO_BRANCH: v23.05.3
