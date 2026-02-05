@@ -107,7 +107,7 @@ check_l2tp() {
 # 检查 SOCKS5 客户端健康状态
 check_socks5() {
     local client="$1"
-    local pid_file="$RUN_DIR/socks5/${client}.pid"
+    local pid_file="$RUN_DIR/redsocks/${client}.pid"
 
     if [ ! -f "$pid_file" ]; then
         do_restart "$client" "SOCKS5 pid file missing"

@@ -137,7 +137,7 @@ mru 1200
 EOF
 
     [ -f "$secrets_file" ] || touch "$secrets_file"
-    sed -i "/^${username}[[:space:]]/d" "$secrets_file" 2>/dev/null || true
+    sed -i "/^${username}[ 	]/d" "$secrets_file" 2>/dev/null || true
     echo "${username} * \"${password}\" *" >> "$secrets_file"
 
     chmod 600 "$ppp_file"
@@ -303,7 +303,7 @@ stop() {
     # 清理 chap-secrets 中对应条目
     local username=$(get_config "$client" "username" "" | tr -d ' \t\n\r')
     if [ -n "$username" ]; then
-        sed -i "/^${username}[[:space:]]/d" /etc/ppp/chap-secrets 2>/dev/null || true
+        sed -i "/^${username}[ 	]/d" /etc/ppp/chap-secrets 2>/dev/null || true
     fi
 
     log_info "L2TP client stopped: $name"

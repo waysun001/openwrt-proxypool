@@ -1,0 +1,8 @@
+#!/bin/sh
+# 首次启动时将 LAN IP 从默认 192.168.1.1 改为 192.168.9.1
+# uci-defaults 脚本成功执行后会自动删除，不会重复运行
+
+uci set network.lan.ipaddr='192.168.9.1'
+uci commit network
+
+exit 0

@@ -192,7 +192,7 @@ test_connection() {
     local server=$(get_config "$client" "server" "" | tr -d ' \t\n\r')
     local port=$(get_config "$client" "port" "1080" | tr -d ' \t\n\r')
 
-    if timeout 5 bash -c "echo >/dev/tcp/${server}/${port}" 2>/dev/null; then
+    if echo "" | nc -w 5 "$server" "$port" >/dev/null 2>&1; then
         echo "ok"
     else
         echo "fail"

@@ -144,7 +144,7 @@ jobs:
 
     - name: 创建 Release
       uses: softprops/action-gh-release@v1
-      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.organize.outputs.status == 'success'
       with:
         tag_name: v${{ github.run_number }}
         files: ${{ env.FIRMWARE }}/*

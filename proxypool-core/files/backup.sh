@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # 智联盒子 - 备份/恢复脚本
 
 BACKUP_DIR="/tmp/proxypool_backup"

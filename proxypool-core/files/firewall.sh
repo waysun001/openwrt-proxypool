@@ -215,7 +215,7 @@ NFTEOF
 init() {
     log_info "Initializing firewall..."
 
-    local nft_file=$(mktemp /tmp/proxypool-nft.XXXXXX)
+    local nft_file=$(mktemp /tmp/proxypool-nft.XXXXXX) || { log_error "Failed to create temp file"; return 1; }
 
     cat > "$nft_file" << 'NFTEOF'
 table inet proxypool;
@@ -307,7 +307,7 @@ _rebuild_locked() {
     cleanup_policy_routing
 
     # 构建并原子化加载 nft 规则
-    local nft_file=$(mktemp /tmp/proxypool-nft.XXXXXX)
+    local nft_file=$(mktemp /tmp/proxypool-nft.XXXXXX) || { log_error "Failed to create temp file"; return 1; }
     build_nft_ruleset "$nft_file"
 
     if ! nft -f "$nft_file" 2>> "$LOG_FILE"; then
