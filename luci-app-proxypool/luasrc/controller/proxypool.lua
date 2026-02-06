@@ -72,6 +72,8 @@ function api_handler()
                     uci:delete("proxypool", client, "bind_ip")
                 end
                 uci:commit("proxypool")
+                -- 保存后同步实际状态：enabled=1 则启动，enabled=0 则停止
+                sys.exec("/usr/lib/proxypool/proxypool.sh toggle_client " .. client .. " 2>/dev/null")
                 http.prepare_content("application/json")
                 http.write('{"success": true}')
             end
