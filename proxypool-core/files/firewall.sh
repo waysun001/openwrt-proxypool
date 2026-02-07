@@ -153,8 +153,9 @@ build_nft_ruleset() {
                     local tcp_port=$(get_client_port "$client")
                     if [ -n "$tcp_port" ]; then
                         allowed_ips="$allowed_ips $ip"
+                        # 排除内网目标，只重定向外网流量（保留对路由器和内网设备的直接访问）
                         socks5_rules="$socks5_rules
-        ip saddr $ip tcp dport != 22 redirect to :$tcp_port"
+        ip saddr $ip ip daddr != { 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12 } tcp dport != 22 redirect to :$tcp_port"
                     fi
                     ;;
                 l2tp)

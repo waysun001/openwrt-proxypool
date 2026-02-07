@@ -282,18 +282,9 @@ stop() {
         log_info "Deleted PPP interface: $ppp_iface"
     fi
 
-    # 清理内核 L2TP 隧道（防止残留的内核 l2tp session 阻碍重连）
-    if command -v ip l2tp >/dev/null 2>&1; then
-        local tunnel_ids=$(ip l2tp show tunnel 2>/dev/null | grep -v "^$" | awk '/Tunnel/{print $2}' | tr -d ',')
-        for tid in $tunnel_ids; do
-            # 删除隧道下的所有 session，再删除隧道
-            local session_ids=$(ip l2tp show session 2>/dev/null | grep "tunnel $tid" | awk '{print $2}' | tr -d ',')
-            for sid in $session_ids; do
-                ip l2tp del session tunnel_id "$tid" session_id "$sid" 2>/dev/null || true
-            done
-            ip l2tp del tunnel tunnel_id "$tid" 2>/dev/null || true
-        done
-    fi
+    # 注意：不再清理内核 L2TP 隧道
+    # 原代码会删除所有隧道（影响其他客户端），且内核会在进程退出时自动清理
+    # 如果出现残留隧道问题，可通过 /etc/init.d/proxypool restart 全局重启解决
 
     # 清理该客户端的运行文件（不影响其他客户端）
     rm -rf "$client_dir"

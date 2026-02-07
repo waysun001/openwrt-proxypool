@@ -72,11 +72,11 @@ function api_handler()
                     uci:delete("proxypool", client, "bind_ip")
                 end
                 uci:commit("proxypool")
-                -- 保存后应用配置：enabled=1 则重启（应用新配置），enabled=0 则停止
+                -- 保存后自动应用：enabled=1 则重启（stop+start），enabled=0 则停止
                 if d.enabled == "1" then
                     sys.exec("/usr/lib/proxypool/proxypool.sh restart_client " .. client .. " 2>/dev/null")
                 else
-                    sys.exec("/usr/lib/proxypool/proxypool.sh toggle_client " .. client .. " 2>/dev/null")
+                    sys.exec("/usr/lib/proxypool/proxypool.sh stop_client " .. client .. " 2>/dev/null")
                 end
                 http.prepare_content("application/json")
                 http.write('{"success": true}')

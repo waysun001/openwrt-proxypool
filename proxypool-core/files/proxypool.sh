@@ -111,7 +111,7 @@ stop_client() {
 restart_client() {
     local client="$1"
     _stop_client_nofirewall "$client"
-    sleep 2
+    sleep 3
     _start_client_nofirewall "$client"
     "$SCRIPT_DIR/firewall.sh" rebuild
 }
