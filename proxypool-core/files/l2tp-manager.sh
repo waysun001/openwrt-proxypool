@@ -151,6 +151,8 @@ start() {
     local name=$(get_config "$client" "name" "$client")
     local lac_name="lac_${client}"
     local client_dir="$L2TP_RUN_DIR/$client"
+    local ppp_iface="ppp-${client}"
+    local pid_file="$client_dir/xl2tpd.pid"
 
     log_info "Starting L2TP client: $name"
 
@@ -158,7 +160,6 @@ start() {
     ensure_system_xl2tpd_disabled
 
     # 防重复：如果 PPP 接口已连接，直接跳过
-    local ppp_iface="ppp-${client}"
     if ip link show "$ppp_iface" >/dev/null 2>&1; then
         local existing_ip=$(ip -4 addr show "$ppp_iface" 2>/dev/null | grep -o 'inet [0-9.]*' | cut -d' ' -f2)
         if [ -n "$existing_ip" ]; then
@@ -167,26 +168,22 @@ start() {
         fi
     fi
 
-    # 防重复：如果 xl2tpd 进程已在运行（正在连接中），直接跳过
-    # 只有 stop() 才有权杀进程，start() 绝不杀正在运行的进程
-    local pid_file="$client_dir/xl2tpd.pid"
+    # 强制清理：无论如何先杀掉该客户端的所有残留进程
+    # 这解决了 restart 后状态未完全清理的问题
+
+    # 1. 杀掉残留的 xl2tpd 进程（通过 pid 文件）
     if [ -f "$pid_file" ]; then
-        local old_pid=$(cat "$pid_file")
+        local old_pid=$(cat "$pid_file" 2>/dev/null)
         if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
-            log_info "xl2tpd already running for $client (PID: $old_pid), skipping"
-            return 0
+            log_info "Killing stale xl2tpd for $client (PID: $old_pid)"
+            kill "$old_pid" 2>/dev/null || true
+            sleep 1
+            kill -9 "$old_pid" 2>/dev/null || true
         fi
-        # 进程已死，清理残留 pid 文件
         rm -f "$pid_file"
     fi
 
-    # 启动前清理：如果存在残留的 PPP 接口（无对应 xl2tpd 进程），先删除
-    if ip link show "$ppp_iface" >/dev/null 2>&1; then
-        log_info "Cleaning stale PPP interface: $ppp_iface"
-        ip link delete "$ppp_iface" 2>/dev/null || true
-    fi
-
-    # 清理残留的 pppd 进程（匹配 ifname）
+    # 2. 杀掉残留的 pppd 进程（匹配 ifname）
     local stale_pppd=$(ps w 2>/dev/null | grep "pppd" | grep "ifname $ppp_iface" | grep -v grep | awk '{print $1}')
     if [ -n "$stale_pppd" ]; then
         log_info "Killing stale pppd for $ppp_iface: $stale_pppd"
@@ -194,6 +191,18 @@ start() {
         sleep 1
         echo "$stale_pppd" | xargs kill -9 2>/dev/null || true
     fi
+
+    # 3. 删除残留的 PPP 接口
+    if ip link show "$ppp_iface" >/dev/null 2>&1; then
+        log_info "Cleaning stale PPP interface: $ppp_iface"
+        ip link delete "$ppp_iface" 2>/dev/null || true
+    fi
+
+    # 4. 清理旧的运行目录
+    rm -rf "$client_dir"
+
+    # 等待内核清理 L2TP 隧道状态
+    sleep 2
 
     # 生成配置
     generate_xl2tpd_config "$client" || return 1

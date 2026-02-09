@@ -111,7 +111,7 @@ stop_client() {
 restart_client() {
     local client="$1"
     _stop_client_nofirewall "$client"
-    sleep 3
+    sleep 5  # L2TP 需要足够时间清理内核隧道状态
     _start_client_nofirewall "$client"
     "$SCRIPT_DIR/firewall.sh" rebuild
 }
