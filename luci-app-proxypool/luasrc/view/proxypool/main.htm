@@ -261,7 +261,7 @@
 
             <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:20px;">
                 <button type="button" class="pp-btn pp-btn-secondary" onclick="closeModal()">取消</button>
-                <button type="submit" class="pp-btn pp-btn-primary">保存</button>
+                <button type="submit" id="save-btn" class="pp-btn pp-btn-primary">保存</button>
             </div>
         </form>
     </div>
@@ -623,6 +623,13 @@ function closeModal() {
 function saveClient(e) {
     e.preventDefault();
 
+    var saveBtn = document.getElementById('save-btn');
+    if (saveBtn.disabled) return;  // 防止重复点击
+
+    // 显示保存中状态
+    saveBtn.disabled = true;
+    saveBtn.textContent = '保存中...';
+
     var id = document.getElementById('form-id').value;
     var bindIps = document.getElementById('form-bindip').value.split('\n').filter(function(ip) { return ip.trim(); });
 
@@ -644,9 +651,19 @@ function saveClient(e) {
             if (result.success) {
                 closeModal();
                 refreshStatusFull();
+            } else {
+                alert('保存失败，请重试');
             }
         })
-        .catch(function(e) { console.error('Save error:', e); });
+        .catch(function(e) {
+            console.error('Save error:', e);
+            alert('保存出错：' + e.message);
+        })
+        .finally(function() {
+            // 恢复按钮状态
+            saveBtn.disabled = false;
+            saveBtn.textContent = '保存';
+        });
 }
 
 function toggleClient(id, enabled) {
