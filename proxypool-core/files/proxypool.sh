@@ -117,6 +117,13 @@ restart_client() {
     "$SCRIPT_DIR/firewall.sh" rebuild
 }
 
+save_restart_client() {
+    local client="$1"
+    _stop_client_nofirewall "$client"
+    _start_client_nofirewall "$client"
+    "$SCRIPT_DIR/firewall.sh" rebuild
+}
+
 # 切换客户端启用/禁用状态（LuCI toggle 开关专用）
 # 读取当前 enabled 状态，执行对应的 stop/start + 单次 rebuild
 toggle_client() {
@@ -257,6 +264,9 @@ main() {
             ;;
         restart_client)
             restart_client "$1"
+            ;;
+        save_restart_client)
+            save_restart_client "$1"
             ;;
         toggle_client)
             toggle_client "$1"

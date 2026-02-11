@@ -74,9 +74,10 @@ function api_handler()
                 uci:commit("proxypool")
                 -- 保存后自动应用：先停止旧的，再根据 enabled 决定是否启动
                 -- 注意：分开调用 stop 和 start，模拟手动禁用→启用的流程
-                sys.exec("/usr/lib/proxypool/proxypool.sh stop_client " .. client .. " 2>/dev/null")
                 if d.enabled == "1" then
-                    sys.exec("/usr/lib/proxypool/proxypool.sh start_client " .. client .. " 2>/dev/null")
+                    sys.exec("/usr/lib/proxypool/proxypool.sh save_restart_client " .. client .. " 2>/dev/null")
+                else
+                    sys.exec("/usr/lib/proxypool/proxypool.sh stop_client " .. client .. " 2>/dev/null")
                 end
                 http.prepare_content("application/json")
                 http.write('{"success": true}')

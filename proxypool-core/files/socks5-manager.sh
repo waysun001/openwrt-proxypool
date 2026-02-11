@@ -176,11 +176,17 @@ status() {
     if [ -f "$pid_file" ]; then
         local pid=$(cat "$pid_file")
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-            echo "connected"
-            if [ -f "$REDSOCKS_DIR/${client}.ports" ]; then
-                cat "$REDSOCKS_DIR/${client}.ports"
+            local conn_result=$(test_connection "$client")
+            if [ "$conn_result" = "ok" ]; then
+                echo "connected"
+                if [ -f "$REDSOCKS_DIR/${client}.ports" ]; then
+                    cat "$REDSOCKS_DIR/${client}.ports"
+                fi
+                return 0
+            else
+                echo "disconnected"
+                return 1
             fi
-            return 0
         fi
     fi
 
@@ -192,7 +198,7 @@ test_connection() {
     local server=$(get_config "$client" "server" "" | tr -d ' \t\n\r')
     local port=$(get_config "$client" "port" "1080" | tr -d ' \t\n\r')
 
-    if echo "" | nc -w 5 "$server" "$port" >/dev/null 2>&1; then
+    if echo "" | nc -w 3 "$server" "$port" >/dev/null 2>&1; then
         echo "ok"
     else
         echo "fail"
