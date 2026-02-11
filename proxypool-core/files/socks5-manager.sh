@@ -195,10 +195,35 @@ status() {
 
 test_connection() {
     local client="$1"
-    local server=$(get_config "$client" "server" "" | tr -d ' \t\n\r')
-    local port=$(get_config "$client" "port" "1080" | tr -d ' \t\n\r')
+    local server=$(get_config "$client" "server" "" | tr -d ' 	
+')
+    local port=$(get_config "$client" "port" "1080" | tr -d ' 	
+')
+    local curl_bin=$(command -v curl 2>/dev/null)
 
-    if echo "" | nc -w 3 "$server" "$port" >/dev/null 2>&1; then
+    if [ -z "$curl_bin" ]; then
+        if nc -z -w 3 "$server" "$port" >/dev/null 2>&1; then
+            echo "ok"
+        else
+            echo "fail"
+        fi
+        return
+    fi
+
+    local user=$(get_config "$client" "username" "" | tr -d ' 	
+')
+    local pass=$(get_config "$client" "password" "" | tr -d ' 	
+')
+
+    if [ -n "$user" ] || [ -n "$pass" ]; then
+        "$curl_bin" --socks5 "${server}:${port}" --proxy-user "${user}:${pass}" \
+            --max-time 5 --silent --output /dev/null --head https://ip.sb
+    else
+        "$curl_bin" --socks5 "${server}:${port}" \
+            --max-time 5 --silent --output /dev/null --head https://ip.sb
+    fi
+
+    if [ $? -eq 0 ]; then
         echo "ok"
     else
         echo "fail"
