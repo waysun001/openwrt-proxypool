@@ -115,22 +115,29 @@
     </div>
 
     <div id="panel-clients" class="pp-panel active">
-        <div class="pp-toolbar" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
-            <button class="pp-btn pp-btn-primary" onclick="showAddModal()">+ 添加客户端</button>
-            <button class="pp-btn pp-btn-warning" onclick="showBatchImportModal()">批量导入</button>
-            <button class="pp-btn pp-btn-success" onclick="reloadConfig()">应用配置</button>
-            <button class="pp-btn pp-btn-secondary" onclick="refreshStatus()">刷新状态</button>
-            <button class="pp-btn pp-btn-secondary" onclick="showExportModal()">导出</button>
-            <label style="display:flex;align-items:center;gap:5px;font-size:13px;">
-                <span>内网租约:</span>
-                <select id="dhcp-lease-select" onchange="saveDhcpLease()" style="padding:4px 8px;border:1px solid #ddd;border-radius:4px;font-size:13px;">
-                    <option value="3d">3天</option>
-                    <option value="7d" selected>7天</option>
-                    <option value="30d">30天</option>
-                    <option value="365d">365天</option>
-                    <option value="infinite">永久</option>
-                </select>
-            </label>
+        <div class="pp-toolbar" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;">
+            <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
+                <button class="pp-btn pp-btn-primary" onclick="showAddModal()">+ 添加客户端</button>
+                <button class="pp-btn pp-btn-warning" onclick="showBatchImportModal()">批量导入</button>
+                <button class="pp-btn pp-btn-success" onclick="reloadConfig()">应用配置</button>
+                <button class="pp-btn pp-btn-secondary" onclick="refreshStatus()">刷新状态</button>
+                <button class="pp-btn pp-btn-secondary" onclick="showExportModal()">导出</button>
+                <label style="display:flex;align-items:center;gap:5px;font-size:13px;">
+                    <span>内网租约:</span>
+                    <select id="dhcp-lease-select" onchange="saveDhcpLease()" style="padding:4px 8px;border:1px solid #ddd;border-radius:4px;font-size:13px;">
+                        <option value="3d">3天</option>
+                        <option value="7d" selected>7天</option>
+                        <option value="30d">30天</option>
+                        <option value="365d">365天</option>
+                        <option value="infinite">永久</option>
+                    </select>
+                </label>
+            </div>
+            <div style="display:flex;gap:15px;font-size:13px;white-space:nowrap;">
+                <span>总 <strong id="stat-total">-</strong></span>
+                <span style="color:#28a745;">已连接 <strong id="stat-connected">-</strong></span>
+                <span style="color:#dc3545;">未连接 <strong id="stat-disconnected">-</strong></span>
+            </div>
         </div>
 
         <!-- #6 - 搜索/筛选 -->
@@ -918,13 +925,9 @@ function refreshStatusFull() {
         .then(function(r) { return r.json(); })
         .then(function(data) {
             if (data && data.summary) {
-                // 更新顶部菜单统计（如果存在）
-                var topTotal = document.getElementById('stat-total-top');
-                var topConnected = document.getElementById('stat-connected-top');
-                var topDisconnected = document.getElementById('stat-disconnected-top');
-                if (topTotal) topTotal.textContent = data.summary.total;
-                if (topConnected) topConnected.textContent = data.summary.connected;
-                if (topDisconnected) topDisconnected.textContent = data.summary.disconnected;
+                document.getElementById('stat-total').textContent = data.summary.total;
+                document.getElementById('stat-connected').textContent = data.summary.connected;
+                document.getElementById('stat-disconnected').textContent = data.summary.disconnected;
             }
 
             if (data && data.devices) {
@@ -1311,40 +1314,7 @@ function saveDhcpLease() {
         });
 }
 
-// 初始化顶部菜单统计显示
-function initTopMenuStats() {
-    // 多种方式查找顶部菜单容器
-    var menuContainer = document.getElementById('mainmenu') 
-                     || document.querySelector('.mainmenu') 
-                     || document.querySelector('header')
-                     || document.querySelector('.header');
-    
-    if (!menuContainer) {
-        console.warn('无法找到顶部菜单容器');
-        return;
-    }
-    
-    // 避免重复插入
-    if (document.getElementById('top-menu-stats')) return;
-    
-    // 创建统计容器
-    var statsDiv = document.createElement('div');
-    statsDiv.id = 'top-menu-stats';
-    statsDiv.style.cssText = 'display:inline-block;margin-left:20px;padding:5px 15px;background:#f0f0f0;border-radius:4px;font-size:13px;color:#333;';
-    statsDiv.innerHTML = 
-        '<span>总 <strong id="stat-total-top" style="color:#333;">-</strong></span> | ' +
-        '<span style="color:#28a745;">已连接 <strong id="stat-connected-top">-</strong></span> | ' +
-        '<span style="color:#dc3545;">未连接 <strong id="stat-disconnected-top">-</strong></span>';
-    
-    // 插入到菜单最后
-    menuContainer.appendChild(statsDiv);
-}
-
-// 初始化 - 延迟执行确保 DOM 完全加载
-setTimeout(function() {
-    initTopMenuStats();
-}, 500);
-
+// 初始化
 refreshStatusFull();
 loadDhcpLease();
 setInterval(refreshStatusFull, 10000);
