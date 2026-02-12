@@ -1,7 +1,34 @@
 <%+header%>
 
 <style>
-.pp-container { max-width: 1200px; margin: 0 auto; }
+.pp-container { max-width: 1840px; margin: 0 auto; padding: 0 20px 40px; }
+.pp-container-wide { width: 100%; }
+body.pp-wide-layout #mainmenu {
+    max-width: 1840px;
+    margin: 0 auto;
+    padding: 0 20px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0;
+    list-style: none;
+}
+body.pp-wide-layout #mainmenu > li > a {
+    min-width: 100px;
+    text-align: center;
+    font-weight: 600;
+    padding: 10px 24px;
+    white-space: nowrap;
+}
+body.pp-wide-layout #maincontent {
+    max-width: 1840px;
+    margin: 0 auto;
+    padding: 0 20px;
+}
+@media (max-width: 1400px) {
+    .pp-container { padding: 0 16px 30px; }
+    body.pp-wide-layout #mainmenu { padding: 0 12px; }
+    body.pp-wide-layout #maincontent { padding: 0 12px; }
+}
 .pp-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding: 15px; background: #f8f9fa; border-radius: 8px; }
 .pp-header h2 { margin: 0; color: #333; }
 .pp-stats { display: flex; gap: 20px; }
@@ -34,6 +61,8 @@
 .pp-status.connected { background: #d4edda; color: #155724; }
 .pp-status.disconnected { background: #f8d7da; color: #721c24; }
 .pp-status.disabled { background: #e2e3e5; color: #383d41; }
+.pp-status.pending { background: #fff3cd; color: #856404; }
+.pp-row-pending { background: #fffdf5 !important; }
 
 .pp-actions { display: flex; gap: 5px; }
 .pp-actions button { padding: 4px 8px; font-size: 12px; border: 1px solid #ddd; background: #fff; border-radius: 3px; cursor: pointer; }
@@ -327,6 +356,54 @@ var apiUrl = '<%=luci.dispatcher.build_url("admin", "services", "proxypool", "ap
 var clientData = [];
 var nextClientId = 1;
 var pendingActions = {};
+
+document.addEventListener('DOMContentLoaded', function() {
+    document.body.classList.add('pp-wide-layout');
+    customizeTopNavigation();
+});
+
+function normalizeText(str) {
+    return (str || '').replace(/\s+/g, '');
+}
+
+function customizeTopNavigation() {
+    var menu = document.querySelector('#mainmenu');
+    if (!menu) return;
+    var allowed = ['智联盒子', '信道分析', '备份与升级', '无线', '重启'];
+    var items = Array.from(menu.querySelectorAll('li'));
+    if (!items.length) return;
+    var selected = [];
+    allowed.forEach(function(label) {
+        var match = items.find(function(li) {
+            return normalizeText(li.textContent).indexOf(normalizeText(label)) !== -1;
+        });
+        if (match && selected.indexOf(match) === -1) {
+            selected.push(match);
+        }
+    });
+    if (!selected.length) return;
+    menu.innerHTML = '';
+    selected.forEach(function(node) { menu.appendChild(node); });
+    menu.classList.add('pp-top-nav');
+}
+
+function setPendingState(id, state, label) {
+    pendingActions[id] = { state: state, label: label || '处理中...' };
+}
+
+function clearPendingState(id) {
+    delete pendingActions[id];
+}
+
+function updateClientLocalState(id, updater) {
+    for (var i = 0; i < clientData.length; i++) {
+        if (clientData[i].id === id) {
+            updater(clientData[i]);
+            break;
+        }
+    }
+}
+
 var batchParsedItems = [];
 
 // #6 - 搜索/筛选/排序状态
@@ -496,6 +573,14 @@ function batchOp(action) {
         if (!confirm('确定要删除选中的 ' + ids.length + ' 个客户端吗？')) return;
     }
 
+    // 立即显示处理中状态
+    var labelMap = { enable: '启用中...', disable: '关闭中...', connect: '连接中...', disconnect: '断开中...', 'delete': '删除中...' };
+    var label = labelMap[action] || '处理中...';
+    ids.forEach(function(id) {
+        setPendingState(id, action, label);
+    });
+    renderClients();
+
     var formData = new FormData();
     formData.append('action', 'batch_action');
     formData.append('batch_action', action);
@@ -504,14 +589,21 @@ function batchOp(action) {
     fetch(apiUrl, { method: 'POST', body: formData })
         .then(function(r) { return r.json(); })
         .then(function(result) {
+            ids.forEach(function(id) { clearPendingState(id); });
             if (result.success) {
                 clearSelection();
                 refreshStatusFull();
+                startRapidPoll();
             } else {
                 alert('操作失败: ' + (result.error || '未知错误'));
+                refreshStatusFull();
             }
         })
-        .catch(function(e) { console.error('Batch action error:', e); });
+        .catch(function(e) {
+            console.error('Batch action error:', e);
+            ids.forEach(function(id) { clearPendingState(id); });
+            refreshStatusFull();
+        });
 }
 
 function renderClients() {
@@ -519,38 +611,54 @@ function renderClients() {
     var filtered = getFilteredAndSortedClients();
 
     if (filtered.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:40px;color:#666;">暂无匹配客户端</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:40px;color:#666;">暂无客户端</td></tr>';
         return;
     }
 
     var html = '';
     filtered.forEach(function(c) {
-        var statusClass = c.status === 'connected' ? 'connected' : (c.status === 'connecting' ? 'disconnected' : (c.enabled ? 'disconnected' : 'disabled'));
-        var statusText = c.status === 'connected' ? '已连接' : (c.status === 'connecting' ? '连接中...' : (c.enabled ? '未连接' : '已禁用'));
+        var pendingInfo = pendingActions[c.id];
+        var statusClass;
+        var statusText;
 
-        // 显示分配的 IP
+        if (pendingInfo) {
+            statusClass = 'pending';
+            statusText = pendingInfo.label || '处理中...';
+        } else if (c.status === 'connected') {
+            statusClass = 'connected';
+            statusText = '已连接';
+        } else if (c.status === 'connecting') {
+            statusClass = 'pending';
+            statusText = '连接中...';
+        } else if (c.status === 'disconnecting') {
+            statusClass = 'pending';
+            statusText = '断开中...';
+        } else if (!c.enabled || c.status === 'disabled') {
+            statusClass = 'disabled';
+            statusText = '已禁用';
+        } else {
+            statusClass = 'disconnected';
+            statusText = '未连接';
+        }
+
         if (c.status === 'connected' && c.ip_addr) {
             statusText = '已连接<br><small style="color:#666;">' + c.ip_addr + '</small>';
         }
 
-        // 流量显示
         var trafficText = '-';
         if (c.status === 'connected' && (c.rx_bytes > 0 || c.tx_bytes > 0)) {
             trafficText = c.rx_human + ' / ' + c.tx_human;
         }
 
-        // #5 - 到期预警
         var nameHtml = '<strong>' + (c.name || c.id) + '</strong>';
         nameHtml += getExpiryHtml(c.expiry);
 
-        // R1 - 空绑定IP显示
         var bindIpHtml = getBindIpHtml(c.bind_ips);
 
-        // 连接/断开按钮（带防重复点击）
         var btnId = 'btn-' + c.id;
         var connectBtn = '';
-        if (pendingActions[c.id]) {
-            connectBtn = '<button disabled style="color:#999;">处理中...</button>';
+        if (pendingInfo) {
+            connectBtn = '<button disabled style="color:#999;">' + (pendingInfo.label || '处理中...') + '</button>';
         } else if (c.status === 'connected') {
             connectBtn = '<button id="' + btnId + '" onclick="stopClient(\'' + c.id + '\')" style="color:#dc3545;">断开</button>';
         } else if (c.status === 'connecting') {
@@ -560,10 +668,12 @@ function renderClients() {
         }
 
         var isChecked = selectedClients[c.id] ? 'checked' : '';
+        var switchDisabled = pendingInfo ? 'disabled' : '';
+        var rowClass = pendingInfo ? ' class="pp-row-pending"' : '';
 
-        html += '<tr>' +
+        html += '<tr' + rowClass + '>' +
             '<td class="pp-checkbox-cell"><input type="checkbox" ' + isChecked + ' onchange="toggleSelectClient(\'' + c.id + '\', this.checked)"></td>' +
-            '<td><label class="pp-switch"><input type="checkbox" ' + (c.enabled ? 'checked' : '') + ' onchange="toggleClient(\'' + c.id + '\', this.checked)"><span class="pp-switch-slider"></span></label></td>' +
+            '<td><label class="pp-switch"><input type="checkbox" ' + (c.enabled ? 'checked ' : '') + switchDisabled + ' onchange="toggleClient(\'' + c.id + '\', this.checked)"><span class="pp-switch-slider"></span></label></td>' +
             '<td>' + nameHtml + '</td>' +
             '<td>' + getTypeBadge(c.type) + '</td>' +
             '<td>' + (c.server || '-') + ':' + (c.port || '-') + '</td>' +
@@ -580,6 +690,7 @@ function renderClients() {
 
     tbody.innerHTML = html;
 }
+
 
 function showAddModal() {
     document.getElementById('modal-title').textContent = '添加客户端';
@@ -668,73 +779,86 @@ function saveClient(e) {
 
 function toggleClient(id, enabled) {
     if (pendingActions[id]) return;
-    pendingActions[id] = true;
+    setPendingState(id, enabled ? 'enable' : 'disable', enabled ? '启用中...' : '关闭中...');
+    updateClientLocalState(id, function(c) {
+        c.enabled = enabled;
+        c.status = enabled ? 'connecting' : 'disabled';
+    });
     renderClients();
 
     fetch(apiUrl + '?action=toggle_client&client=' + id + '&enabled=' + (enabled ? '1' : '0'))
         .then(function(r) { return r.json(); })
         .then(function() {
-            delete pendingActions[id];
+            clearPendingState(id);
             refreshStatusFull();
+            startRapidPoll();
         })
         .catch(function(e) {
             console.error('Toggle error:', e);
-            delete pendingActions[id];
-            renderClients();
+            clearPendingState(id);
+            refreshStatusFull();
         });
 }
 
 function startClient(id) {
     if (pendingActions[id]) return;
-    pendingActions[id] = true;
+    setPendingState(id, 'start', '连接中...');
+    updateClientLocalState(id, function(c) {
+        c.enabled = true;
+        c.status = 'connecting';
+    });
     renderClients();
 
     fetch(apiUrl + '?action=start_client&client=' + id)
         .then(function() {
-            setTimeout(function() {
-                delete pendingActions[id];
-                refreshStatusFull();
-            }, 5000);
+            clearPendingState(id);
+            refreshStatusFull();
+            startRapidPoll();
         })
         .catch(function() {
-            delete pendingActions[id];
-            renderClients();
+            clearPendingState(id);
+            refreshStatusFull();
         });
 }
 
 function stopClient(id) {
     if (pendingActions[id]) return;
-    pendingActions[id] = true;
+    setPendingState(id, 'stop', '断开中...');
+    updateClientLocalState(id, function(c) {
+        c.status = 'disconnecting';
+    });
     renderClients();
 
     fetch(apiUrl + '?action=stop_client&client=' + id)
         .then(function() {
-            setTimeout(function() {
-                delete pendingActions[id];
-                refreshStatusFull();
-            }, 3000);
+            clearPendingState(id);
+            refreshStatusFull();
+            startRapidPoll();
         })
         .catch(function() {
-            delete pendingActions[id];
-            renderClients();
+            clearPendingState(id);
+            refreshStatusFull();
         });
 }
 
 function deleteClient(id) {
     if (pendingActions[id]) return;
-    if (confirm('确定要删除这个客户端吗？')) {
-        pendingActions[id] = true;
+    if (confirm('确定要删除此客户端吗？')) {
+        setPendingState(id, 'delete', '删除中...');
+        updateClientLocalState(id, function(c) {
+            c.status = 'disconnecting';
+        });
         renderClients();
 
         fetch(apiUrl + '?action=delete_client&client=' + id)
             .then(function() {
-                delete pendingActions[id];
+                clearPendingState(id);
                 refreshStatusFull();
             })
             .catch(function(e) {
                 console.error('Delete error:', e);
-                delete pendingActions[id];
-                renderClients();
+                clearPendingState(id);
+                refreshStatusFull();
             });
     }
 }
@@ -769,6 +893,30 @@ function clearLog() {
                 refreshLog();
             })
             .catch(function(e) { console.error('Clear log error:', e); });
+    }
+}
+
+// 快速轮询 - 操作后短时间内高频刷新状态
+var rapidPollTimer = null;
+var rapidPollCount = 0;
+
+function startRapidPoll() {
+    stopRapidPoll();
+    rapidPollCount = 0;
+    rapidPollTimer = setInterval(function() {
+        rapidPollCount++;
+        refreshStatusFull();
+        if (rapidPollCount >= 10) {
+            stopRapidPoll();
+        }
+    }, 1500);
+}
+
+function stopRapidPoll() {
+    if (rapidPollTimer) {
+        clearInterval(rapidPollTimer);
+        rapidPollTimer = null;
+        rapidPollCount = 0;
     }
 }
 
