@@ -36,6 +36,12 @@ get_client_status() {
     local password=$(get_config "$client" "password" "")
     local expiry=$(get_config "$client" "expiry" "")
     local remark=$(get_config "$client" "remark" "")
+    
+    # IP归属地查询（需要安装 geoiplookup 或配置纯真IP库）
+    local location=""
+    if [ -n "$server" ] && command -v geoiplookup >/dev/null 2>&1; then
+        location=$(geoiplookup "$server" 2>/dev/null | head -1 | cut -d':' -f2 | xargs)
+    fi
     local enabled=$(get_config "$client" "enabled" "0")
     local bind_ips=$(uci -q get "proxypool.$client.bind_ip" 2>/dev/null | tr ' ' ',')
     local status="offline"
@@ -101,6 +107,7 @@ get_client_status() {
   "password": "$password",
   "expiry": "$expiry",
   "remark": "$remark",
+  "location": "$location",
   "enabled": $enabled,
   "status": "$status",
   "ip_addr": "$ip_addr",

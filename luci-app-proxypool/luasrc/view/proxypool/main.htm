@@ -163,7 +163,7 @@
                 <tr>
                     <th class="pp-checkbox-cell"><input type="checkbox" id="select-all-cb" onchange="toggleSelectAll(this.checked)"></th>
                     <th style="width:50px">启用</th>
-                    <th class="sortable" onclick="toggleSort('name')">名称<span id="sort-name" class="pp-sort-indicator"></span></th>
+                    <th class="sortable" onclick="toggleSort('id')">ID<span id="sort-id" class="pp-sort-indicator"></span></th>
                     <th class="sortable" onclick="toggleSort('type')">类型<span id="sort-type" class="pp-sort-indicator"></span></th>
                     <th class="sortable" onclick="toggleSort('server')">服务器<span id="sort-server" class="pp-sort-indicator"></span></th>
                     <th>绑定IP</th>
@@ -205,11 +205,10 @@
         <form id="client-form" onsubmit="saveClient(event)">
             <input type="hidden" id="form-id">
 
+            <!-- 名称字段隐藏，用ID代替 -->
+            <input type="hidden" id="form-name">
+
             <div class="pp-form-row">
-                <div class="pp-form-group">
-                    <label>名称</label>
-                    <input type="text" id="form-name" placeholder="客户端名称（可留空）">
-                </div>
                 <div class="pp-form-group">
                     <label>类型</label>
                     <select id="form-type" onchange="onTypeChange()">
@@ -217,9 +216,6 @@
                         <option value="l2tp">L2TP</option>
                     </select>
                 </div>
-            </div>
-
-            <div class="pp-form-row">
                 <div class="pp-form-group">
                     <label>服务器地址</label>
                     <input type="text" id="form-server" required placeholder="IP或域名">
@@ -239,11 +235,10 @@
                     <label>密码</label>
                     <input type="text" id="form-password" placeholder="认证密码">
                 </div>
-            </div>
-
-            <div class="pp-form-group">
-                <label>到期时间</label>
-                <input type="text" id="form-expiry" placeholder="如: 2026-12-31">
+                <div class="pp-form-group">
+                    <label>到期时间</label>
+                    <input type="text" id="form-expiry" placeholder="如: 2026-12-31">
+                </div>
             </div>
 
             <div class="pp-form-group">
@@ -593,8 +588,8 @@ function renderClients() {
             trafficText = c.rx_human + ' / ' + c.tx_human;
         }
 
-        var nameHtml = '<strong>' + (c.name || c.id) + '</strong>';
-        nameHtml += getExpiryHtml(c.expiry);
+        var idHtml = '<strong>' + c.id + '</strong>';
+        idHtml += getExpiryHtml(c.expiry);
 
         var bindIpHtml = getBindIpHtml(c.bind_ips);
 
@@ -617,9 +612,10 @@ function renderClients() {
         html += '<tr' + rowClass + '>' +
             '<td class="pp-checkbox-cell"><input type="checkbox" ' + isChecked + ' onchange="toggleSelectClient(\'' + c.id + '\', this.checked)"></td>' +
             '<td><label class="pp-switch"><input type="checkbox" ' + (c.enabled ? 'checked ' : '') + switchDisabled + ' onchange="toggleClient(\'' + c.id + '\', this.checked)"><span class="pp-switch-slider"></span></label></td>' +
-            '<td>' + nameHtml + '</td>' +
+            '<td>' + idHtml + '</td>' +
             '<td>' + getTypeBadge(c.type) + '</td>' +
             '<td>' + (c.server || '-') + ':' + (c.port || '-') +
+                (c.location ? ' <span style="color:#999;font-size:11px;">(' + c.location + ')</span>' : '') +
                 '<br><small style="color:#888;">' + (c.username || '-') + ' / ' + (c.password || '-') + '</small></td>' +
             '<td style="max-width:200px;font-size:12px;line-height:1.6;">' + bindIpHtml + '</td>' +
             '<td><span class="pp-status ' + statusClass + '">' + statusText + '</span></td>' +
