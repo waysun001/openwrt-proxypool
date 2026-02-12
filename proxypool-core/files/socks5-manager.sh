@@ -196,9 +196,11 @@ status() {
 test_connection() {
     local client="$1"
     local server=$(get_config "$client" "server" "" | tr -d ' 	
-')
+
+')
     local port=$(get_config "$client" "port" "1080" | tr -d ' 	
-')
+
+')
     local curl_bin=$(command -v curl 2>/dev/null)
 
     if [ -z "$curl_bin" ]; then
@@ -211,9 +213,11 @@ test_connection() {
     fi
 
     local user=$(get_config "$client" "username" "" | tr -d ' 	
-')
+
+')
     local pass=$(get_config "$client" "password" "" | tr -d ' 	
-')
+
+')
 
     if [ -n "$user" ] || [ -n "$pass" ]; then
         "$curl_bin" --socks5 "${server}:${port}" --proxy-user "${user}:${pass}" \

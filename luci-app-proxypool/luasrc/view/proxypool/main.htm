@@ -107,23 +107,7 @@
 </style>
 
 <div class="pp-container">
-    <div class="pp-header">
-        <h2>智联盒子</h2>
-        <div class="pp-stats">
-            <div class="pp-stat">
-                <div class="pp-stat-value" id="stat-total">-</div>
-                <div class="pp-stat-label">总客户端</div>
-            </div>
-            <div class="pp-stat connected">
-                <div class="pp-stat-value" id="stat-connected">-</div>
-                <div class="pp-stat-label">已连接</div>
-            </div>
-            <div class="pp-stat disconnected">
-                <div class="pp-stat-value" id="stat-disconnected">-</div>
-                <div class="pp-stat-label">未连接</div>
-            </div>
-        </div>
-    </div>
+    <!-- 统计信息已移至工具栏右侧 -->
 
     <div class="pp-tabs">
         <div class="pp-tab active" onclick="switchTab('clients')">客户端管理</div>
@@ -131,12 +115,19 @@
     </div>
 
     <div id="panel-clients" class="pp-panel active">
-        <div class="pp-toolbar">
-            <button class="pp-btn pp-btn-primary" onclick="showAddModal()">+ 添加客户端</button>
-            <button class="pp-btn pp-btn-warning" onclick="showBatchImportModal()">批量导入</button>
-            <button class="pp-btn pp-btn-success" onclick="reloadConfig()">应用配置</button>
-            <button class="pp-btn pp-btn-secondary" onclick="refreshStatus()">刷新状态</button>
-            <button class="pp-btn pp-btn-secondary" onclick="showExportModal()">导出</button>
+        <div class="pp-toolbar" style="justify-content:space-between;align-items:center;">
+            <div style="display:flex;gap:10px;flex-wrap:wrap;">
+                <button class="pp-btn pp-btn-primary" onclick="showAddModal()">+ 添加客户端</button>
+                <button class="pp-btn pp-btn-warning" onclick="showBatchImportModal()">批量导入</button>
+                <button class="pp-btn pp-btn-success" onclick="reloadConfig()">应用配置</button>
+                <button class="pp-btn pp-btn-secondary" onclick="refreshStatus()">刷新状态</button>
+                <button class="pp-btn pp-btn-secondary" onclick="showExportModal()">导出</button>
+            </div>
+            <div style="display:flex;gap:15px;font-size:13px;white-space:nowrap;">
+                <span>总 <strong id="stat-total">-</strong></span>
+                <span style="color:#28a745;">已连接 <strong id="stat-connected">-</strong></span>
+                <span style="color:#dc3545;">未连接 <strong id="stat-disconnected">-</strong></span>
+            </div>
         </div>
 
         <!-- #6 - 搜索/筛选 -->
@@ -173,12 +164,13 @@
                     <th class="sortable" onclick="toggleSort('server')">服务器<span id="sort-server" class="pp-sort-indicator"></span></th>
                     <th>绑定IP</th>
                     <th class="sortable" onclick="toggleSort('status')">状态<span id="sort-status" class="pp-sort-indicator"></span></th>
+                    <th>超时</th>
                     <th>流量 ↓/↑</th>
                     <th style="width:220px">操作</th>
                 </tr>
             </thead>
             <tbody id="client-list">
-                <tr><td colspan="9" style="text-align:center;padding:40px;color:#666;">加载中...</td></tr>
+                <tr><td colspan="10" style="text-align:center;padding:40px;color:#666;">加载中...</td></tr>
             </tbody>
         </table>
     </div>
@@ -211,11 +203,11 @@
             <div class="pp-form-row">
                 <div class="pp-form-group">
                     <label>名称</label>
-                    <input type="text" id="form-name" required placeholder="客户端名称">
+                    <input type="text" id="form-name" placeholder="客户端名称（可留空）">
                 </div>
                 <div class="pp-form-group">
                     <label>类型</label>
-                    <select id="form-type">
+                    <select id="form-type" onchange="onTypeChange()">
                         <option value="socks5">SOCKS5</option>
                         <option value="l2tp">L2TP</option>
                     </select>
@@ -557,7 +549,7 @@ function renderClients() {
     var filtered = getFilteredAndSortedClients();
 
     if (filtered.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:40px;color:#666;">暂无客户端</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;padding:40px;color:#666;">暂无客户端</td></tr>';
         return;
     }
 
@@ -622,9 +614,15 @@ function renderClients() {
             '<td><label class="pp-switch"><input type="checkbox" ' + (c.enabled ? 'checked ' : '') + switchDisabled + ' onchange="toggleClient(\'' + c.id + '\', this.checked)"><span class="pp-switch-slider"></span></label></td>' +
             '<td>' + nameHtml + '</td>' +
             '<td>' + getTypeBadge(c.type) + '</td>' +
-            '<td>' + (c.server || '-') + ':' + (c.port || '-') + '</td>' +
+            '<td>' + (c.server || '-') + ':' + (c.port || '-') +
+                '<br><small style="color:#888;">' + (c.username || '-') + ' / ' + (c.password || '-') + '</small></td>' +
             '<td style="max-width:200px;font-size:12px;line-height:1.6;">' + bindIpHtml + '</td>' +
             '<td><span class="pp-status ' + statusClass + '">' + statusText + '</span></td>' +
+            '<td style="font-size:12px;white-space:nowrap;">' +
+                '<span style="color:#e67e22;" title="今日超时">' + (c.timeout_today || 0) + '</span>' +
+                ' / ' +
+                '<span style="color:#999;" title="昨日超时">' + (c.timeout_yesterday || 0) + '</span>' +
+            '</td>' +
             '<td style="font-size:12px;color:#666;white-space:nowrap;">' + trafficText + '</td>' +
             '<td class="pp-actions">' +
                 connectBtn +
@@ -638,13 +636,23 @@ function renderClients() {
 }
 
 
+function onTypeChange() {
+    var type = document.getElementById('form-type').value;
+    var portField = document.getElementById('form-port');
+    // 仅在端口为空或为默认值时自动填充
+    var cur = portField.value;
+    if (!cur || cur === '1080' || cur === '1701') {
+        portField.value = (type === 'l2tp') ? '1701' : '1080';
+    }
+}
+
 function showAddModal() {
     document.getElementById('modal-title').textContent = '添加客户端';
     document.getElementById('form-id').value = 's' + nextClientId;
     document.getElementById('form-name').value = '';
     document.getElementById('form-type').value = 'socks5';
     document.getElementById('form-server').value = '';
-    document.getElementById('form-port').value = '';
+    document.getElementById('form-port').value = '1080';
     document.getElementById('form-username').value = '';
     document.getElementById('form-password').value = '';
     document.getElementById('form-expiry').value = '';

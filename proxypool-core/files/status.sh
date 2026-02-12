@@ -33,6 +33,7 @@ get_client_status() {
     local server=$(get_config "$client" "server" "")
     local port=$(get_config "$client" "port" "")
     local username=$(get_config "$client" "username" "")
+    local password=$(get_config "$client" "password" "")
     local expiry=$(get_config "$client" "expiry" "")
     local enabled=$(get_config "$client" "enabled" "0")
     local bind_ips=$(uci -q get "proxypool.$client.bind_ip" 2>/dev/null | tr ' ' ',')
@@ -83,6 +84,11 @@ get_client_status() {
         bind_ips_json="[\"$(echo "$bind_ips" | sed 's/,/","/g')\"]"
     fi
 
+    # 超时计数
+    local timeout_dir="$RUN_DIR/timeout"
+    local timeout_today=$(cat "$timeout_dir/${client}.today" 2>/dev/null || echo 0)
+    local timeout_yesterday=$(cat "$timeout_dir/${client}.yesterday" 2>/dev/null || echo 0)
+
     cat << EOF
 {
   "id": "$client",
@@ -91,6 +97,7 @@ get_client_status() {
   "server": "$server",
   "port": "$port",
   "username": "$username",
+  "password": "$password",
   "expiry": "$expiry",
   "enabled": $enabled,
   "status": "$status",
@@ -99,7 +106,9 @@ get_client_status() {
   "rx_bytes": $rx,
   "tx_bytes": $tx,
   "rx_human": "$(format_bytes $rx)",
-  "tx_human": "$(format_bytes $tx)"
+  "tx_human": "$(format_bytes $tx)",
+  "timeout_today": $timeout_today,
+  "timeout_yesterday": $timeout_yesterday
 }
 EOF
 }
