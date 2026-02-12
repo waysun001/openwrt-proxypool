@@ -18,9 +18,12 @@ define Package/luci-app-proxypool/install
 	$(INSTALL_DIR) $(1)/usr/lib/lua/luci/controller
 	$(INSTALL_DIR) $(1)/usr/lib/lua/luci/view/proxypool
 	$(INSTALL_DIR) $(1)/etc/uci-defaults
+	$(INSTALL_DIR) $(1)/www/luci-static/resources
 
 	$(INSTALL_DATA) ./luasrc/controller/proxypool.lua $(1)/usr/lib/lua/luci/controller/
 	$(INSTALL_DATA) ./luasrc/view/proxypool/main.htm $(1)/usr/lib/lua/luci/view/proxypool/
+	$(INSTALL_DATA) ./htdocs/luci-static/resources/proxypool-global.css $(1)/www/luci-static/resources/
+	$(INSTALL_DATA) ./htdocs/luci-static/resources/proxypool-global.js $(1)/www/luci-static/resources/
 	$(INSTALL_BIN) ./root/etc/uci-defaults/luci-proxypool $(1)/etc/uci-defaults/
 endef
 

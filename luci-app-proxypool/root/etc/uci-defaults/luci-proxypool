@@ -20,6 +20,22 @@ add_list firewall.@zone[1].device='ppp-+'
 commit firewall
 FWEOF
 
+# 注入全局 CSS/JS 到所有 LuCI 主题的 header 模板
+MARKER="proxypool-global"
+for HEADER in /usr/lib/lua/luci/view/themes/*/header.htm; do
+    [ -f "$HEADER" ] || continue
+    grep -q "$MARKER" "$HEADER" && continue
+    awk '
+    /<\/head>/ {
+        print "<!-- " "proxypool-global" " -->"
+        print "<link rel=\"stylesheet\" href=\"/luci-static/resources/proxypool-global.css\">"
+        print "<script>document.documentElement.className+=\" pp-wide-layout\";</script>"
+        print "<script src=\"/luci-static/resources/proxypool-global.js\" defer></script>"
+    }
+    { print }
+    ' "$HEADER" > "$HEADER.tmp" && mv "$HEADER.tmp" "$HEADER"
+done
+
 # 清理缓存
 rm -f /tmp/luci-indexcache
 rm -rf /tmp/luci-modulecache

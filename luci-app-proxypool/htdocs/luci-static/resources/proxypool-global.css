@@ -1,0 +1,50 @@
+/* 智联盒子全局布局 - 隐藏原始导航，内容全宽 */
+html.pp-wide-layout header,
+html.pp-wide-layout .header,
+html.pp-wide-layout #header,
+html.pp-wide-layout .main-left,
+html.pp-wide-layout #mainmenu,
+html.pp-wide-layout .navbar-static-top,
+html.pp-wide-layout #navigation { display: none !important; }
+
+html.pp-wide-layout .main-right {
+    width: 100% !important;
+    margin-left: 0 !important;
+    float: none !important;
+}
+html.pp-wide-layout .main {
+    display: block !important;
+}
+html.pp-wide-layout #maincontent {
+    max-width: 1840px;
+    margin: 0 auto;
+    padding: 0 20px;
+}
+
+/* 顶部导航栏 */
+#pp-topnav {
+    max-width: 1840px;
+    margin: 0 auto;
+    padding: 0 20px;
+    display: flex;
+    gap: 0;
+    background: #fff;
+    border-bottom: 2px solid #ddd;
+}
+#pp-topnav a {
+    padding: 12px 28px;
+    text-decoration: none;
+    color: #333;
+    font-weight: 600;
+    font-size: 14px;
+    white-space: nowrap;
+    border-bottom: 3px solid transparent;
+    margin-bottom: -2px;
+}
+#pp-topnav a:hover { background: #f0f0f0; color: #007bff; }
+#pp-topnav a.pp-nav-active { color: #007bff; border-bottom-color: #007bff; }
+
+@media (max-width: 1400px) {
+    #pp-topnav { padding: 0 12px; }
+    html.pp-wide-layout #maincontent { padding: 0 12px; }
+}

@@ -2,32 +2,8 @@
 
 <style>
 .pp-container { max-width: 1840px; margin: 0 auto; padding: 0 20px 40px; }
-.pp-container-wide { width: 100%; }
-body.pp-wide-layout #mainmenu {
-    max-width: 1840px;
-    margin: 0 auto;
-    padding: 0 20px;
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0;
-    list-style: none;
-}
-body.pp-wide-layout #mainmenu > li > a {
-    min-width: 100px;
-    text-align: center;
-    font-weight: 600;
-    padding: 10px 24px;
-    white-space: nowrap;
-}
-body.pp-wide-layout #maincontent {
-    max-width: 1840px;
-    margin: 0 auto;
-    padding: 0 20px;
-}
 @media (max-width: 1400px) {
     .pp-container { padding: 0 16px 30px; }
-    body.pp-wide-layout #mainmenu { padding: 0 12px; }
-    body.pp-wide-layout #maincontent { padding: 0 12px; }
 }
 .pp-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding: 15px; background: #f8f9fa; border-radius: 8px; }
 .pp-header h2 { margin: 0; color: #333; }
@@ -356,36 +332,6 @@ var apiUrl = '<%=luci.dispatcher.build_url("admin", "services", "proxypool", "ap
 var clientData = [];
 var nextClientId = 1;
 var pendingActions = {};
-
-document.addEventListener('DOMContentLoaded', function() {
-    document.body.classList.add('pp-wide-layout');
-    customizeTopNavigation();
-});
-
-function normalizeText(str) {
-    return (str || '').replace(/\s+/g, '');
-}
-
-function customizeTopNavigation() {
-    var menu = document.querySelector('#mainmenu');
-    if (!menu) return;
-    var allowed = ['智联盒子', '信道分析', '备份与升级', '无线', '重启'];
-    var items = Array.from(menu.querySelectorAll('li'));
-    if (!items.length) return;
-    var selected = [];
-    allowed.forEach(function(label) {
-        var match = items.find(function(li) {
-            return normalizeText(li.textContent).indexOf(normalizeText(label)) !== -1;
-        });
-        if (match && selected.indexOf(match) === -1) {
-            selected.push(match);
-        }
-    });
-    if (!selected.length) return;
-    menu.innerHTML = '';
-    selected.forEach(function(node) { menu.appendChild(node); });
-    menu.classList.add('pp-top-nav');
-}
 
 function setPendingState(id, state, label) {
     pendingActions[id] = { state: state, label: label || '处理中...' };
