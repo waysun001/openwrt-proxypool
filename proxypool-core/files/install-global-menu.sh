@@ -1,6 +1,6 @@
 #!/bin/sh
 # ProxyPool 全局菜单安装脚本
-# 修改 LuCI header.htm，在顶部菜单添加快捷导航和统计
+# 修改 LuCI header.htm，替换原有菜单为自定义快捷导航和统计
 
 HEADER_FILE="/usr/lib/lua/luci/view/header.htm"
 BACKUP_FILE="${HEADER_FILE}.proxypool-backup"
@@ -31,28 +31,33 @@ fi
 
 echo "安装全局菜单..."
 
-# 插入样式和脚本
+# 插入样式和脚本（隐藏 LuCI 原有菜单）
 sed -i '/<\/head>/i\
 <!-- ProxyPool Global Menu -->\
 <style>\
+/* 隐藏 LuCI 原有菜单 */\
+#mainnav, .mainmenu, .main > .luci, .main > div[class*="menu"] { display: none !important; }\
+\
 #proxypool-global-menu {\
     display: flex;\
     justify-content: space-between;\
     align-items: center;\
     background: #f8f9fa;\
-    padding: 8px 20px;\
-    border-bottom: 1px solid #ddd;\
+    padding: 10px 20px;\
+    border-bottom: 2px solid #ddd;\
     font-size: 14px;\
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);\
 }\
 #proxypool-global-menu .menu-links { display: flex; gap: 10px; flex-wrap: wrap; }\
 #proxypool-global-menu .menu-links a {\
-    padding: 6px 14px;\
+    padding: 8px 16px;\
     background: #fff;\
     color: #333;\
     border: 1px solid #ddd;\
     border-radius: 4px;\
     text-decoration: none;\
     transition: all 0.2s;\
+    font-weight: 500;\
 }\
 #proxypool-global-menu .menu-links a:hover { background: #007bff; color: #fff; border-color: #007bff; }\
 #proxypool-global-menu .menu-links a.active { background: #007bff; color: #fff; border-color: #007bff; }\
@@ -88,6 +93,7 @@ sed -i '/<body[^>]*>/a\
 <div id="proxypool-global-menu">\
     <div class="menu-links">\
         <a href="/cgi-bin/luci/admin/services/proxypool">智联盒子</a>\
+        <a href="javascript:void(0)" onclick="window.open(\x27?tab=log\x27, \x27_self\x27)">系统日志</a>\
         <a href="/cgi-bin/luci/admin/network/wireless">信道分析</a>\
         <a href="/cgi-bin/luci/admin/system/flashops">备份与升级</a>\
         <a href="/cgi-bin/luci/admin/network/wireless">无线</a>\
@@ -102,6 +108,9 @@ sed -i '/<body[^>]*>/a\
 ' "$HEADER_FILE"
 
 echo "全局菜单安装完成！"
+echo "✓ 已隐藏 LuCI 原有菜单（状态|系统|服务|网络|注销）"
+echo "✓ 已安装自定义快捷菜单和统计显示"
+echo ""
 echo "如需恢复原始 header.htm，执行："
 echo "  cp $BACKUP_FILE $HEADER_FILE"
 echo "  /etc/init.d/uhttpd restart"
