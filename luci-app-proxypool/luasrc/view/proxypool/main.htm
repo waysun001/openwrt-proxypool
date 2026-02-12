@@ -1322,6 +1322,15 @@ function saveDhcpLease() {
 }
 
 // 初始化
+// 检测 URL 参数，自动切换标签（支持全局菜单跳转）
+(function() {
+    var urlParams = new URLSearchParams(window.location.search);
+    var tab = urlParams.get('tab');
+    if (tab === 'log') {
+        switchTab('log');
+    }
+})();
+
 refreshStatusFull();
 loadDhcpLease();
 setInterval(refreshStatusFull, 10000);

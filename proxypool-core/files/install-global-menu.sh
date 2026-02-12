@@ -93,7 +93,7 @@ sed -i '/<body[^>]*>/a\
 <div id="proxypool-global-menu">\
     <div class="menu-links">\
         <a href="/cgi-bin/luci/admin/services/proxypool">智联盒子</a>\
-        <a href="javascript:void(0)" onclick="window.open(\x27?tab=log\x27, \x27_self\x27)">系统日志</a>\
+        <a href="/cgi-bin/luci/admin/services/proxypool?tab=log">系统日志</a>\
         <a href="/cgi-bin/luci/admin/network/wireless">信道分析</a>\
         <a href="/cgi-bin/luci/admin/system/flashops">备份与升级</a>\
         <a href="/cgi-bin/luci/admin/network/wireless">无线</a>\
