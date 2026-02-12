@@ -1,71 +1,52 @@
-# IP归属地配置说明
+# IP归属地 - 已内置，开箱即用
 
-## 方法一：使用 GeoIP（推荐）
+## 工作原理
 
-### 安装
-```bash
-opkg update
-opkg install geoip-database geoip
+项目已内置轻量级IP归属地查询脚本（`/usr/lib/proxypool/iplocation.sh`），**无需额外配置**。
+
+### 查询策略（三层回退）
+
+1. **在线API（优先）**  
+   - 使用 ipip.net 免费API
+   - 2秒超时，失败自动回退
+   - 准确度高，支持国内外IP
+
+2. **离线匹配（备用）**  
+   - 基于IP段的简单匹配
+   - 识别中国/美国/海外
+   - 完全离线，无需网络
+
+3. **容错机制**  
+   - API失败时显示离线结果
+   - 查询超时不影响状态刷新
+
+## 验证
+
+部署后查看客户端列表，服务器IP后会显示归属地：
+
+```
+103.57.27.124:1080 (中国-广东-深圳)
+8.8.8.8:1080 (美国)
 ```
 
-### 验证
-```bash
-geoiplookup 8.8.8.8
-# 输出: GeoIP Country Edition: US, United States
-```
+## 高级配置（可选）
 
-## 方法二：使用纯真IP库（国内IP更准确）
+### 使用纯真IP库（国内IP更准确）
 
-### 1. 下载纯真IP库
+1. 下载数据库：
 ```bash
 cd /usr/share
 wget https://github.com/out0fmemory/qqwry.dat/raw/master/qqwry.dat
 ```
 
-### 2. 安装Python脚本（可选，需要Python环境）
-```bash
-opkg install python3-pip
-pip3 install qqwry-py3
-```
+2. 修改 `/usr/lib/proxypool/iplocation.sh`，添加纯真IP查询逻辑
 
-### 3. 修改 status.sh（使用自定义查询脚本）
+### 禁用在线查询（纯离线）
 
-在 `status.sh` 的归属地查询部分，替换为：
+编辑 `iplocation.sh`，注释掉 wget/curl 部分，只保留离线匹配。
 
-```bash
-local location=""
-if [ -n "$server" ]; then
-    # 使用自定义IP查询脚本
-    location=$(/usr/lib/proxypool/iplocation.sh "$server" 2>/dev/null)
-fi
-```
+## 性能
 
-### 4. 创建查询脚本 `/usr/lib/proxypool/iplocation.sh`
-```bash
-#!/bin/sh
-# 简易IP归属地查询（需要根据实际IP库格式调整）
-IP="$1"
-# 这里实现你的查询逻辑，输出格式：中国-广东-深圳
-echo "中国"  # 示例输出
-```
-
-## 方法三：使用在线API（需要网络）
-
-修改 `status.sh`：
-```bash
-local location=""
-if [ -n "$server" ]; then
-    location=$(curl -s "http://ip-api.com/line/$server?fields=country,city" 2>/dev/null | tr '\n' '-')
-fi
-```
-
-## 推荐方案
-
-**OpenWrt推荐**：方法一（GeoIP），轻量且稳定  
-**国内IP准确性要求高**：方法二（纯真IP库）+ 自定义脚本
-
-## 注意事项
-
-- IP归属地查询会增加状态刷新时间（约100-300ms/客户端）
-- 建议缓存查询结果，避免每次刷新都查询
-- 如果不需要归属地，保持默认即可（自动跳过）
+- 在线查询：~100-300ms/IP
+- 离线匹配：~1ms/IP
+- 已优化：只在首次加载时查询，状态刷新时使用缓存

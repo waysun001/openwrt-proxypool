@@ -37,10 +37,26 @@ get_client_status() {
     local expiry=$(get_config "$client" "expiry" "")
     local remark=$(get_config "$client" "remark" "")
     
-    # IP归属地查询（需要安装 geoiplookup 或配置纯真IP库）
+    # IP归属地查询（使用内置脚本，开箱即用，带缓存）
     local location=""
-    if [ -n "$server" ] && command -v geoiplookup >/dev/null 2>&1; then
-        location=$(geoiplookup "$server" 2>/dev/null | head -1 | cut -d':' -f2 | xargs)
+    if [ -n "$server" ]; then
+        local cache_file="$RUN_DIR/location_cache/${server}.txt"
+        if [ -f "$cache_file" ]; then
+            # 使用缓存（5分钟有效期）
+            local cache_age=$(($(date +%s) - $(stat -c %Y "$cache_file" 2>/dev/null || echo 0)))
+            if [ $cache_age -lt 300 ]; then
+                location=$(cat "$cache_file" 2>/dev/null)
+            fi
+        fi
+        
+        # 缓存未命中或过期，重新查询
+        if [ -z "$location" ]; then
+            location=$(/usr/lib/proxypool/iplocation.sh "$server" 2>/dev/null)
+            if [ -n "$location" ]; then
+                mkdir -p "$RUN_DIR/location_cache"
+                echo "$location" > "$cache_file"
+            fi
+        fi
     fi
     local enabled=$(get_config "$client" "enabled" "0")
     local bind_ips=$(uci -q get "proxypool.$client.bind_ip" 2>/dev/null | tr ' ' ',')
