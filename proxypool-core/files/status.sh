@@ -35,6 +35,7 @@ get_client_status() {
     local username=$(get_config "$client" "username" "")
     local password=$(get_config "$client" "password" "")
     local expiry=$(get_config "$client" "expiry" "")
+    local remark=$(get_config "$client" "remark" "")
     local enabled=$(get_config "$client" "enabled" "0")
     local bind_ips=$(uci -q get "proxypool.$client.bind_ip" 2>/dev/null | tr ' ' ',')
     local status="offline"
@@ -99,6 +100,7 @@ get_client_status() {
   "username": "$username",
   "password": "$password",
   "expiry": "$expiry",
+  "remark": "$remark",
   "enabled": $enabled,
   "status": "$status",
   "ip_addr": "$ip_addr",

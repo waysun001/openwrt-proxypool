@@ -2,7 +2,10 @@
 module("luci.controller.proxypool", package.seeall)
 
 function index()
-    entry({"admin", "services", "proxypool"}, template("proxypool/main"), _("智联盒子"), 60).dependent = false
+    -- 设置为默认首页
+    entry({"admin"}, alias("admin", "services", "proxypool"), _("Administration"), 10).index = true
+    
+    entry({"admin", "services", "proxypool"}, template("proxypool/main"), _("智联盒子"), 10).dependent = false
     entry({"admin", "services", "proxypool", "api"}, call("api_handler")).leaf = true
 end
 
@@ -123,12 +126,45 @@ function api_handler()
             http.write('{"success": true}')
         end
 
+    elseif action == "save_remark" then
+        local client = sanitize_client(http.formvalue("client"))
+        local remark = http.formvalue("remark") or ""
+        if client then
+            if remark ~= "" then
+                uci:set("proxypool", client, "remark", remark)
+            else
+                uci:delete("proxypool", client, "remark")
+            end
+            uci:commit("proxypool")
+            http.prepare_content("application/json")
+            http.write('{"success": true}')
+        end
+
     elseif action == "restart_client" then
         local client = sanitize_client(http.formvalue("client"))
         if client then
             sys.exec("/usr/lib/proxypool/proxypool.sh restart_client " .. client .. " 2>/dev/null")
             http.prepare_content("application/json")
             http.write('{"success": true}')
+        end
+
+    elseif action == "get_dhcp_lease" then
+        local leasetime = uci:get("dhcp", "lan", "leasetime") or "7d"
+        http.prepare_content("application/json")
+        http.write('{"leasetime": "' .. leasetime .. '"}')
+
+    elseif action == "set_dhcp_lease" then
+        local leasetime = http.formvalue("leasetime") or "7d"
+        -- 验证格式（允许数字+d 或 infinite）
+        if leasetime:match("^%d+d$") or leasetime == "infinite" then
+            uci:set("dhcp", "lan", "leasetime", leasetime)
+            uci:commit("dhcp")
+            sys.exec("/etc/init.d/dnsmasq restart >/dev/null 2>&1")
+            http.prepare_content("application/json")
+            http.write('{"success": true}')
+        else
+            http.prepare_content("application/json")
+            http.write('{"error": "Invalid leasetime format"}')
         end
 
     elseif action == "reload" then

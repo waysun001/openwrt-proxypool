@@ -116,12 +116,22 @@
 
     <div id="panel-clients" class="pp-panel active">
         <div class="pp-toolbar" style="justify-content:space-between;align-items:center;">
-            <div style="display:flex;gap:10px;flex-wrap:wrap;">
+            <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
                 <button class="pp-btn pp-btn-primary" onclick="showAddModal()">+ 添加客户端</button>
                 <button class="pp-btn pp-btn-warning" onclick="showBatchImportModal()">批量导入</button>
                 <button class="pp-btn pp-btn-success" onclick="reloadConfig()">应用配置</button>
                 <button class="pp-btn pp-btn-secondary" onclick="refreshStatus()">刷新状态</button>
                 <button class="pp-btn pp-btn-secondary" onclick="showExportModal()">导出</button>
+                <label style="display:flex;align-items:center;gap:5px;font-size:13px;">
+                    <span>内网租约:</span>
+                    <select id="dhcp-lease-select" onchange="saveDhcpLease()" style="padding:4px 8px;border:1px solid #ddd;border-radius:4px;font-size:13px;">
+                        <option value="3d">3天</option>
+                        <option value="7d" selected>7天</option>
+                        <option value="30d">30天</option>
+                        <option value="365d">365天</option>
+                        <option value="infinite">永久</option>
+                    </select>
+                </label>
             </div>
             <div style="display:flex;gap:15px;font-size:13px;white-space:nowrap;">
                 <span>总 <strong id="stat-total">-</strong></span>
@@ -151,6 +161,7 @@
             <button class="pp-btn pp-btn-primary" onclick="batchOp('connect')" style="padding:4px 12px;font-size:13px;">连接</button>
             <button class="pp-btn pp-btn-warning" onclick="batchOp('disconnect')" style="padding:4px 12px;font-size:13px;">断开</button>
             <button class="pp-btn pp-btn-danger" onclick="batchOp('delete')" style="padding:4px 12px;font-size:13px;">删除</button>
+            <button class="pp-btn pp-btn-secondary" onclick="exportSelected()" style="padding:4px 12px;font-size:13px;">导出选中</button>
             <button class="pp-btn pp-btn-secondary" onclick="clearSelection()" style="padding:4px 12px;font-size:13px;">取消选择</button>
         </div>
 
@@ -166,11 +177,12 @@
                     <th class="sortable" onclick="toggleSort('status')">状态<span id="sort-status" class="pp-sort-indicator"></span></th>
                     <th>超时</th>
                     <th>流量 ↓/↑</th>
+                    <th style="width:150px">备注</th>
                     <th style="width:220px">操作</th>
                 </tr>
             </thead>
             <tbody id="client-list">
-                <tr><td colspan="10" style="text-align:center;padding:40px;color:#666;">加载中...</td></tr>
+                <tr><td colspan="11" style="text-align:center;padding:40px;color:#666;">加载中...</td></tr>
             </tbody>
         </table>
     </div>
@@ -549,7 +561,7 @@ function renderClients() {
     var filtered = getFilteredAndSortedClients();
 
     if (filtered.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;padding:40px;color:#666;">暂无客户端</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;padding:40px;color:#666;">暂无客户端</td></tr>';
         return;
     }
 
@@ -624,6 +636,9 @@ function renderClients() {
                 '<span style="color:#999;" title="昨日超时">' + (c.timeout_yesterday || 0) + '</span>' +
             '</td>' +
             '<td style="font-size:12px;color:#666;white-space:nowrap;">' + trafficText + '</td>' +
+            '<td class="pp-remark" onclick="editRemark(\'' + c.id + '\')" style="cursor:pointer;font-size:12px;color:#555;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="点击编辑备注">' +
+                '<span id="remark-' + c.id + '">' + (c.remark || '<span style="color:#ccc;">无</span>') + '</span>' +
+            '</td>' +
             '<td class="pp-actions">' +
                 connectBtn +
                 '<button onclick="editClient(\'' + c.id + '\')">编辑</button>' +
@@ -815,6 +830,38 @@ function deleteClient(id) {
                 refreshStatusFull();
             });
     }
+}
+
+function editRemark(id) {
+    var client = clientData.find(function(c) { return c.id === id; });
+    if (!client) return;
+    
+    var currentRemark = client.remark || '';
+    var newRemark = prompt('修改备注（留空则清除）:', currentRemark);
+    
+    if (newRemark === null) return; // 取消
+    
+    saveRemark(id, newRemark.trim());
+}
+
+function saveRemark(id, remark) {
+    fetch(apiUrl + '?action=save_remark&client=' + id + '&remark=' + encodeURIComponent(remark))
+        .then(function(r) { return r.json(); })
+        .then(function(result) {
+            if (result.success) {
+                // 更新本地数据
+                updateClientLocalState(id, function(c) {
+                    c.remark = remark;
+                });
+                renderClients();
+            } else {
+                alert('保存备注失败');
+            }
+        })
+        .catch(function(e) {
+            console.error('Save remark error:', e);
+            alert('保存备注出错');
+        });
 }
 
 function reloadConfig() {
@@ -1177,13 +1224,29 @@ function batchConfirmImport() {
 
 /* ===== #7 - 导出功能 ===== */
 
-function showExportModal() {
+function exportSelected() {
+    var ids = getSelectedIds();
+    if (ids.length === 0) {
+        alert('请先选择要导出的客户端');
+        return;
+    }
+    showExportModal(ids);
+}
+
+function showExportModal(filterIds) {
     document.getElementById('export-text').value = '加载中...';
     document.getElementById('export-modal').classList.add('active');
 
     fetch(apiUrl + '?action=export_all')
         .then(function(r) { return r.json(); })
         .then(function(clients) {
+            // 如果有 filterIds，只导出选中的
+            if (filterIds && filterIds.length > 0) {
+                clients = clients.filter(function(c) {
+                    return filterIds.indexOf(c.id) >= 0;
+                });
+            }
+
             var l2tp = clients.filter(function(c) { return c.type === 'l2tp'; });
             var socks5 = clients.filter(function(c) { return c.type === 'socks5'; });
             var lines = [];
@@ -1201,6 +1264,10 @@ function showExportModal() {
                 socks5.forEach(function(c) {
                     lines.push(c.server + '|' + (c.port || '1080') + '|' + c.username + '|' + c.password);
                 });
+            }
+
+            if (lines.length === 0) {
+                lines.push('# 无数据');
             }
 
             document.getElementById('export-text').value = lines.join('\n');
@@ -1221,8 +1288,39 @@ function copyExportText() {
     alert('已复制到剪贴板');
 }
 
+// DHCP 租约配置
+function loadDhcpLease() {
+    fetch(apiUrl + '?action=get_dhcp_lease')
+        .then(function(r) { return r.json(); })
+        .then(function(result) {
+            if (result.leasetime) {
+                document.getElementById('dhcp-lease-select').value = result.leasetime;
+            }
+        })
+        .catch(function(e) { console.error('Load DHCP lease error:', e); });
+}
+
+function saveDhcpLease() {
+    var leasetime = document.getElementById('dhcp-lease-select').value;
+    var label = document.getElementById('dhcp-lease-select').selectedOptions[0].text;
+    fetch(apiUrl + '?action=set_dhcp_lease&leasetime=' + encodeURIComponent(leasetime))
+        .then(function(r) { return r.json(); })
+        .then(function(result) {
+            if (result.success) {
+                alert('DHCP 租约已更新为 ' + label + '，DHCP 服务已重启');
+            } else {
+                alert('设置失败: ' + (result.error || '未知错误'));
+            }
+        })
+        .catch(function(e) {
+            console.error('Save DHCP lease error:', e);
+            alert('设置租约失败');
+        });
+}
+
 // 初始化
 refreshStatusFull();
+loadDhcpLease();
 setInterval(refreshStatusFull, 10000);
 </script>
 
