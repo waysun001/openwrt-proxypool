@@ -2,8 +2,16 @@
 module("luci.controller.proxypool", package.seeall)
 
 function index()
+    -- 登录后默认跳转到智联盒子
+    entry({"admin"}, call("redirect_to_proxypool"), _("Administration"), 1).index = true
+    
     entry({"admin", "services", "proxypool"}, template("proxypool/main"), _("智联盒子"), 10).dependent = false
     entry({"admin", "services", "proxypool", "api"}, call("api_handler")).leaf = true
+end
+
+function redirect_to_proxypool()
+    local http = require "luci.http"
+    http.redirect(luci.dispatcher.build_url("admin", "services", "proxypool"))
 end
 
 -- 输入清洗：只允许字母数字下划线（防止命令注入）
