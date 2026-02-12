@@ -8,6 +8,12 @@ set ucitrack.@proxypool[-1].init=proxypool
 commit ucitrack
 EOF
 
+# 设置 LAN IP 为 192.168.9.1
+uci -q batch << 'LANEOF'
+set network.lan.ipaddr='192.168.9.1'
+commit network
+LANEOF
+
 # 禁用系统 xl2tpd 自启动（智联盒子使用独立 xl2tpd 实例）
 if [ -x /etc/init.d/xl2tpd ]; then
     /etc/init.d/xl2tpd stop 2>/dev/null
@@ -20,21 +26,77 @@ add_list firewall.@zone[1].device='ppp-+'
 commit firewall
 FWEOF
 
-# 注入全局 CSS/JS 到所有 LuCI 主题的 header 模板
-MARKER="proxypool-global"
-for HEADER in /usr/lib/lua/luci/view/themes/*/header.htm; do
-    [ -f "$HEADER" ] || continue
-    grep -q "$MARKER" "$HEADER" && continue
-    awk '
-    /<\/head>/ {
-        print "<!-- " "proxypool-global" " -->"
-        print "<link rel=\"stylesheet\" href=\"/luci-static/resources/proxypool-global.css\">"
-        print "<script>document.documentElement.className+=\" pp-wide-layout\";</script>"
-        print "<script src=\"/luci-static/resources/proxypool-global.js\" defer></script>"
-    }
-    { print }
-    ' "$HEADER" > "$HEADER.tmp" && mv "$HEADER.tmp" "$HEADER"
+# ===== 全局 UI 定制（JS 版 LuCI 兼容方案）=====
+
+# 1. 写入全局导航 JS
+cat > /www/luci-static/resources/proxypool-global.js << 'PPJS'
+(function(){
+'use strict';
+if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',tryBuild)}else{tryBuild()}
+function tryBuild(){if(document.getElementById('pp-topnav'))return;buildTopNav(0)}
+function buildTopNav(attempt){
+var targets=[
+{label:'\u667A\u8054\u76D2\u5B50',kw:['\u667A\u8054\u76D2\u5B50']},
+{label:'\u4FE1\u9053\u5206\u6790',kw:['\u4FE1\u9053\u5206\u6790']},
+{label:'\u5907\u4EFD\u4E0E\u5347\u7EA7',kw:['\u5907\u4EFD\u4E0E\u5347\u7EA7','\u5907\u4EFD/\u5347\u7EA7']},
+{label:'\u65E0\u7EBF',kw:['\u65E0\u7EBF']},
+{label:'\u91CD\u542F',kw:['\u91CD\u542F']}
+];
+var links=document.querySelectorAll('a[href]');
+var items=[];
+targets.forEach(function(t){
+var href=null;
+for(var i=0;i<links.length&&!href;i++){
+var txt=links[i].textContent.replace(/\s+/g,'');
+for(var k=0;k<t.kw.length;k++){if(txt===t.kw[k]){href=links[i].href;break}}}
+if(!href){for(var i=0;i<links.length&&!href;i++){
+var txt=links[i].textContent.replace(/\s+/g,'');
+for(var k=0;k<t.kw.length;k++){if(txt.indexOf(t.kw[k])!==-1&&links[i].href.indexOf('/cgi-bin/')!==-1){href=links[i].href;break}}}}
+if(href)items.push({label:t.label,href:href})
+});
+if(items.length===0&&attempt<20){setTimeout(function(){buildTopNav(attempt+1)},500);return}
+if(items.length===0)return;
+var nav=document.createElement('div');nav.id='pp-topnav';
+items.forEach(function(it){
+var a=document.createElement('a');a.href=it.href;a.textContent=it.label;
+var loc=window.location.href.replace(/\/$/,'');var tgt=it.href.replace(/\/$/,'');
+if(loc===tgt||loc.indexOf(tgt+'/')===0)a.className='pp-nav-active';
+nav.appendChild(a)});
+var anchor=document.querySelector('#maincontent')||document.querySelector('.main-right')||document.querySelector('.main')||document.querySelector('#content');
+if(anchor&&anchor.parentNode){anchor.parentNode.insertBefore(nav,anchor)}
+else{document.body.insertBefore(nav,document.body.firstChild)}
+}
+})();
+PPJS
+
+# 2. 追加全局 CSS 到所有 bootstrap 主题的 cascade.css
+for CSS_FILE in /www/luci-static/bootstrap/cascade.css \
+                /www/luci-static/bootstrap-dark/cascade.css \
+                /www/luci-static/bootstrap-light/cascade.css; do
+    [ -f "$CSS_FILE" ] || continue
+    grep -q "pp-wide-layout" "$CSS_FILE" && continue
+    cat >> "$CSS_FILE" << 'PPCSS'
+
+/* proxypool-global: hide sidebar, full width */
+html.pp-wide-layout header,html.pp-wide-layout .header,html.pp-wide-layout #header,html.pp-wide-layout .main-left,html.pp-wide-layout #mainmenu,html.pp-wide-layout .navbar-static-top,html.pp-wide-layout #navigation{display:none!important}
+html.pp-wide-layout .main-right{width:100%!important;margin-left:0!important;float:none!important}
+html.pp-wide-layout .main{display:block!important}
+html.pp-wide-layout #maincontent{max-width:1840px;margin:0 auto;padding:0 20px}
+#pp-topnav{max-width:1840px;margin:0 auto;padding:0 20px;display:flex;gap:0;background:#fff;border-bottom:2px solid #ddd}
+#pp-topnav a{padding:12px 28px;text-decoration:none;color:#333;font-weight:600;font-size:14px;white-space:nowrap;border-bottom:3px solid transparent;margin-bottom:-2px}
+#pp-topnav a:hover{background:#f0f0f0;color:#007bff}
+#pp-topnav a.pp-nav-active{color:#007bff;border-bottom-color:#007bff}
+PPCSS
 done
+
+# 3. 在 luci.js 末尾追加 loader（立即隐藏侧边栏 + 默认首页重定向 + 加载全局JS）
+LUCI_JS="/www/luci-static/resources/luci.js"
+if [ -f "$LUCI_JS" ] && ! grep -q "proxypool-global" "$LUCI_JS"; then
+    cat >> "$LUCI_JS" << 'PPLOADER'
+
+/* proxypool-global */document.documentElement.className+=' pp-wide-layout';(function(){var p=window.location.pathname.replace(/\/+$/,'');if(p==='/cgi-bin/luci'||p==='/cgi-bin/luci/admin'||p==='/cgi-bin/luci/admin/status'||p==='/cgi-bin/luci/admin/status/overview'){window.location.replace(p.replace(/\/admin.*/,'/admin/services/proxypool'))}var s=document.createElement('script');s.src='/luci-static/resources/proxypool-global.js';document.head.appendChild(s)})();
+PPLOADER
+fi
 
 # 清理缓存
 rm -f /tmp/luci-indexcache

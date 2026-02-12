@@ -1,46 +1,37 @@
 (function() {
     'use strict';
 
-    // 默认首页：从 LuCI 默认落地页重定向到智联盒子
-    var path = window.location.pathname.replace(/\/+$/, '');
-    if (path === '/cgi-bin/luci' ||
-        path === '/cgi-bin/luci/admin' ||
-        path === '/cgi-bin/luci/admin/status' ||
-        path === '/cgi-bin/luci/admin/status/overview') {
-        window.location.replace(path.replace(/\/admin.*/, '/admin/services/proxypool'));
-        return;
+    // 等 DOM 就绪后构建顶部导航
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', tryBuild);
+    } else {
+        tryBuild();
     }
 
-    document.addEventListener('DOMContentLoaded', function() {
-        // main.htm 已自行渲染 topnav 时跳过
+    function tryBuild() {
         if (document.getElementById('pp-topnav')) return;
+        buildTopNav(0);
+    }
 
-        buildTopNav();
-    });
-
-    function buildTopNav() {
+    function buildTopNav(attempt) {
         var targets = [
-            { label: '智联盒子', keywords: ['智联盒子'] },
-            { label: '信道分析', keywords: ['信道分析'] },
-            { label: '备份与升级', keywords: ['备份与升级', '备份/升级'] },
-            { label: '无线', keywords: ['无线'] },
-            { label: '重启', keywords: ['重启'] }
+            { label: '\u667A\u8054\u76D2\u5B50', keywords: ['\u667A\u8054\u76D2\u5B50'] },
+            { label: '\u4FE1\u9053\u5206\u6790', keywords: ['\u4FE1\u9053\u5206\u6790'] },
+            { label: '\u5907\u4EFD\u4E0E\u5347\u7EA7', keywords: ['\u5907\u4EFD\u4E0E\u5347\u7EA7', '\u5907\u4EFD/\u5347\u7EA7'] },
+            { label: '\u65E0\u7EBF', keywords: ['\u65E0\u7EBF'] },
+            { label: '\u91CD\u542F', keywords: ['\u91CD\u542F'] }
         ];
 
-        // 从隐藏的侧边栏 DOM 中发现真实链接 URL
         var allLinks = document.querySelectorAll('a[href]');
         var navItems = [];
 
         targets.forEach(function(t) {
             var href = null;
-            // 精确匹配优先
+            // 精确匹配
             for (var i = 0; i < allLinks.length && !href; i++) {
                 var text = allLinks[i].textContent.replace(/\s+/g, '');
                 for (var k = 0; k < t.keywords.length; k++) {
-                    if (text === t.keywords[k]) {
-                        href = allLinks[i].href;
-                        break;
-                    }
+                    if (text === t.keywords[k]) { href = allLinks[i].href; break; }
                 }
             }
             // 包含匹配兜底
@@ -49,23 +40,23 @@
                     var text = allLinks[i].textContent.replace(/\s+/g, '');
                     for (var k = 0; k < t.keywords.length; k++) {
                         if (text.indexOf(t.keywords[k]) !== -1 && allLinks[i].href.indexOf('/cgi-bin/') !== -1) {
-                            href = allLinks[i].href;
-                            break;
+                            href = allLinks[i].href; break;
                         }
                     }
                 }
             }
-            if (href) {
-                navItems.push({ label: t.label, href: href });
-            }
+            if (href) navItems.push({ label: t.label, href: href });
         });
 
+        // JS版LuCI菜单可能延迟渲染，重试最多20次（10秒）
+        if (navItems.length === 0 && attempt < 20) {
+            setTimeout(function() { buildTopNav(attempt + 1); }, 500);
+            return;
+        }
         if (navItems.length === 0) return;
 
-        // 创建导航栏
         var nav = document.createElement('div');
         nav.id = 'pp-topnav';
-
         navItems.forEach(function(item) {
             var a = document.createElement('a');
             a.href = item.href;
@@ -78,10 +69,10 @@
             nav.appendChild(a);
         });
 
-        // 插入到页面顶部
         var anchor = document.querySelector('#maincontent') ||
                      document.querySelector('.main-right') ||
-                     document.querySelector('.main');
+                     document.querySelector('.main') ||
+                     document.querySelector('#content');
         if (anchor && anchor.parentNode) {
             anchor.parentNode.insertBefore(nav, anchor);
         } else {
