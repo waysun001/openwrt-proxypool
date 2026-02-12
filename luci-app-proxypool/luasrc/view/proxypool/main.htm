@@ -111,16 +111,12 @@
 
     <!-- 集成顶部菜单 -->
     <div class="pp-top-nav" style="display:flex;gap:10px;margin-bottom:15px;padding:10px;background:#f8f9fa;border-radius:6px;flex-wrap:wrap;">
-        <a href="/cgi-bin/luci/admin/services/proxypool" class="pp-nav-btn active" style="padding:8px 16px;background:#007bff;color:#fff;border-radius:4px;text-decoration:none;font-size:14px;">智联盒子</a>
+        <a href="?tab=clients" class="pp-nav-btn" id="nav-clients" onclick="switchTab('clients'); return false;" style="padding:8px 16px;background:#007bff;color:#fff;border-radius:4px;text-decoration:none;font-size:14px;cursor:pointer;">智联盒子（客户端管理）</a>
+        <a href="?tab=log" class="pp-nav-btn" id="nav-log" onclick="switchTab('log'); return false;" style="padding:8px 16px;background:#fff;color:#333;border:1px solid #ddd;border-radius:4px;text-decoration:none;font-size:14px;cursor:pointer;">系统日志</a>
         <a href="/cgi-bin/luci/admin/network/wireless" class="pp-nav-btn" style="padding:8px 16px;background:#fff;color:#333;border:1px solid #ddd;border-radius:4px;text-decoration:none;font-size:14px;">信道分析</a>
         <a href="/cgi-bin/luci/admin/system/flashops" class="pp-nav-btn" style="padding:8px 16px;background:#fff;color:#333;border:1px solid #ddd;border-radius:4px;text-decoration:none;font-size:14px;">备份与升级</a>
         <a href="/cgi-bin/luci/admin/network/wireless" class="pp-nav-btn" style="padding:8px 16px;background:#fff;color:#333;border:1px solid #ddd;border-radius:4px;text-decoration:none;font-size:14px;">无线</a>
         <a href="/cgi-bin/luci/admin/system/reboot" class="pp-nav-btn" style="padding:8px 16px;background:#fff;color:#333;border:1px solid #ddd;border-radius:4px;text-decoration:none;font-size:14px;">重启</a>
-    </div>
-
-    <div class="pp-tabs">
-        <div class="pp-tab active" onclick="switchTab('clients')">客户端管理</div>
-        <div class="pp-tab" onclick="switchTab('log')">系统日志</div>
     </div>
 
     <div id="panel-clients" class="pp-panel active">
@@ -141,11 +137,6 @@
                         <option value="infinite">永久</option>
                     </select>
                 </label>
-            </div>
-            <div style="display:flex;gap:15px;font-size:13px;white-space:nowrap;">
-                <span>总 <strong id="stat-total">-</strong></span>
-                <span style="color:#28a745;">已连接 <strong id="stat-connected">-</strong></span>
-                <span style="color:#dc3545;">未连接 <strong id="stat-disconnected">-</strong></span>
             </div>
         </div>
 
@@ -370,10 +361,22 @@ var sortAscending = true;
 var selectedClients = {};
 
 function switchTab(tab) {
-    document.querySelectorAll('.pp-tab').forEach(function(t) { t.classList.remove('active'); });
+    // 切换面板显示
     document.querySelectorAll('.pp-panel').forEach(function(p) { p.classList.remove('active'); });
-    document.querySelector('.pp-tab[onclick*="' + tab + '"]').classList.add('active');
     document.getElementById('panel-' + tab).classList.add('active');
+
+    // 更新顶部导航按钮状态
+    document.querySelectorAll('.pp-nav-btn').forEach(function(btn) {
+        if (btn.id === 'nav-' + tab) {
+            btn.style.background = '#007bff';
+            btn.style.color = '#fff';
+            btn.style.border = 'none';
+        } else if (btn.id && btn.id.startsWith('nav-')) {
+            btn.style.background = '#fff';
+            btn.style.color = '#333';
+            btn.style.border = '1px solid #ddd';
+        }
+    });
 
     if (tab === 'log') refreshLog();
 }
@@ -449,7 +452,7 @@ function toggleSort(col) {
 }
 
 function updateSortIndicators() {
-    var cols = ['name', 'type', 'server', 'status'];
+    var cols = ['id', 'type', 'server', 'status'];
     cols.forEach(function(c) {
         var el = document.getElementById('sort-' + c);
         if (el) el.textContent = (sortColumn === c) ? (sortAscending ? '▲' : '▼') : '';
@@ -929,14 +932,57 @@ function stopRapidPoll() {
 // 绑定 IP 在线状态（从 devices 数据中获取）
 var deviceData = [];
 
+/* 初始化顶部菜单统计显示 */
+function initTopMenuStats() {
+    var statsHtml = '<div id="top-menu-stats" style="display:flex;gap:15px;font-size:13px;white-space:nowrap;margin-left:20px;padding:8px 16px;background:#f8f9fa;border-radius:4px;">' +
+        '<span>总 <strong id="stat-total-top">-</strong></span>' +
+        '<span style="color:#28a745;">已连接 <strong id="stat-connected-top">-</strong></span>' +
+        '<span style="color:#dc3545;">未连接 <strong id="stat-disconnected-top">-</strong></span>' +
+        '</div>';
+
+    // 尝试多种可能的顶部菜单容器
+    var containers = [
+        document.querySelector('.pp-top-nav'),
+        document.querySelector('#mainmenu'),
+        document.querySelector('.mainmenu'),
+        document.querySelector('header'),
+        document.querySelector('.cbi-page-actions')
+    ];
+
+    var inserted = false;
+    for (var i = 0; i < containers.length; i++) {
+        if (containers[i]) {
+            var temp = document.createElement('div');
+            temp.innerHTML = statsHtml;
+            containers[i].appendChild(temp.firstChild);
+            inserted = true;
+            console.log('Stats inserted into container:', containers[i].className || containers[i].id);
+            break;
+        }
+    }
+
+    if (!inserted) {
+        console.warn('无法找到顶部菜单容器，统计显示未插入');
+    }
+}
+
+/* 更新顶部菜单统计数据 */
+function updateTopMenuStats(summary) {
+    var totalEl = document.getElementById('stat-total-top');
+    var connectedEl = document.getElementById('stat-connected-top');
+    var disconnectedEl = document.getElementById('stat-disconnected-top');
+
+    if (totalEl) totalEl.textContent = summary.total;
+    if (connectedEl) connectedEl.textContent = summary.connected;
+    if (disconnectedEl) disconnectedEl.textContent = summary.disconnected;
+}
+
 function refreshStatusFull() {
     fetch(apiUrl + '?action=status')
         .then(function(r) { return r.json(); })
         .then(function(data) {
             if (data && data.summary) {
-                document.getElementById('stat-total').textContent = data.summary.total;
-                document.getElementById('stat-connected').textContent = data.summary.connected;
-                document.getElementById('stat-disconnected').textContent = data.summary.disconnected;
+                updateTopMenuStats(data.summary);
             }
 
             if (data && data.devices) {
@@ -1324,6 +1370,7 @@ function saveDhcpLease() {
 }
 
 // 初始化
+setTimeout(initTopMenuStats, 500);  // 延迟500ms确保DOM加载完成
 refreshStatusFull();
 loadDhcpLease();
 setInterval(refreshStatusFull, 10000);
