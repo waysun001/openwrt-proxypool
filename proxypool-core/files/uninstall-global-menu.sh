@@ -2,7 +2,7 @@
 # ProxyPool 全局菜单卸载脚本
 # 恢复 LuCI header.htm 到原始状态
 
-HEADER_FILE="/usr/lib/lua/luci/view/header.htm"
+HEADER_FILE="/usr/lib/lua/luci/view/cbi/header.htm"
 BACKUP_FILE="${HEADER_FILE}.proxypool-backup"
 
 # 检查备份是否存在
