@@ -2,16 +2,11 @@
 module("luci.controller.proxypool", package.seeall)
 
 function index()
-    -- 登录后默认跳转到智联盒子
-    entry({"admin"}, call("redirect_to_proxypool"), _("Administration"), 1).index = true
-    
-    entry({"admin", "services", "proxypool"}, template("proxypool/main"), _("智联盒子"), 10).dependent = false
+    entry({"admin", "services", "proxypool"}, template("proxypool/main"), _("智联盒子"), 1).dependent = false
     entry({"admin", "services", "proxypool", "api"}, call("api_handler")).leaf = true
-end
-
-function redirect_to_proxypool()
-    local http = require "luci.http"
-    http.redirect(luci.dispatcher.build_url("admin", "services", "proxypool"))
+    
+    -- 设置为默认首页：创建 admin 根路由重定向
+    entry({"admin"}, alias("admin", "services", "proxypool"), _("Administration"), 10).index = true
 end
 
 -- 输入清洗：只允许字母数字下划线（防止命令注入）
