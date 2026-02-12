@@ -1317,27 +1317,37 @@ function saveDhcpLease() {
 
 // 初始化顶部菜单统计显示
 function initTopMenuStats() {
-    // 查找 LuCI 顶部菜单容器
-    var mainmenu = document.getElementById('mainmenu');
-    if (!mainmenu) return;
+    // 多种方式查找顶部菜单容器
+    var menuContainer = document.getElementById('mainmenu') 
+                     || document.querySelector('.mainmenu') 
+                     || document.querySelector('header')
+                     || document.querySelector('.header');
+    
+    if (!menuContainer) {
+        console.warn('无法找到顶部菜单容器');
+        return;
+    }
+    
+    // 避免重复插入
+    if (document.getElementById('top-menu-stats')) return;
     
     // 创建统计容器
     var statsDiv = document.createElement('div');
     statsDiv.id = 'top-menu-stats';
-    statsDiv.style.cssText = 'display:inline-flex;gap:15px;font-size:13px;margin-left:20px;color:#666;';
+    statsDiv.style.cssText = 'display:inline-block;margin-left:20px;padding:5px 15px;background:#f0f0f0;border-radius:4px;font-size:13px;color:#333;';
     statsDiv.innerHTML = 
-        '<span>总 <strong id="stat-total-top">-</strong></span>' +
-        '<span style="color:#28a745;">已连接 <strong id="stat-connected-top">-</strong></span>' +
+        '<span>总 <strong id="stat-total-top" style="color:#333;">-</strong></span> | ' +
+        '<span style="color:#28a745;">已连接 <strong id="stat-connected-top">-</strong></span> | ' +
         '<span style="color:#dc3545;">未连接 <strong id="stat-disconnected-top">-</strong></span>';
     
-    // 插入到菜单最后（重启按钮右边）
-    mainmenu.appendChild(statsDiv);
+    // 插入到菜单最后
+    menuContainer.appendChild(statsDiv);
 }
 
-// 初始化
-document.addEventListener('DOMContentLoaded', function() {
+// 初始化 - 延迟执行确保 DOM 完全加载
+setTimeout(function() {
     initTopMenuStats();
-});
+}, 500);
 
 refreshStatusFull();
 loadDhcpLease();
