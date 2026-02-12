@@ -1,0 +1,89 @@
+#!/bin/sh
+# ProxyPool 全局菜单自动安装（首次安装时执行）
+
+HEADER="/usr/lib/lua/luci/view/header.htm"
+BACKUP="${HEADER}.proxypool-backup"
+
+[ -f "$HEADER" ] || exit 0
+grep -q "proxypool-global-menu" "$HEADER" && exit 0
+
+# 备份
+cp "$HEADER" "$BACKUP" 2>/dev/null
+
+# 插入样式和脚本
+sed -i '/<\/head>/i\
+<!-- ProxyPool Global Menu -->\
+<style>\
+#mainnav, .mainmenu, .main > .luci, .main > div[class*="menu"] { display: none !important; }\
+#proxypool-global-menu {\
+    display: flex;\
+    justify-content: space-between;\
+    align-items: center;\
+    background: #f8f9fa;\
+    padding: 10px 20px;\
+    border-bottom: 2px solid #ddd;\
+    font-size: 14px;\
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);\
+}\
+#proxypool-global-menu .menu-links { display: flex; gap: 10px; flex-wrap: wrap; }\
+#proxypool-global-menu .menu-links a {\
+    padding: 8px 16px;\
+    background: #fff;\
+    color: #333;\
+    border: 1px solid #ddd;\
+    border-radius: 4px;\
+    text-decoration: none;\
+    transition: all 0.2s;\
+    font-weight: 500;\
+}\
+#proxypool-global-menu .menu-links a:hover { background: #007bff; color: #fff; border-color: #007bff; }\
+#proxypool-global-menu .menu-links a.active { background: #007bff; color: #fff; border-color: #007bff; }\
+#proxypool-global-menu .menu-stats { display: flex; gap: 15px; font-size: 13px; white-space: nowrap; }\
+#proxypool-global-menu .menu-stats span { color: #666; }\
+#proxypool-global-menu .menu-stats strong { font-weight: 600; }\
+#proxypool-global-menu .menu-stats .stat-connected { color: #28a745; }\
+#proxypool-global-menu .menu-stats .stat-disconnected { color: #dc3545; }\
+</style>\
+<script>\
+function updateProxyPoolStats() {\
+    fetch("/cgi-bin/luci/admin/services/proxypool?action=status")\
+        .then(r => r.json())\
+        .then(data => {\
+            if (data && data.summary) {\
+                document.getElementById("pp-stat-total").textContent = data.summary.total;\
+                document.getElementById("pp-stat-connected").textContent = data.summary.connected;\
+                document.getElementById("pp-stat-disconnected").textContent = data.summary.disconnected;\
+            }\
+        })\
+        .catch(() => {});\
+}\
+if (window.location.pathname.includes("/admin/services/proxypool")) {\
+    setTimeout(updateProxyPoolStats, 500);\
+    setInterval(updateProxyPoolStats, 10000);\
+}\
+</script>
+' "$HEADER"
+
+# 插入菜单
+sed -i '/<body[^>]*>/a\
+<!-- proxypool-global-menu -->\
+<div id="proxypool-global-menu">\
+    <div class="menu-links">\
+        <a href="/cgi-bin/luci/admin/services/proxypool">智联盒子</a>\
+        <a href="/cgi-bin/luci/admin/services/proxypool?tab=log">系统日志</a>\
+        <a href="/cgi-bin/luci/admin/network/wireless">信道分析</a>\
+        <a href="/cgi-bin/luci/admin/system/flashops">备份与升级</a>\
+        <a href="/cgi-bin/luci/admin/network/wireless">无线</a>\
+        <a href="/cgi-bin/luci/admin/system/reboot">重启</a>\
+    </div>\
+    <div class="menu-stats">\
+        <span>总 <strong id="pp-stat-total">-</strong></span>\
+        <span class="stat-connected">已连接 <strong id="pp-stat-connected">-</strong></span>\
+        <span class="stat-disconnected">未连接 <strong id="pp-stat-disconnected">-</strong></span>\
+    </div>\
+</div>
+' "$HEADER"
+
+/etc/init.d/uhttpd restart 2>/dev/null
+
+exit 0
