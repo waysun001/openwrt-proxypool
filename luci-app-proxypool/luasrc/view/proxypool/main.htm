@@ -107,23 +107,11 @@
 </style>
 
 <div class="pp-container">
-    <!-- 统计信息已移至工具栏右侧 -->
+    <!-- 顶部菜单已移至 LuCI 全局 header.htm -->
 
-    <!-- 集成顶部菜单 -->
-    <div class="pp-top-nav" style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:15px;padding:10px;background:#f8f9fa;border-radius:6px;flex-wrap:wrap;">
-        <div style="display:flex;gap:10px;flex-wrap:wrap;">
-            <a href="?tab=clients" class="pp-nav-btn" id="nav-clients" onclick="switchTab('clients'); return false;" style="padding:8px 16px;background:#007bff;color:#fff;border-radius:4px;text-decoration:none;font-size:14px;cursor:pointer;">智联盒子</a>
-            <a href="?tab=log" class="pp-nav-btn" id="nav-log" onclick="switchTab('log'); return false;" style="padding:8px 16px;background:#fff;color:#333;border:1px solid #ddd;border-radius:4px;text-decoration:none;font-size:14px;cursor:pointer;">系统日志</a>
-            <a href="/cgi-bin/luci/admin/network/wireless" class="pp-nav-btn" style="padding:8px 16px;background:#fff;color:#333;border:1px solid #ddd;border-radius:4px;text-decoration:none;font-size:14px;">信道分析</a>
-            <a href="/cgi-bin/luci/admin/system/flashops" class="pp-nav-btn" style="padding:8px 16px;background:#fff;color:#333;border:1px solid #ddd;border-radius:4px;text-decoration:none;font-size:14px;">备份与升级</a>
-            <a href="/cgi-bin/luci/admin/network/wireless" class="pp-nav-btn" style="padding:8px 16px;background:#fff;color:#333;border:1px solid #ddd;border-radius:4px;text-decoration:none;font-size:14px;">无线</a>
-            <a href="/cgi-bin/luci/admin/system/reboot" class="pp-nav-btn" style="padding:8px 16px;background:#fff;color:#333;border:1px solid #ddd;border-radius:4px;text-decoration:none;font-size:14px;">重启</a>
-        </div>
-        <div id="top-menu-stats" style="display:flex;gap:15px;font-size:13px;white-space:nowrap;">
-            <span>总 <strong id="stat-total-top">-</strong></span>
-            <span style="color:#28a745;">已连接 <strong id="stat-connected-top">-</strong></span>
-            <span style="color:#dc3545;">未连接 <strong id="stat-disconnected-top">-</strong></span>
-        </div>
+    <div class="pp-tabs">
+        <div class="pp-tab active" onclick="switchTab('clients')">客户端管理</div>
+        <div class="pp-tab" onclick="switchTab('log')">系统日志</div>
     </div>
 
     <div id="panel-clients" class="pp-panel active">
@@ -369,22 +357,10 @@ var sortAscending = true;
 var selectedClients = {};
 
 function switchTab(tab) {
-    // 切换面板显示
+    document.querySelectorAll('.pp-tab').forEach(function(t) { t.classList.remove('active'); });
     document.querySelectorAll('.pp-panel').forEach(function(p) { p.classList.remove('active'); });
+    document.querySelector('.pp-tab[onclick*="' + tab + '"]').classList.add('active');
     document.getElementById('panel-' + tab).classList.add('active');
-
-    // 更新顶部导航按钮状态
-    document.querySelectorAll('.pp-nav-btn').forEach(function(btn) {
-        if (btn.id === 'nav-' + tab) {
-            btn.style.background = '#007bff';
-            btn.style.color = '#fff';
-            btn.style.border = 'none';
-        } else if (btn.id && btn.id.startsWith('nav-')) {
-            btn.style.background = '#fff';
-            btn.style.color = '#333';
-            btn.style.border = '1px solid #ddd';
-        }
-    });
 
     if (tab === 'log') refreshLog();
 }
