@@ -110,13 +110,20 @@
     <!-- 统计信息已移至工具栏右侧 -->
 
     <!-- 集成顶部菜单 -->
-    <div class="pp-top-nav" style="display:flex;gap:10px;margin-bottom:15px;padding:10px;background:#f8f9fa;border-radius:6px;flex-wrap:wrap;">
-        <a href="?tab=clients" class="pp-nav-btn" id="nav-clients" onclick="switchTab('clients'); return false;" style="padding:8px 16px;background:#007bff;color:#fff;border-radius:4px;text-decoration:none;font-size:14px;cursor:pointer;">智联盒子（客户端管理）</a>
-        <a href="?tab=log" class="pp-nav-btn" id="nav-log" onclick="switchTab('log'); return false;" style="padding:8px 16px;background:#fff;color:#333;border:1px solid #ddd;border-radius:4px;text-decoration:none;font-size:14px;cursor:pointer;">系统日志</a>
-        <a href="/cgi-bin/luci/admin/network/wireless" class="pp-nav-btn" style="padding:8px 16px;background:#fff;color:#333;border:1px solid #ddd;border-radius:4px;text-decoration:none;font-size:14px;">信道分析</a>
-        <a href="/cgi-bin/luci/admin/system/flashops" class="pp-nav-btn" style="padding:8px 16px;background:#fff;color:#333;border:1px solid #ddd;border-radius:4px;text-decoration:none;font-size:14px;">备份与升级</a>
-        <a href="/cgi-bin/luci/admin/network/wireless" class="pp-nav-btn" style="padding:8px 16px;background:#fff;color:#333;border:1px solid #ddd;border-radius:4px;text-decoration:none;font-size:14px;">无线</a>
-        <a href="/cgi-bin/luci/admin/system/reboot" class="pp-nav-btn" style="padding:8px 16px;background:#fff;color:#333;border:1px solid #ddd;border-radius:4px;text-decoration:none;font-size:14px;">重启</a>
+    <div class="pp-top-nav" style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:15px;padding:10px;background:#f8f9fa;border-radius:6px;flex-wrap:wrap;">
+        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+            <a href="?tab=clients" class="pp-nav-btn" id="nav-clients" onclick="switchTab('clients'); return false;" style="padding:8px 16px;background:#007bff;color:#fff;border-radius:4px;text-decoration:none;font-size:14px;cursor:pointer;">智联盒子</a>
+            <a href="?tab=log" class="pp-nav-btn" id="nav-log" onclick="switchTab('log'); return false;" style="padding:8px 16px;background:#fff;color:#333;border:1px solid #ddd;border-radius:4px;text-decoration:none;font-size:14px;cursor:pointer;">系统日志</a>
+            <a href="/cgi-bin/luci/admin/network/wireless" class="pp-nav-btn" style="padding:8px 16px;background:#fff;color:#333;border:1px solid #ddd;border-radius:4px;text-decoration:none;font-size:14px;">信道分析</a>
+            <a href="/cgi-bin/luci/admin/system/flashops" class="pp-nav-btn" style="padding:8px 16px;background:#fff;color:#333;border:1px solid #ddd;border-radius:4px;text-decoration:none;font-size:14px;">备份与升级</a>
+            <a href="/cgi-bin/luci/admin/network/wireless" class="pp-nav-btn" style="padding:8px 16px;background:#fff;color:#333;border:1px solid #ddd;border-radius:4px;text-decoration:none;font-size:14px;">无线</a>
+            <a href="/cgi-bin/luci/admin/system/reboot" class="pp-nav-btn" style="padding:8px 16px;background:#fff;color:#333;border:1px solid #ddd;border-radius:4px;text-decoration:none;font-size:14px;">重启</a>
+        </div>
+        <div id="top-menu-stats" style="display:flex;gap:15px;font-size:13px;white-space:nowrap;">
+            <span>总 <strong id="stat-total-top">-</strong></span>
+            <span style="color:#28a745;">已连接 <strong id="stat-connected-top">-</strong></span>
+            <span style="color:#dc3545;">未连接 <strong id="stat-disconnected-top">-</strong></span>
+        </div>
     </div>
 
     <div id="panel-clients" class="pp-panel active">
@@ -173,6 +180,7 @@
                     <th class="sortable" onclick="toggleSort('id')">ID<span id="sort-id" class="pp-sort-indicator"></span></th>
                     <th class="sortable" onclick="toggleSort('type')">类型<span id="sort-type" class="pp-sort-indicator"></span></th>
                     <th class="sortable" onclick="toggleSort('server')">服务器<span id="sort-server" class="pp-sort-indicator"></span></th>
+                    <th style="width:120px">归属地</th>
                     <th>绑定IP</th>
                     <th class="sortable" onclick="toggleSort('status')">状态<span id="sort-status" class="pp-sort-indicator"></span></th>
                     <th>超时</th>
@@ -182,7 +190,7 @@
                 </tr>
             </thead>
             <tbody id="client-list">
-                <tr><td colspan="11" style="text-align:center;padding:40px;color:#666;">加载中...</td></tr>
+                <tr><td colspan="12" style="text-align:center;padding:40px;color:#666;">加载中...</td></tr>
             </tbody>
         </table>
     </div>
@@ -568,7 +576,7 @@ function renderClients() {
     var filtered = getFilteredAndSortedClients();
 
     if (filtered.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;padding:40px;color:#666;">暂无客户端</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;padding:40px;color:#666;">暂无客户端</td></tr>';
         return;
     }
 
@@ -628,14 +636,16 @@ function renderClients() {
         var switchDisabled = pendingInfo ? 'disabled' : '';
         var rowClass = pendingInfo ? ' class="pp-row-pending"' : '';
 
+        var locationHtml = c.location ? '<span style="color:#666;font-size:12px;">' + c.location + '</span>' : '<span style="color:#ccc;font-size:12px;">-</span>';
+
         html += '<tr' + rowClass + '>' +
             '<td class="pp-checkbox-cell"><input type="checkbox" ' + isChecked + ' onchange="toggleSelectClient(\'' + c.id + '\', this.checked)"></td>' +
             '<td><label class="pp-switch"><input type="checkbox" ' + (c.enabled ? 'checked ' : '') + switchDisabled + ' onchange="toggleClient(\'' + c.id + '\', this.checked)"><span class="pp-switch-slider"></span></label></td>' +
             '<td>' + idHtml + '</td>' +
             '<td>' + getTypeBadge(c.type) + '</td>' +
             '<td>' + (c.server || '-') + ':' + (c.port || '-') +
-                (c.location ? ' <span style="color:#999;font-size:11px;">(' + c.location + ')</span>' : '') +
                 '<br><small style="color:#888;">' + (c.username || '-') + ' / ' + (c.password || '-') + '</small></td>' +
+            '<td>' + locationHtml + '</td>' +
             '<td style="max-width:200px;font-size:12px;line-height:1.6;">' + bindIpHtml + '</td>' +
             '<td><span class="pp-status ' + statusClass + '">' + statusText + '</span></td>' +
             '<td style="font-size:12px;white-space:nowrap;">' +
@@ -931,40 +941,6 @@ function stopRapidPoll() {
 
 // 绑定 IP 在线状态（从 devices 数据中获取）
 var deviceData = [];
-
-/* 初始化顶部菜单统计显示 */
-function initTopMenuStats() {
-    var statsHtml = '<div id="top-menu-stats" style="display:flex;gap:15px;font-size:13px;white-space:nowrap;margin-left:20px;padding:8px 16px;background:#f8f9fa;border-radius:4px;">' +
-        '<span>总 <strong id="stat-total-top">-</strong></span>' +
-        '<span style="color:#28a745;">已连接 <strong id="stat-connected-top">-</strong></span>' +
-        '<span style="color:#dc3545;">未连接 <strong id="stat-disconnected-top">-</strong></span>' +
-        '</div>';
-
-    // 尝试多种可能的顶部菜单容器
-    var containers = [
-        document.querySelector('.pp-top-nav'),
-        document.querySelector('#mainmenu'),
-        document.querySelector('.mainmenu'),
-        document.querySelector('header'),
-        document.querySelector('.cbi-page-actions')
-    ];
-
-    var inserted = false;
-    for (var i = 0; i < containers.length; i++) {
-        if (containers[i]) {
-            var temp = document.createElement('div');
-            temp.innerHTML = statsHtml;
-            containers[i].appendChild(temp.firstChild);
-            inserted = true;
-            console.log('Stats inserted into container:', containers[i].className || containers[i].id);
-            break;
-        }
-    }
-
-    if (!inserted) {
-        console.warn('无法找到顶部菜单容器，统计显示未插入');
-    }
-}
 
 /* 更新顶部菜单统计数据 */
 function updateTopMenuStats(summary) {
@@ -1370,7 +1346,6 @@ function saveDhcpLease() {
 }
 
 // 初始化
-setTimeout(initTopMenuStats, 500);  // 延迟500ms确保DOM加载完成
 refreshStatusFull();
 loadDhcpLease();
 setInterval(refreshStatusFull, 10000);
