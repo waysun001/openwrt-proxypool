@@ -109,6 +109,15 @@
 <div class="pp-container">
     <!-- 统计信息已移至工具栏右侧 -->
 
+    <!-- 集成顶部菜单 -->
+    <div class="pp-top-nav" style="display:flex;gap:10px;margin-bottom:15px;padding:10px;background:#f8f9fa;border-radius:6px;flex-wrap:wrap;">
+        <a href="/cgi-bin/luci/admin/services/proxypool" class="pp-nav-btn active" style="padding:8px 16px;background:#007bff;color:#fff;border-radius:4px;text-decoration:none;font-size:14px;">智联盒子</a>
+        <a href="/cgi-bin/luci/admin/network/wireless" class="pp-nav-btn" style="padding:8px 16px;background:#fff;color:#333;border:1px solid #ddd;border-radius:4px;text-decoration:none;font-size:14px;">信道分析</a>
+        <a href="/cgi-bin/luci/admin/system/flashops" class="pp-nav-btn" style="padding:8px 16px;background:#fff;color:#333;border:1px solid #ddd;border-radius:4px;text-decoration:none;font-size:14px;">备份与升级</a>
+        <a href="/cgi-bin/luci/admin/network/wireless" class="pp-nav-btn" style="padding:8px 16px;background:#fff;color:#333;border:1px solid #ddd;border-radius:4px;text-decoration:none;font-size:14px;">无线</a>
+        <a href="/cgi-bin/luci/admin/system/reboot" class="pp-nav-btn" style="padding:8px 16px;background:#fff;color:#333;border:1px solid #ddd;border-radius:4px;text-decoration:none;font-size:14px;">重启</a>
+    </div>
+
     <div class="pp-tabs">
         <div class="pp-tab active" onclick="switchTab('clients')">客户端管理</div>
         <div class="pp-tab" onclick="switchTab('log')">系统日志</div>
