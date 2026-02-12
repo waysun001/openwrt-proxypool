@@ -2,9 +2,6 @@
 module("luci.controller.proxypool", package.seeall)
 
 function index()
-    -- 设置为默认首页
-    entry({"admin"}, alias("admin", "services", "proxypool"), _("Administration"), 10).index = true
-    
     entry({"admin", "services", "proxypool"}, template("proxypool/main"), _("智联盒子"), 10).dependent = false
     entry({"admin", "services", "proxypool", "api"}, call("api_handler")).leaf = true
 end
