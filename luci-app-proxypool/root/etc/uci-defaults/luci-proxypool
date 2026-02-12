@@ -94,7 +94,7 @@ LUCI_JS="/www/luci-static/resources/luci.js"
 if [ -f "$LUCI_JS" ] && ! grep -q "proxypool-global" "$LUCI_JS"; then
     cat >> "$LUCI_JS" << 'PPLOADER'
 
-/* proxypool-global */document.documentElement.className+=' pp-wide-layout';(function(){var p=window.location.pathname.replace(/\/+$/,'');if(p==='/cgi-bin/luci'||p==='/cgi-bin/luci/admin'||p==='/cgi-bin/luci/admin/status'||p==='/cgi-bin/luci/admin/status/overview'){window.location.replace(p.replace(/\/admin.*/,'/admin/services/proxypool'))}var s=document.createElement('script');s.src='/luci-static/resources/proxypool-global.js';document.head.appendChild(s)})();
+/* proxypool-global */document.documentElement.className+=' pp-wide-layout';(function(){var p=window.location.pathname.replace(/\/+$/,'');if(p==='/cgi-bin/luci/admin'||p==='/cgi-bin/luci/admin/status'||p==='/cgi-bin/luci/admin/status/overview'){window.location.replace('/cgi-bin/luci/admin/services/proxypool')}var s=document.createElement('script');s.src='/luci-static/resources/proxypool-global.js';document.head.appendChild(s)})();
 PPLOADER
 fi
 
