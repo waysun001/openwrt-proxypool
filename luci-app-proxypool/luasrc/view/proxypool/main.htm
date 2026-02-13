@@ -1,107 +1,135 @@
 <%+header%>
 
 <style>
-.pp-page-title { max-width: 1840px; margin: 0 auto; padding: 20px 20px 0; }
-.pp-page-title h2 { margin: 0 0 10px; padding: 0 0 10px; font-size: 18px; font-weight: 600; color: #333; border-bottom: 1px solid #eee; }
+/* 全局字体与基础 */
+.pp-page-title { max-width: 1840px; margin: 0 auto; padding: 16px 20px 0; }
+.pp-page-title h2 { margin: 0 0 12px; padding: 0; font-size: 17px; font-weight: 600; color: #1a1a2e; }
 .pp-container { max-width: 1840px; margin: 0 auto; padding: 0 20px 40px; }
 @media (max-width: 1400px) {
-    .pp-container { padding: 0 16px 30px; }
+    .pp-container { padding: 0 12px 30px; }
+    .pp-page-title { padding: 12px 12px 0; }
 }
-.pp-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding: 15px; background: #f8f9fa; border-radius: 8px; }
-.pp-header h2 { margin: 0; color: #333; }
-.pp-stats { display: flex; gap: 20px; }
-.pp-stat { text-align: center; padding: 10px 20px; background: #fff; border-radius: 6px; border: 1px solid #ddd; }
-.pp-stat-value { font-size: 24px; font-weight: bold; }
-.pp-stat-label { font-size: 12px; color: #666; }
-.pp-stat.connected .pp-stat-value { color: #28a745; }
-.pp-stat.disconnected .pp-stat-value { color: #dc3545; }
 
-.pp-toolbar { margin-bottom: 15px; display: flex; gap: 10px; flex-wrap: wrap; }
-.pp-btn { padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
-.pp-btn-primary { background: #007bff; color: #fff; }
-.pp-btn-success { background: #28a745; color: #fff; }
-.pp-btn-danger { background: #dc3545; color: #fff; }
-.pp-btn-secondary { background: #6c757d; color: #fff; }
-.pp-btn-warning { background: #fd7e14; color: #fff; }
-.pp-btn:hover { opacity: 0.9; }
-.pp-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+/* 工具栏 */
+.pp-toolbar { margin-bottom: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
 
-.pp-table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-.pp-table th, .pp-table td { padding: 12px; text-align: left; border-bottom: 1px solid #eee; }
-.pp-table th { background: #f8f9fa; font-weight: 600; }
-.pp-table tr:hover { background: #f8f9fa; }
+/* 按钮 */
+.pp-btn {
+    padding: 7px 16px; border: none; border-radius: 6px; cursor: pointer;
+    font-size: 13px; font-weight: 500; transition: all 0.15s ease;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+}
+.pp-btn-primary { background: #1a73e8; color: #fff; }
+.pp-btn-primary:hover { background: #1557b0; }
+.pp-btn-success { background: #0d9c5c; color: #fff; }
+.pp-btn-success:hover { background: #0a7b49; }
+.pp-btn-danger { background: #d93025; color: #fff; }
+.pp-btn-danger:hover { background: #b3261e; }
+.pp-btn-secondary { background: #f1f3f4; color: #3c4043; border: 1px solid #dadce0; }
+.pp-btn-secondary:hover { background: #e8eaed; }
+.pp-btn-warning { background: #e8710a; color: #fff; }
+.pp-btn-warning:hover { background: #c55e08; }
+.pp-btn:disabled { opacity: 0.45; cursor: not-allowed; box-shadow: none; }
 
-.pp-status { display: inline-block; padding: 4px 10px; border-radius: 12px; font-size: 12px; }
-.pp-status.connected { background: #d4edda; color: #155724; }
-.pp-status.disconnected { background: #f8d7da; color: #721c24; }
-.pp-status.disabled { background: #e2e3e5; color: #383d41; }
-.pp-status.pending { background: #fff3cd; color: #856404; }
+/* 数据表格 */
+.pp-table {
+    width: 100%; border-collapse: separate; border-spacing: 0;
+    background: #fff; border-radius: 8px; overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.06);
+    border: 1px solid #e8eaed;
+}
+.pp-table th, .pp-table td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #f0f0f0; font-size: 13px; }
+.pp-table th { background: #f8f9fb; font-weight: 600; color: #5f6368; font-size: 12px; text-transform: none; letter-spacing: 0.2px; border-bottom: 2px solid #e8eaed; }
+.pp-table tbody tr { transition: background 0.1s ease; }
+.pp-table tbody tr:hover { background: #f6f8fc; }
+.pp-table tbody tr:last-child td { border-bottom: none; }
+
+/* 状态徽章 */
+.pp-status { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 500; }
+.pp-status.connected { background: #e6f4ea; color: #137333; }
+.pp-status.disconnected { background: #fce8e6; color: #c5221f; }
+.pp-status.disabled { background: #f1f3f4; color: #80868b; }
+.pp-status.pending { background: #fef7e0; color: #b06000; }
 .pp-row-pending { background: #fffdf5 !important; }
 
-.pp-actions { display: flex; gap: 5px; }
-.pp-actions button { padding: 4px 8px; font-size: 12px; border: 1px solid #ddd; background: #fff; border-radius: 3px; cursor: pointer; }
-.pp-actions button:hover { background: #f0f0f0; }
+/* 操作按钮 */
+.pp-actions { display: flex; gap: 4px; }
+.pp-actions button {
+    padding: 4px 10px; font-size: 12px; border: 1px solid #dadce0; background: #fff;
+    border-radius: 4px; cursor: pointer; transition: all 0.15s ease; font-weight: 500;
+}
+.pp-actions button:hover { background: #f1f3f4; border-color: #bdc1c6; }
 
-.pp-modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; }
+/* 弹窗 */
+.pp-modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.45); z-index: 1000; backdrop-filter: blur(2px); }
 .pp-modal.active { display: flex; justify-content: center; align-items: center; }
-.pp-modal-content { background: #fff; padding: 25px; border-radius: 8px; width: 500px; max-width: 90%; max-height: 90vh; overflow-y: auto; }
+.pp-modal-content { background: #fff; padding: 24px; border-radius: 12px; width: 500px; max-width: 90%; max-height: 90vh; overflow-y: auto; box-shadow: 0 8px 28px rgba(0,0,0,0.2); }
 .pp-modal-content.wide { width: 750px; }
-.pp-modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
-.pp-modal-header h3 { margin: 0; }
-.pp-modal-close { background: none; border: none; font-size: 24px; cursor: pointer; color: #666; }
+.pp-modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding-bottom: 12px; border-bottom: 1px solid #f0f0f0; }
+.pp-modal-header h3 { margin: 0; font-size: 16px; font-weight: 600; color: #1a1a2e; }
+.pp-modal-close { background: none; border: none; font-size: 22px; cursor: pointer; color: #999; width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; transition: all 0.15s; }
+.pp-modal-close:hover { background: #f1f3f4; color: #333; }
 
-.pp-form-group { margin-bottom: 15px; }
-.pp-form-group label { display: block; margin-bottom: 5px; font-weight: 500; }
-.pp-form-group input, .pp-form-group select, .pp-form-group textarea { width: 100%; padding: 8px 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; box-sizing: border-box; }
+/* 表单 */
+.pp-form-group { margin-bottom: 14px; }
+.pp-form-group label { display: block; margin-bottom: 5px; font-weight: 500; font-size: 13px; color: #3c4043; }
+.pp-form-group input, .pp-form-group select, .pp-form-group textarea {
+    width: 100%; padding: 8px 12px; border: 1px solid #dadce0; border-radius: 6px;
+    font-size: 14px; box-sizing: border-box; transition: border-color 0.15s;
+}
+.pp-form-group input:focus, .pp-form-group select:focus, .pp-form-group textarea:focus { outline: none; border-color: #1a73e8; box-shadow: 0 0 0 2px rgba(26,115,232,0.15); }
 .pp-form-group textarea { min-height: 80px; resize: vertical; }
-.pp-form-row { display: flex; gap: 15px; }
+.pp-form-row { display: flex; gap: 12px; }
 .pp-form-row .pp-form-group { flex: 1; }
 
-.pp-log { background: #1e1e1e; color: #d4d4d4; font-family: monospace; font-size: 12px; padding: 15px; border-radius: 4px; height: 400px; overflow-y: auto; white-space: pre-wrap; }
+/* 日志面板 */
+.pp-log { background: #1a1a2e; color: #e0e0e0; font-family: 'Consolas', 'Monaco', monospace; font-size: 12px; padding: 16px; border-radius: 8px; height: 400px; overflow-y: auto; white-space: pre-wrap; line-height: 1.5; }
 
 .pp-panel { display: none; }
 .pp-panel.active { display: block; }
 
-.pp-switch { position: relative; display: inline-block; width: 50px; height: 26px; }
+/* 开关 */
+.pp-switch { position: relative; display: inline-block; width: 44px; height: 24px; }
 .pp-switch input { opacity: 0; width: 0; height: 0; }
-.pp-switch-slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background: #ccc; border-radius: 26px; transition: 0.3s; }
-.pp-switch-slider:before { position: absolute; content: ""; height: 20px; width: 20px; left: 3px; bottom: 3px; background: white; border-radius: 50%; transition: 0.3s; }
-.pp-switch input:checked + .pp-switch-slider { background: #28a745; }
-.pp-switch input:checked + .pp-switch-slider:before { transform: translateX(24px); }
+.pp-switch-slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background: #dadce0; border-radius: 24px; transition: 0.25s ease; }
+.pp-switch-slider:before { position: absolute; content: ""; height: 18px; width: 18px; left: 3px; bottom: 3px; background: white; border-radius: 50%; transition: 0.25s ease; box-shadow: 0 1px 3px rgba(0,0,0,0.15); }
+.pp-switch input:checked + .pp-switch-slider { background: #0d9c5c; }
+.pp-switch input:checked + .pp-switch-slider:before { transform: translateX(20px); }
 
-/* R2 - 协议类型徽章 */
-.pp-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; letter-spacing: 0.5px; }
-.pp-badge-l2tp { background: #d0e4ff; color: #0050b3; }
-.pp-badge-socks5 { background: #fff3cd; color: #856404; }
-.pp-badge-pptp { background: #d4edda; color: #155724; }
+/* 协议类型徽章 */
+.pp-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; letter-spacing: 0.3px; }
+.pp-badge-l2tp { background: #e3f0ff; color: #1a56db; }
+.pp-badge-socks5 { background: #fef3cd; color: #92600a; }
+.pp-badge-pptp { background: #d1fae5; color: #065f46; }
 
-/* R3 - 批量导入预览表格 */
-.pp-preview-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 10px; }
-.pp-preview-table th, .pp-preview-table td { padding: 6px 8px; border: 1px solid #ddd; text-align: left; }
-.pp-preview-table th { background: #f0f0f0; }
-.pp-preview-row-ok { background: #d4edda; }
-.pp-preview-row-skip { background: #fff3cd; }
+/* 批量导入预览 */
+.pp-preview-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 10px; border-radius: 6px; overflow: hidden; }
+.pp-preview-table th, .pp-preview-table td { padding: 6px 8px; border: 1px solid #e8eaed; text-align: left; }
+.pp-preview-table th { background: #f8f9fb; font-weight: 600; color: #5f6368; }
+.pp-preview-row-ok { background: #e6f4ea; }
+.pp-preview-row-skip { background: #fef7e0; }
 .pp-import-step { display: none; }
 .pp-import-step.active { display: block; }
 
-/* #5 - 到期预警徽章 */
-.pp-badge-expired { display: inline-block; padding: 2px 6px; border-radius: 8px; font-size: 10px; background: #f8d7da; color: #721c24; }
-.pp-badge-expiring { display: inline-block; padding: 2px 6px; border-radius: 8px; font-size: 10px; background: #fff3cd; color: #856404; }
+/* 到期预警徽章 */
+.pp-badge-expired { display: inline-block; padding: 2px 6px; border-radius: 8px; font-size: 10px; font-weight: 500; background: #fce8e6; color: #c5221f; }
+.pp-badge-expiring { display: inline-block; padding: 2px 6px; border-radius: 8px; font-size: 10px; font-weight: 500; background: #fef7e0; color: #b06000; }
 
-/* #6 - 搜索/筛选工具栏 */
-.pp-filter-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-.pp-search-input { padding: 6px 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; width: 200px; }
-.pp-filter-select { padding: 6px 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; }
+/* 搜索/筛选 */
+.pp-filter-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.pp-search-input { padding: 7px 12px; border: 1px solid #dadce0; border-radius: 6px; font-size: 13px; width: 220px; transition: border-color 0.15s; }
+.pp-search-input:focus { outline: none; border-color: #1a73e8; box-shadow: 0 0 0 2px rgba(26,115,232,0.15); }
+.pp-filter-select { padding: 7px 12px; border: 1px solid #dadce0; border-radius: 6px; font-size: 13px; }
 .pp-table th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
-.pp-table th.sortable:hover { background: #e9ecef; }
-.pp-sort-indicator { font-size: 10px; margin-left: 4px; color: #007bff; }
+.pp-table th.sortable:hover { background: #eef0f4; }
+.pp-sort-indicator { font-size: 10px; margin-left: 4px; color: #1a73e8; }
 
-/* #4 - 批量操作栏 */
-.pp-batch-bar { display: none; padding: 10px 15px; background: #e3f2fd; border-radius: 4px; align-items: center; gap: 10px; flex-wrap: wrap; }
+/* 批量操作栏 */
+.pp-batch-bar { display: none; padding: 10px 15px; background: #e8f0fe; border-radius: 6px; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; border: 1px solid #d2e3fc; }
 .pp-batch-bar.active { display: flex; }
-.pp-batch-bar span { font-weight: 600; color: #0d47a1; }
+.pp-batch-bar span { font-weight: 600; color: #1a56db; font-size: 13px; }
 .pp-table td.pp-checkbox-cell, .pp-table th.pp-checkbox-cell { width: 36px; text-align: center; }
-.pp-table td.pp-checkbox-cell input, .pp-table th.pp-checkbox-cell input { cursor: pointer; width: 16px; height: 16px; }
+.pp-table td.pp-checkbox-cell input, .pp-table th.pp-checkbox-cell input { cursor: pointer; width: 16px; height: 16px; accent-color: #1a73e8; }
 </style>
 
 <div class="pp-page-title">

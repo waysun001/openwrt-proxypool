@@ -21,39 +21,80 @@ html.pp-wide-layout #maincontent {
     padding: 0 20px;
 }
 
-/* 全局菜单栏（JS 注入版） */
+/* 全局菜单栏 */
 #proxypool-global-menu {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    background: #f8f9fa;
-    padding: 10px 20px;
-    border-bottom: 2px solid #ddd;
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+    padding: 0 24px;
+    height: 52px;
     font-size: 14px;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
     max-width: 1840px;
     margin: 0 auto;
+    border-radius: 0 0 8px 8px;
 }
-#proxypool-global-menu .menu-links { display: flex; gap: 10px; flex-wrap: wrap; }
+#proxypool-global-menu .menu-links {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+    align-items: center;
+    height: 100%;
+}
 #proxypool-global-menu .menu-links a {
-    padding: 8px 16px;
-    background: #fff;
-    color: #333;
-    border: 1px solid #ddd;
-    border-radius: 4px;
+    padding: 6px 18px;
+    background: transparent;
+    color: rgba(255,255,255,0.75);
+    border: none;
+    border-radius: 6px;
     text-decoration: none;
-    transition: all 0.2s;
+    transition: all 0.2s ease;
     font-weight: 500;
+    font-size: 14px;
+    letter-spacing: 0.3px;
 }
-#proxypool-global-menu .menu-links a:hover { background: #007bff; color: #fff; border-color: #007bff; }
-#proxypool-global-menu .menu-links a.active { background: #007bff; color: #fff; border-color: #007bff; }
-#proxypool-global-menu .menu-stats { display: flex; gap: 15px; font-size: 13px; white-space: nowrap; }
-#proxypool-global-menu .menu-stats span { color: #666; }
-#proxypool-global-menu .menu-stats strong { font-weight: 600; }
-#proxypool-global-menu .menu-stats .stat-connected { color: #28a745; }
-#proxypool-global-menu .menu-stats .stat-disconnected { color: #dc3545; }
+#proxypool-global-menu .menu-links a:hover {
+    background: rgba(255,255,255,0.12);
+    color: #fff;
+}
+#proxypool-global-menu .menu-links a.active {
+    background: rgba(255,255,255,0.18);
+    color: #fff;
+    box-shadow: inset 0 -2px 0 #4fc3f7;
+}
+
+/* 统计区域 */
+#proxypool-global-menu .menu-stats {
+    display: flex;
+    gap: 16px;
+    font-size: 13px;
+    white-space: nowrap;
+    align-items: center;
+}
+#proxypool-global-menu .menu-stats span {
+    color: rgba(255,255,255,0.6);
+}
+#proxypool-global-menu .menu-stats strong {
+    font-weight: 700;
+    font-size: 15px;
+    color: rgba(255,255,255,0.9);
+}
+#proxypool-global-menu .menu-stats .stat-connected {
+    color: #66bb6a;
+}
+#proxypool-global-menu .menu-stats .stat-connected strong {
+    color: #66bb6a;
+}
+#proxypool-global-menu .menu-stats .stat-disconnected {
+    color: #ef5350;
+}
+#proxypool-global-menu .menu-stats .stat-disconnected strong {
+    color: #ef5350;
+}
 
 @media (max-width: 1400px) {
-    #proxypool-global-menu { padding: 10px 12px; }
+    #proxypool-global-menu { padding: 0 12px; }
     html.pp-wide-layout #maincontent { padding: 0 12px; }
+    #proxypool-global-menu .menu-links a { padding: 6px 12px; font-size: 13px; }
 }
