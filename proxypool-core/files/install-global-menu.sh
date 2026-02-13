@@ -2,14 +2,23 @@
 # ProxyPool 全局菜单安装脚本
 # 修改 LuCI header.htm，替换原有菜单为自定义快捷导航和统计
 
-HEADER_FILE="/usr/lib/lua/luci/view/cbi/header.htm"
+# 查找正确的 header.htm（主题优先，回退到基础目录）
+HEADER_FILE=""
+for f in \
+    /usr/lib/lua/luci/view/themes/bootstrap/header.htm \
+    /usr/lib/lua/luci/view/header.htm \
+    /usr/lib/lua/luci/view/cbi/header.htm; do
+    [ -f "$f" ] && HEADER_FILE="$f" && break
+done
 BACKUP_FILE="${HEADER_FILE}.proxypool-backup"
 
 # 检查 header.htm 是否存在
-if [ ! -f "$HEADER_FILE" ]; then
+if [ -z "$HEADER_FILE" ] || [ ! -f "$HEADER_FILE" ]; then
     echo "错误：找不到 LuCI header.htm 文件"
     exit 1
 fi
+
+echo "使用 header.htm: $HEADER_FILE"
 
 # 备份原文件（如果还没备份过）
 if [ ! -f "$BACKUP_FILE" ]; then
@@ -95,7 +104,7 @@ sed -i '/<body[^>]*>/a\
         <a href="/cgi-bin/luci/admin/services/proxypool">智联盒子</a>\
         <a href="/cgi-bin/luci/admin/services/proxypool?tab=log">系统日志</a>\
         <a href="/cgi-bin/luci/admin/network/wireless">信道分析</a>\
-        <a href="/cgi-bin/luci/admin/system/flashops">备份与升级</a>\
+        <a href="/cgi-bin/luci/admin/system/flash">备份与升级</a>\
         <a href="/cgi-bin/luci/admin/network/wireless">无线</a>\
         <a href="/cgi-bin/luci/admin/system/reboot">重启</a>\
     </div>\

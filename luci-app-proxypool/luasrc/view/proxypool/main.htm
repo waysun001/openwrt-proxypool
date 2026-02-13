@@ -1,6 +1,8 @@
 <%+header%>
 
 <style>
+.pp-page-title { max-width: 1840px; margin: 0 auto; padding: 20px 20px 0; }
+.pp-page-title h2 { margin: 0 0 10px; padding: 0 0 10px; font-size: 18px; font-weight: 600; color: #333; border-bottom: 1px solid #eee; }
 .pp-container { max-width: 1840px; margin: 0 auto; padding: 0 20px 40px; }
 @media (max-width: 1400px) {
     .pp-container { padding: 0 16px 30px; }
@@ -23,10 +25,6 @@
 .pp-btn-warning { background: #fd7e14; color: #fff; }
 .pp-btn:hover { opacity: 0.9; }
 .pp-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-
-.pp-tabs { display: flex; border-bottom: 2px solid #ddd; margin-bottom: 15px; }
-.pp-tab { padding: 10px 20px; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -2px; }
-.pp-tab.active { border-bottom-color: #007bff; color: #007bff; font-weight: bold; }
 
 .pp-table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
 .pp-table th, .pp-table td { padding: 12px; text-align: left; border-bottom: 1px solid #eee; }
@@ -106,10 +104,11 @@
 .pp-table td.pp-checkbox-cell input, .pp-table th.pp-checkbox-cell input { cursor: pointer; width: 16px; height: 16px; }
 </style>
 
+<div class="pp-page-title">
+    <h2 id="pp-title-text">客户端管理</h2>
+</div>
+
 <div class="pp-container">
-    <!-- 顶部菜单已移至 LuCI 全局 header.htm -->
-
-
     <div id="panel-clients" class="pp-panel active">
         <div class="pp-toolbar" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;">
             <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
@@ -353,11 +352,10 @@ var sortAscending = true;
 var selectedClients = {};
 
 function switchTab(tab) {
-    document.querySelectorAll('.pp-tab').forEach(function(t) { t.classList.remove('active'); });
     document.querySelectorAll('.pp-panel').forEach(function(p) { p.classList.remove('active'); });
-    document.querySelector('.pp-tab[onclick*="' + tab + '"]').classList.add('active');
     document.getElementById('panel-' + tab).classList.add('active');
-
+    var titleEl = document.getElementById('pp-title-text');
+    if (titleEl) titleEl.textContent = (tab === 'log') ? '系统日志' : '客户端管理';
     if (tab === 'log') refreshLog();
 }
 
@@ -914,11 +912,11 @@ function stopRapidPoll() {
 // 绑定 IP 在线状态（从 devices 数据中获取）
 var deviceData = [];
 
-/* 更新顶部菜单统计数据 */
+/* 更新顶部菜单统计数据（ID 与 proxypool-global.js 一致） */
 function updateTopMenuStats(summary) {
-    var totalEl = document.getElementById('stat-total-top');
-    var connectedEl = document.getElementById('stat-connected-top');
-    var disconnectedEl = document.getElementById('stat-disconnected-top');
+    var totalEl = document.getElementById('pp-stat-total');
+    var connectedEl = document.getElementById('pp-stat-connected');
+    var disconnectedEl = document.getElementById('pp-stat-disconnected');
 
     if (totalEl) totalEl.textContent = summary.total;
     if (connectedEl) connectedEl.textContent = summary.connected;
@@ -1318,7 +1316,7 @@ function saveDhcpLease() {
 }
 
 // 初始化
-// 检测 URL 参数，自动切换标签（支持全局菜单跳转）
+// 检测 URL 参数，自动切换标签（菜单高亮由 proxypool-global.js 根据 URL 自动处理）
 (function() {
     var urlParams = new URLSearchParams(window.location.search);
     var tab = urlParams.get('tab');

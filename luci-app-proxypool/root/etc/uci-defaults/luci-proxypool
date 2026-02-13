@@ -28,44 +28,51 @@ FWEOF
 
 # ===== 全局 UI 定制（JS 版 LuCI 兼容方案）=====
 
-# 1. 写入全局导航 JS
+# 1. 写入全局导航 JS（硬编码菜单 + 自带 CSS 注入，所有页面统一渲染）
 cat > /www/luci-static/resources/proxypool-global.js << 'PPJS'
 (function(){
 'use strict';
-if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',tryBuild)}else{tryBuild()}
-function tryBuild(){if(document.getElementById('pp-topnav'))return;buildTopNav(0)}
-function buildTopNav(attempt){
-var targets=[
-{label:'\u667A\u8054\u76D2\u5B50',kw:['\u667A\u8054\u76D2\u5B50']},
-{label:'\u4FE1\u9053\u5206\u6790',kw:['\u4FE1\u9053\u5206\u6790']},
-{label:'\u5907\u4EFD\u4E0E\u5347\u7EA7',kw:['\u5907\u4EFD\u4E0E\u5347\u7EA7','\u5907\u4EFD/\u5347\u7EA7']},
-{label:'\u65E0\u7EBF',kw:['\u65E0\u7EBF']},
-{label:'\u91CD\u542F',kw:['\u91CD\u542F']}
+injectCSS();
+if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',build)}else{build()}
+function build(){
+if(document.getElementById('proxypool-global-menu'))return;
+var items=[
+{l:'\u667A\u8054\u76D2\u5B50',h:'/cgi-bin/luci/admin/services/proxypool'},
+{l:'\u7CFB\u7EDF\u65E5\u5FD7',h:'/cgi-bin/luci/admin/services/proxypool?tab=log'},
+{l:'\u4FE1\u9053\u5206\u6790',h:'/cgi-bin/luci/admin/network/wireless'},
+{l:'\u5907\u4EFD\u4E0E\u5347\u7EA7',h:'/cgi-bin/luci/admin/system/flash'},
+{l:'\u65E0\u7EBF',h:'/cgi-bin/luci/admin/network/wireless'},
+{l:'\u91CD\u542F',h:'/cgi-bin/luci/admin/system/reboot'}
 ];
-var links=document.querySelectorAll('a[href]');
-var items=[];
-targets.forEach(function(t){
-var href=null;
-for(var i=0;i<links.length&&!href;i++){
-var txt=links[i].textContent.replace(/\s+/g,'');
-for(var k=0;k<t.kw.length;k++){if(txt===t.kw[k]){href=links[i].href;break}}}
-if(!href){for(var i=0;i<links.length&&!href;i++){
-var txt=links[i].textContent.replace(/\s+/g,'');
-for(var k=0;k<t.kw.length;k++){if(txt.indexOf(t.kw[k])!==-1&&links[i].href.indexOf('/cgi-bin/')!==-1){href=links[i].href;break}}}}
-if(href)items.push({label:t.label,href:href})
-});
-if(items.length===0&&attempt<20){setTimeout(function(){buildTopNav(attempt+1)},500);return}
-if(items.length===0)return;
-var nav=document.createElement('div');nav.id='pp-topnav';
+var menu=document.createElement('div');menu.id='proxypool-global-menu';
+var ld=document.createElement('div');ld.className='menu-links';
+var p=window.location.pathname.replace(/\/+$/,''),s=window.location.search||'';
 items.forEach(function(it){
-var a=document.createElement('a');a.href=it.href;a.textContent=it.label;
-var loc=window.location.href.replace(/\/$/,'');var tgt=it.href.replace(/\/$/,'');
-if(loc===tgt||loc.indexOf(tgt+'/')===0)a.className='pp-nav-active';
-nav.appendChild(a)});
+var a=document.createElement('a');a.href=it.h;a.textContent=it.l;
+var qi=it.h.indexOf('?'),ip=qi>=0?it.h.substring(0,qi):it.h,is=qi>=0?it.h.substring(qi):'';
+if(is){if(p===ip&&s===is)a.className='active'}
+else{if(p===ip&&!s)a.className='active'}
+ld.appendChild(a)});
+var sd=document.createElement('div');sd.className='menu-stats';
+sd.innerHTML='<span>\u603B <strong id="pp-stat-total">-</strong></span><span class="stat-connected">\u5DF2\u8FDE\u63A5 <strong id="pp-stat-connected">-</strong></span><span class="stat-disconnected">\u672A\u8FDE\u63A5 <strong id="pp-stat-disconnected">-</strong></span>';
+menu.appendChild(ld);menu.appendChild(sd);
 var anchor=document.querySelector('#maincontent')||document.querySelector('.main-right')||document.querySelector('.main')||document.querySelector('#content');
-if(anchor&&anchor.parentNode){anchor.parentNode.insertBefore(nav,anchor)}
-else{document.body.insertBefore(nav,document.body.firstChild)}
-}
+if(anchor&&anchor.parentNode){anchor.parentNode.insertBefore(menu,anchor)}
+else{document.body.insertBefore(menu,document.body.firstChild)}
+us();setInterval(us,10000)}
+function injectCSS(){
+if(document.getElementById('pp-global-menu-css'))return;
+var s=document.createElement('style');s.id='pp-global-menu-css';
+s.textContent='#proxypool-global-menu{display:flex;justify-content:space-between;align-items:center;background:#f8f9fa;padding:10px 20px;border-bottom:2px solid #ddd;font-size:14px;box-shadow:0 2px 4px rgba(0,0,0,0.1);max-width:1840px;margin:0 auto}#proxypool-global-menu .menu-links{display:flex;gap:10px;flex-wrap:wrap}#proxypool-global-menu .menu-links a{padding:8px 16px;background:#fff;color:#333;border:1px solid #ddd;border-radius:4px;text-decoration:none;transition:all 0.2s;font-weight:500}#proxypool-global-menu .menu-links a:hover{background:#007bff;color:#fff;border-color:#007bff}#proxypool-global-menu .menu-links a.active{background:#007bff;color:#fff;border-color:#007bff}#proxypool-global-menu .menu-stats{display:flex;gap:15px;font-size:13px;white-space:nowrap}#proxypool-global-menu .menu-stats span{color:#666}#proxypool-global-menu .menu-stats strong{font-weight:600}#proxypool-global-menu .menu-stats .stat-connected{color:#28a745}#proxypool-global-menu .menu-stats .stat-disconnected{color:#dc3545}';
+document.head.appendChild(s)}
+function us(){
+fetch('/cgi-bin/luci/admin/services/proxypool/api?action=status')
+.then(function(r){return r.json()})
+.then(function(d){if(d&&d.summary){
+var e;e=document.getElementById('pp-stat-total');if(e)e.textContent=d.summary.total;
+e=document.getElementById('pp-stat-connected');if(e)e.textContent=d.summary.connected;
+e=document.getElementById('pp-stat-disconnected');if(e)e.textContent=d.summary.disconnected}})
+.catch(function(){});}
 })();
 PPJS
 
@@ -82,10 +89,16 @@ html.pp-wide-layout header,html.pp-wide-layout .header,html.pp-wide-layout #head
 html.pp-wide-layout .main-right{width:100%!important;margin-left:0!important;float:none!important}
 html.pp-wide-layout .main{display:block!important}
 html.pp-wide-layout #maincontent{max-width:1840px;margin:0 auto;padding:0 20px}
-#pp-topnav{max-width:1840px;margin:0 auto;padding:0 20px;display:flex;gap:0;background:#fff;border-bottom:2px solid #ddd}
-#pp-topnav a{padding:12px 28px;text-decoration:none;color:#333;font-weight:600;font-size:14px;white-space:nowrap;border-bottom:3px solid transparent;margin-bottom:-2px}
-#pp-topnav a:hover{background:#f0f0f0;color:#007bff}
-#pp-topnav a.pp-nav-active{color:#007bff;border-bottom-color:#007bff}
+#proxypool-global-menu{display:flex;justify-content:space-between;align-items:center;background:#f8f9fa;padding:10px 20px;border-bottom:2px solid #ddd;font-size:14px;box-shadow:0 2px 4px rgba(0,0,0,0.1);max-width:1840px;margin:0 auto}
+#proxypool-global-menu .menu-links{display:flex;gap:10px;flex-wrap:wrap}
+#proxypool-global-menu .menu-links a{padding:8px 16px;background:#fff;color:#333;border:1px solid #ddd;border-radius:4px;text-decoration:none;transition:all 0.2s;font-weight:500}
+#proxypool-global-menu .menu-links a:hover{background:#007bff;color:#fff;border-color:#007bff}
+#proxypool-global-menu .menu-links a.active{background:#007bff;color:#fff;border-color:#007bff}
+#proxypool-global-menu .menu-stats{display:flex;gap:15px;font-size:13px;white-space:nowrap}
+#proxypool-global-menu .menu-stats span{color:#666}
+#proxypool-global-menu .menu-stats strong{font-weight:600}
+#proxypool-global-menu .menu-stats .stat-connected{color:#28a745}
+#proxypool-global-menu .menu-stats .stat-disconnected{color:#dc3545}
 PPCSS
 done
 

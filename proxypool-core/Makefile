@@ -14,7 +14,6 @@ define Package/proxypool-core
   CATEGORY:=Network
   TITLE:=智联盒子核心服务
   DEPENDS:=+xl2tpd +ppp +ppp-mod-pppol2tp +redsocks +nftables +ip-full +conntrack
-  PKGARCH:=all
 endef
 
 define Package/proxypool-core/description
@@ -27,6 +26,15 @@ define Package/proxypool-core/conffiles
 endef
 
 define Build/Compile
+	$(TARGET_CC) $(TARGET_CFLAGS) $(TARGET_LDFLAGS) \
+		-o $(PKG_BUILD_DIR)/ip2region_searcher \
+		$(PKG_BUILD_DIR)/src/ip2region_searcher.c
+endef
+
+define Build/Prepare
+	$(call Build/Prepare/Default)
+	$(INSTALL_DIR) $(PKG_BUILD_DIR)/src
+	$(CP) ./src/ip2region_searcher.c $(PKG_BUILD_DIR)/src/
 endef
 
 define Package/proxypool-core/install
@@ -44,6 +52,14 @@ define Package/proxypool-core/install
 	$(INSTALL_BIN) ./files/status.sh $(1)/usr/lib/proxypool/status.sh
 	$(INSTALL_BIN) ./files/backup.sh $(1)/usr/lib/proxypool/backup.sh
 	$(INSTALL_BIN) ./files/watchdog.sh $(1)/usr/lib/proxypool/watchdog.sh
+	$(INSTALL_BIN) ./files/iplocation.sh $(1)/usr/lib/proxypool/iplocation.sh
+	$(INSTALL_BIN) ./files/timeout-check.sh $(1)/usr/lib/proxypool/timeout-check.sh
+	$(INSTALL_BIN) ./files/timeout-rotate.sh $(1)/usr/lib/proxypool/timeout-rotate.sh
+	$(INSTALL_BIN) ./files/update-ipdb.sh $(1)/usr/lib/proxypool/update-ipdb.sh
+	$(INSTALL_BIN) ./files/install-global-menu.sh $(1)/usr/lib/proxypool/install-global-menu.sh
+	$(INSTALL_BIN) ./files/uninstall-global-menu.sh $(1)/usr/lib/proxypool/uninstall-global-menu.sh
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/ip2region_searcher $(1)/usr/lib/proxypool/ip2region_searcher
+	$(INSTALL_DATA) ./files/ip2region.xdb $(1)/usr/lib/proxypool/ip2region.xdb
 
 	$(INSTALL_DIR) $(1)/etc/ppp
 	$(INSTALL_BIN) ./files/ip-up $(1)/etc/ppp/ip-up

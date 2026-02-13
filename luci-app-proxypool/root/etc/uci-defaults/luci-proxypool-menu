@@ -1,10 +1,17 @@
 #!/bin/sh
 # ProxyPool 全局菜单自动安装（首次安装时执行）
 
-HEADER="/usr/lib/lua/luci/view/cbi/header.htm"
+# 查找正确的 header.htm（主题优先，回退到基础目录）
+HEADER=""
+for f in \
+    /usr/lib/lua/luci/view/themes/bootstrap/header.htm \
+    /usr/lib/lua/luci/view/header.htm \
+    /usr/lib/lua/luci/view/cbi/header.htm; do
+    [ -f "$f" ] && HEADER="$f" && break
+done
 BACKUP="${HEADER}.proxypool-backup"
 
-[ -f "$HEADER" ] || exit 0
+[ -z "$HEADER" ] || [ ! -f "$HEADER" ] && exit 0
 grep -q "proxypool-global-menu" "$HEADER" && exit 0
 
 # 备份
@@ -72,7 +79,7 @@ sed -i '/<body[^>]*>/a\
         <a href="/cgi-bin/luci/admin/services/proxypool">智联盒子</a>\
         <a href="/cgi-bin/luci/admin/services/proxypool?tab=log">系统日志</a>\
         <a href="/cgi-bin/luci/admin/network/wireless">信道分析</a>\
-        <a href="/cgi-bin/luci/admin/system/flashops">备份与升级</a>\
+        <a href="/cgi-bin/luci/admin/system/flash">备份与升级</a>\
         <a href="/cgi-bin/luci/admin/network/wireless">无线</a>\
         <a href="/cgi-bin/luci/admin/system/reboot">重启</a>\
     </div>\
