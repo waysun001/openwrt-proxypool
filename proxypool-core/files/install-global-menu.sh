@@ -20,22 +20,22 @@ fi
 
 echo "使用 header.htm: $HEADER_FILE"
 
-# 备份原文件（如果还没备份过）
+# 如果已安装旧版菜单，先清除再重装
+if grep -q "proxypool-global-menu" "$HEADER_FILE"; then
+    echo "检测到旧版菜单，先清除..."
+    if [ -f "$BACKUP_FILE" ]; then
+        cp "$BACKUP_FILE" "$HEADER_FILE"
+    else
+        sed -i '/<!-- ProxyPool Global Menu -->/,/<\/style>/d' "$HEADER_FILE"
+        sed -i '/<!-- proxypool-global-menu -->/,/<!-- \/proxypool-global-menu -->/d' "$HEADER_FILE"
+        sed -i '/updateProxyPoolStats/,/<\/script>/d' "$HEADER_FILE"
+    fi
+fi
+
+# 备份原文件（仅首次）
 if [ ! -f "$BACKUP_FILE" ]; then
     echo "备份原始 header.htm..."
     cp "$HEADER_FILE" "$BACKUP_FILE"
-fi
-
-# 检查是否已经安装过
-if grep -q "proxypool-global-menu" "$HEADER_FILE"; then
-    echo "全局菜单已经安装，跳过"
-    exit 0
-fi
-
-# 查找插入位置（在 </head> 之前插入样式和脚本）
-if ! grep -q "</head>" "$HEADER_FILE"; then
-    echo "错误：header.htm 格式不符合预期（找不到 </head> 标签）"
-    exit 1
 fi
 
 echo "安装全局菜单..."
@@ -113,13 +113,10 @@ sed -i '/<body[^>]*>/a\
         <span class="stat-connected">已连接 <strong id="pp-stat-connected">-</strong></span>\
         <span class="stat-disconnected">未连接 <strong id="pp-stat-disconnected">-</strong></span>\
     </div>\
-</div>
+</div>\
+<!-- /proxypool-global-menu -->
 ' "$HEADER_FILE"
 
 echo "全局菜单安装完成！"
-echo "✓ 已隐藏 LuCI 原有菜单（状态|系统|服务|网络|注销）"
-echo "✓ 已安装自定义快捷菜单和统计显示"
-echo ""
 echo "如需恢复原始 header.htm，执行："
-echo "  cp $BACKUP_FILE $HEADER_FILE"
-echo "  /etc/init.d/uhttpd restart"
+echo "  /usr/lib/proxypool/uninstall-global-menu.sh"

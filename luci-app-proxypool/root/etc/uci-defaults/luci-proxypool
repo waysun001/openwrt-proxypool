@@ -39,7 +39,7 @@ if(document.getElementById('proxypool-global-menu'))return;
 var items=[
 {l:'\u667A\u8054\u76D2\u5B50',h:'/cgi-bin/luci/admin/services/proxypool'},
 {l:'\u7CFB\u7EDF\u65E5\u5FD7',h:'/cgi-bin/luci/admin/services/proxypool?tab=log'},
-{l:'\u4FE1\u9053\u5206\u6790',h:'/cgi-bin/luci/admin/network/wireless'},
+{l:'\u4FE1\u9053\u5206\u6790',h:'/cgi-bin/luci/admin/status/channel_analysis'},
 {l:'\u5907\u4EFD\u4E0E\u5347\u7EA7',h:'/cgi-bin/luci/admin/system/flash'},
 {l:'\u65E0\u7EBF',h:'/cgi-bin/luci/admin/network/wireless'},
 {l:'\u91CD\u542F',h:'/cgi-bin/luci/admin/system/reboot'}

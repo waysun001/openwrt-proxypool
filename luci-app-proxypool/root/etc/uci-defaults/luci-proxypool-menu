@@ -1,5 +1,5 @@
 #!/bin/sh
-# ProxyPool 全局菜单自动安装（首次安装时执行）
+# ProxyPool 全局菜单自动安装（每次升级都会刷新菜单内容）
 
 # 查找正确的 header.htm（主题优先，回退到基础目录）
 HEADER=""
@@ -12,10 +12,22 @@ done
 BACKUP="${HEADER}.proxypool-backup"
 
 [ -z "$HEADER" ] || [ ! -f "$HEADER" ] && exit 0
-grep -q "proxypool-global-menu" "$HEADER" && exit 0
 
-# 备份
-cp "$HEADER" "$BACKUP" 2>/dev/null
+# 如果已安装旧版菜单，先清除再重装（保证升级时内容刷新）
+if grep -q "proxypool-global-menu" "$HEADER"; then
+    # 从备份恢复干净的 header.htm
+    if [ -f "$BACKUP" ]; then
+        cp "$BACKUP" "$HEADER"
+    else
+        # 无备份时用 sed 清除旧内容
+        sed -i '/<!-- ProxyPool Global Menu -->/,/<\/style>/d' "$HEADER"
+        sed -i '/<!-- proxypool-global-menu -->/,/<!-- \/proxypool-global-menu -->/d' "$HEADER"
+        sed -i '/updateProxyPoolStats/,/<\/script>/d' "$HEADER"
+    fi
+fi
+
+# 备份干净的 header.htm（仅首次）
+[ ! -f "$BACKUP" ] && cp "$HEADER" "$BACKUP" 2>/dev/null
 
 # 插入样式和脚本
 sed -i '/<\/head>/i\
@@ -88,7 +100,8 @@ sed -i '/<body[^>]*>/a\
         <span class="stat-connected">已连接 <strong id="pp-stat-connected">-</strong></span>\
         <span class="stat-disconnected">未连接 <strong id="pp-stat-disconnected">-</strong></span>\
     </div>\
-</div>
+</div>\
+<!-- /proxypool-global-menu -->
 ' "$HEADER"
 
 /etc/init.d/uhttpd restart 2>/dev/null

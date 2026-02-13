@@ -16,7 +16,7 @@
         var menuItems = [
             { label: '\u667A\u8054\u76D2\u5B50', href: '/cgi-bin/luci/admin/services/proxypool' },
             { label: '\u7CFB\u7EDF\u65E5\u5FD7', href: '/cgi-bin/luci/admin/services/proxypool?tab=log' },
-            { label: '\u4FE1\u9053\u5206\u6790', href: '/cgi-bin/luci/admin/network/wireless' },
+            { label: '\u4FE1\u9053\u5206\u6790', href: '/cgi-bin/luci/admin/status/channel_analysis' },
             { label: '\u5907\u4EFD\u4E0E\u5347\u7EA7', href: '/cgi-bin/luci/admin/system/flash' },
             { label: '\u65E0\u7EBF', href: '/cgi-bin/luci/admin/network/wireless' },
             { label: '\u91CD\u542F', href: '/cgi-bin/luci/admin/system/reboot' }
