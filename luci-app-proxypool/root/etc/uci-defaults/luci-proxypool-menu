@@ -78,7 +78,7 @@ sed -i '/<body[^>]*>/a\
     <div class="menu-links">\
         <a href="/cgi-bin/luci/admin/services/proxypool">智联盒子</a>\
         <a href="/cgi-bin/luci/admin/services/proxypool?tab=log">系统日志</a>\
-        <a href="/cgi-bin/luci/admin/network/wireless">信道分析</a>\
+        <a href="/cgi-bin/luci/admin/status/channel_analysis">信道分析</a>\
         <a href="/cgi-bin/luci/admin/system/flash">备份与升级</a>\
         <a href="/cgi-bin/luci/admin/network/wireless">无线</a>\
         <a href="/cgi-bin/luci/admin/system/reboot">重启</a>\
