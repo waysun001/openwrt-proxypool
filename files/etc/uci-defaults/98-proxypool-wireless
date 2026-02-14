@@ -2,21 +2,30 @@
 # 首次启动时自动开启无线并设置 SSID
 # GL-MT6000: radio0 = 2.4GHz, radio1 = 5GHz
 
-# 等待 wireless 配置生成（OpenWrt 首次启动时 wifi detect 可能延迟）
-[ -f /etc/config/wireless ] || return 0
+# 如果 wireless 配置尚未生成，主动触发
+[ -f /etc/config/wireless ] || wifi config 2>/dev/null
 
-# 启用 2.4GHz 无线
+# 仍不存在则返回失败，OpenWrt 会保留脚本下次启动重试
+[ -f /etc/config/wireless ] || exit 1
+
+# 检查是否已配置过（避免重复执行覆盖用户修改）
+CURRENT_SSID=$(uci -q get wireless.default_radio0.ssid)
+[ "$CURRENT_SSID" = "SmartLink_2.4G" ] && exit 0
+
+# 启用 2.4GHz 和 5GHz 无线
 uci set wireless.radio0.disabled='0'
 uci set wireless.default_radio0.ssid='SmartLink_2.4G'
 uci set wireless.default_radio0.encryption='psk2'
 uci set wireless.default_radio0.key='12345678'
 
-# 启用 5GHz 无线
 uci set wireless.radio1.disabled='0'
 uci set wireless.default_radio1.ssid='SmartLink_5G'
 uci set wireless.default_radio1.encryption='psk2'
 uci set wireless.default_radio1.key='12345678'
 
 uci commit wireless
+
+# 重启无线
+wifi reload 2>/dev/null || wifi up 2>/dev/null
 
 exit 0
