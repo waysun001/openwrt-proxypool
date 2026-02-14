@@ -48,6 +48,7 @@ define Package/proxypool-core/install
 	$(INSTALL_BIN) ./files/proxypool.sh $(1)/usr/lib/proxypool/proxypool.sh
 	$(INSTALL_BIN) ./files/l2tp-manager.sh $(1)/usr/lib/proxypool/l2tp-manager.sh
 	$(INSTALL_BIN) ./files/socks5-manager.sh $(1)/usr/lib/proxypool/socks5-manager.sh
+	$(INSTALL_BIN) ./files/slp-manager.sh $(1)/usr/lib/proxypool/slp-manager.sh
 	$(INSTALL_BIN) ./files/firewall.sh $(1)/usr/lib/proxypool/firewall.sh
 	$(INSTALL_BIN) ./files/status.sh $(1)/usr/lib/proxypool/status.sh
 	$(INSTALL_BIN) ./files/backup.sh $(1)/usr/lib/proxypool/backup.sh

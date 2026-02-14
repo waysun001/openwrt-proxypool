@@ -46,6 +46,12 @@ function api_handler()
             if type(data.bind_ip) == "string" then
                 data.bind_ip = {data.bind_ip}
             end
+            -- SLP 专用字段
+            data.slp_token = uci:get("proxypool", client, "slp_token") or ""
+            data.slp_transport = uci:get("proxypool", client, "slp_transport") or "quic"
+            data.slp_obfs = uci:get("proxypool", client, "slp_obfs") or "0"
+            data.slp_obfs_key = uci:get("proxypool", client, "slp_obfs_key") or ""
+            data.slp_insecure = uci:get("proxypool", client, "slp_insecure") or "1"
             http.prepare_content("application/json")
             http.write(json.stringify(data))
         end
@@ -73,6 +79,21 @@ function api_handler()
                     uci:set("proxypool", client, "bind_ip", d.bind_ip)
                 else
                     uci:delete("proxypool", client, "bind_ip")
+                end
+                -- SLP 专用字段
+                if d.type == "slp" then
+                    uci:set("proxypool", client, "slp_token", d.slp_token or "")
+                    uci:set("proxypool", client, "slp_transport", d.slp_transport or "quic")
+                    uci:set("proxypool", client, "slp_obfs", d.slp_obfs or "0")
+                    uci:set("proxypool", client, "slp_obfs_key", d.slp_obfs_key or "")
+                    uci:set("proxypool", client, "slp_insecure", d.slp_insecure or "1")
+                else
+                    -- 非 SLP 类型，清理 SLP 字段
+                    uci:delete("proxypool", client, "slp_token")
+                    uci:delete("proxypool", client, "slp_transport")
+                    uci:delete("proxypool", client, "slp_obfs")
+                    uci:delete("proxypool", client, "slp_obfs_key")
+                    uci:delete("proxypool", client, "slp_insecure")
                 end
                 uci:commit("proxypool")
                 -- 保存后自动应用：先停止旧的，再根据 enabled 决定是否启动

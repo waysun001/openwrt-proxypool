@@ -65,6 +65,9 @@ _start_client_nofirewall() {
         socks5)
             "$SCRIPT_DIR/socks5-manager.sh" start "$client"
             ;;
+        slp)
+            "$SCRIPT_DIR/slp-manager.sh" start "$client"
+            ;;
         *)
             log_error "Unknown client type: $type for $client"
             return 1
@@ -85,6 +88,9 @@ _stop_client_nofirewall() {
             ;;
         socks5)
             "$SCRIPT_DIR/socks5-manager.sh" stop "$client"
+            ;;
+        slp)
+            "$SCRIPT_DIR/slp-manager.sh" stop "$client"
             ;;
     esac
 }

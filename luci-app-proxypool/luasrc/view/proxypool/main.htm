@@ -101,6 +101,7 @@
 .pp-badge-l2tp { background: #e3f0ff; color: #1a56db; }
 .pp-badge-socks5 { background: #fef3cd; color: #92600a; }
 .pp-badge-pptp { background: #d1fae5; color: #065f46; }
+.pp-badge-slp { background: #f3e8ff; color: #7c3aed; }
 
 /* 批量导入预览 */
 .pp-preview-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 10px; border-radius: 6px; overflow: hidden; }
@@ -240,6 +241,7 @@
                     <select id="form-type" onchange="onTypeChange()">
                         <option value="socks5">SOCKS5</option>
                         <option value="l2tp">L2TP</option>
+                        <option value="slp">SLP</option>
                     </select>
                 </div>
                 <div class="pp-form-group">
@@ -252,7 +254,7 @@
                 </div>
             </div>
 
-            <div class="pp-form-row">
+            <div class="pp-form-row" id="form-auth-row">
                 <div class="pp-form-group">
                     <label>用户名</label>
                     <input type="text" id="form-username" placeholder="认证用户名">
@@ -264,6 +266,47 @@
                 <div class="pp-form-group">
                     <label>到期时间</label>
                     <input type="text" id="form-expiry" placeholder="如: 2026-12-31">
+                </div>
+            </div>
+
+            <!-- SLP 专用字段 -->
+            <div id="form-slp-fields" style="display:none;">
+                <div class="pp-form-row">
+                    <div class="pp-form-group">
+                        <label>Token</label>
+                        <input type="text" id="form-slp-token" placeholder="认证Token">
+                    </div>
+                    <div class="pp-form-group">
+                        <label>传输模式</label>
+                        <select id="form-slp-transport">
+                            <option value="quic">QUIC</option>
+                            <option value="websocket">WebSocket</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="pp-form-row">
+                    <div class="pp-form-group">
+                        <label style="display:flex;align-items:center;gap:10px;">
+                            <span>启用混淆</span>
+                            <label class="pp-switch">
+                                <input type="checkbox" id="form-slp-obfs" onchange="onSlpObfsChange()">
+                                <span class="pp-switch-slider"></span>
+                            </label>
+                        </label>
+                    </div>
+                    <div class="pp-form-group" id="form-slp-obfs-key-group" style="display:none;">
+                        <label>混淆密钥</label>
+                        <input type="text" id="form-slp-obfs-key" placeholder="留空则使用Token">
+                    </div>
+                    <div class="pp-form-group">
+                        <label style="display:flex;align-items:center;gap:10px;">
+                            <span>跳过证书验证</span>
+                            <label class="pp-switch">
+                                <input type="checkbox" id="form-slp-insecure" checked>
+                                <span class="pp-switch-slider"></span>
+                            </label>
+                        </label>
+                    </div>
                 </div>
             </div>
 
@@ -395,6 +438,7 @@ function getTypeBadge(type) {
     if (t === 'l2tp') return '<span class="pp-badge pp-badge-l2tp">L2TP</span>';
     if (t === 'socks5') return '<span class="pp-badge pp-badge-socks5">SK5</span>';
     if (t === 'pptp') return '<span class="pp-badge pp-badge-pptp">PPTP</span>';
+    if (t === 'slp') return '<span class="pp-badge pp-badge-slp">SLP</span>';
     return '<span class="pp-badge">' + (type || '').toUpperCase() + '</span>';
 }
 
@@ -670,11 +714,30 @@ function renderClients() {
 function onTypeChange() {
     var type = document.getElementById('form-type').value;
     var portField = document.getElementById('form-port');
+    var authRow = document.getElementById('form-auth-row');
+    var slpFields = document.getElementById('form-slp-fields');
+    
+    // 显示/隐藏 SLP 专用字段
+    if (type === 'slp') {
+        authRow.style.display = 'none';
+        slpFields.style.display = 'block';
+    } else {
+        authRow.style.display = 'flex';
+        slpFields.style.display = 'none';
+    }
+    
     // 仅在端口为空或为默认值时自动填充
     var cur = portField.value;
-    if (!cur || cur === '1080' || cur === '1701') {
-        portField.value = (type === 'l2tp') ? '1701' : '1080';
+    if (!cur || cur === '1080' || cur === '1701' || cur === '443') {
+        if (type === 'l2tp') portField.value = '1701';
+        else if (type === 'slp') portField.value = '443';
+        else portField.value = '1080';
     }
+}
+
+function onSlpObfsChange() {
+    var obfsChecked = document.getElementById('form-slp-obfs').checked;
+    document.getElementById('form-slp-obfs-key-group').style.display = obfsChecked ? 'block' : 'none';
 }
 
 function showAddModal() {
@@ -689,6 +752,13 @@ function showAddModal() {
     document.getElementById('form-expiry').value = '';
     document.getElementById('form-bindip').value = '';
     document.getElementById('form-enabled').checked = true;
+    // SLP 字段重置
+    document.getElementById('form-slp-token').value = '';
+    document.getElementById('form-slp-transport').value = 'quic';
+    document.getElementById('form-slp-obfs').checked = false;
+    document.getElementById('form-slp-obfs-key').value = '';
+    document.getElementById('form-slp-insecure').checked = true;
+    onTypeChange();
     document.getElementById('edit-modal').classList.add('active');
 }
 
@@ -707,6 +777,14 @@ function editClient(id) {
             document.getElementById('form-expiry').value = data.expiry || '';
             document.getElementById('form-bindip').value = (data.bind_ip || []).join('\n');
             document.getElementById('form-enabled').checked = data.enabled === '1';
+            // SLP 字段
+            document.getElementById('form-slp-token').value = data.slp_token || '';
+            document.getElementById('form-slp-transport').value = data.slp_transport || 'quic';
+            document.getElementById('form-slp-obfs').checked = data.slp_obfs === '1';
+            document.getElementById('form-slp-obfs-key').value = data.slp_obfs_key || '';
+            document.getElementById('form-slp-insecure').checked = data.slp_insecure !== '0';
+            onTypeChange();
+            onSlpObfsChange();
             document.getElementById('edit-modal').classList.add('active');
         })
         .catch(function(e) { console.error('Edit fetch error:', e); });
@@ -728,11 +806,12 @@ function saveClient(e) {
 
     var id = document.getElementById('form-id').value;
     var bindIps = document.getElementById('form-bindip').value.split('\n').filter(function(ip) { return ip.trim(); });
+    var type = document.getElementById('form-type').value;
 
     var data = {
         enabled: document.getElementById('form-enabled').checked ? '1' : '0',
         name: document.getElementById('form-name').value,
-        type: document.getElementById('form-type').value,
+        type: type,
         server: document.getElementById('form-server').value,
         port: document.getElementById('form-port').value,
         username: document.getElementById('form-username').value,
@@ -740,6 +819,15 @@ function saveClient(e) {
         expiry: document.getElementById('form-expiry').value.trim(),
         bind_ip: bindIps
     };
+    
+    // SLP 专用字段
+    if (type === 'slp') {
+        data.slp_token = document.getElementById('form-slp-token').value;
+        data.slp_transport = document.getElementById('form-slp-transport').value;
+        data.slp_obfs = document.getElementById('form-slp-obfs').checked ? '1' : '0';
+        data.slp_obfs_key = document.getElementById('form-slp-obfs-key').value;
+        data.slp_insecure = document.getElementById('form-slp-insecure').checked ? '1' : '0';
+    }
 
     fetch(apiUrl + '?action=save_client&client=' + id + '&data=' + encodeURIComponent(JSON.stringify(data)))
         .then(function(r) { return r.json(); })
