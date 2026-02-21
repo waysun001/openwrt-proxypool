@@ -180,11 +180,12 @@ jobs:
         PACKAGES="$PACKAGES nftables kmod-nft-tproxy kmod-nft-socket"
         PACKAGES="$PACKAGES ip-full conntrack netcat"
         PACKAGES="$PACKAGES openssh-sftp-server nano htop"
-        PACKAGES="$PACKAGES proxypool-core luci-app-proxypool"
+        PACKAGES="$PACKAGES slp-client-bin proxypool-core luci-app-proxypool"
 
-        make image PROFILE="${{ env.DEVICE_PROFILE }}" PACKAGES="$PACKAGES" FILES="../files" \
-          || make image PROFILE="glinet_gl-mt6000" PACKAGES="$PACKAGES" FILES="../files" \
-          || make image PROFILE="gl-mt6000" PACKAGES="$PACKAGES" FILES="../files"
+        echo "=== Custom packages available ==="
+        ls -la packages/
+
+        make image PROFILE="${{ env.DEVICE_PROFILE }}" PACKAGES="$PACKAGES" FILES="../files" V=s
 
     - name: 整理输出
       run: |
