@@ -120,13 +120,14 @@ jobs:
         echo "CONFIG_PACKAGE_luci-app-proxypool=m" >> .config
         make defconfig
 
-        # 逐个编译，失败立即中断
+        # 逐个编译，失败立即中断（不用 V=s 避免日志过大）
         echo "=== 编译 slp-client-bin ==="
-        make package/proxypool/slp-client-bin/compile V=s -j1
+        make package/proxypool/slp-client-bin/compile -j1 || \
+          { echo "=== slp-client-bin 编译失败，重试 V=s ==="; make package/proxypool/slp-client-bin/compile V=s -j1; }
         echo "=== 编译 proxypool-core ==="
-        make package/proxypool/proxypool-core/compile V=s -j$(nproc) || make package/proxypool/proxypool-core/compile V=s -j1
+        make package/proxypool/proxypool-core/compile -j$(nproc) || make package/proxypool/proxypool-core/compile V=s -j1
         echo "=== 编译 luci-app-proxypool ==="
-        make package/proxypool/luci-app-proxypool/compile V=s -j$(nproc) || make package/proxypool/luci-app-proxypool/compile V=s -j1
+        make package/proxypool/luci-app-proxypool/compile -j$(nproc) || make package/proxypool/luci-app-proxypool/compile V=s -j1
 
         mkdir -p ../packages
         find bin -name "*.ipk" -exec cp {} ../packages/ \;
