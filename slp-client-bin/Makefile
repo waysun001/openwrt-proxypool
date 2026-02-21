@@ -7,20 +7,20 @@ PKG_RELEASE:=1
 PKG_MAINTAINER:=智联盒子
 PKG_LICENSE:=MIT
 
-# OpenWrt ARCH -> Go ARCH 映射
-ifeq ($(ARCH),aarch64)
-  SLP_ARCH:=arm64
-else ifeq ($(ARCH),x86_64)
-  SLP_ARCH:=amd64
-else ifeq ($(ARCH),mipsel)
-  SLP_ARCH:=mipsle
-else ifeq ($(ARCH),mips)
-  SLP_ARCH:=mips
-else ifeq ($(ARCH),arm)
-  SLP_ARCH:=arm64
-else
-  $(error slp-client-bin: unsupported architecture $(ARCH))
+# OpenWrt ARCH -> Go ARCH 映射（用变量映射，避免 else ifeq 兼容问题）
+SLP_ARCH_MAP_aarch64:=arm64
+SLP_ARCH_MAP_x86_64:=amd64
+SLP_ARCH_MAP_mipsel:=mipsle
+SLP_ARCH_MAP_mips:=mips
+SLP_ARCH_MAP_arm:=arm64
+SLP_ARCH:=$(SLP_ARCH_MAP_$(ARCH))
+
+ifeq ($(SLP_ARCH),)
+  $(error slp-client-bin: unsupported architecture: $(ARCH))
 endif
+
+# 用 TOPDIR 构建绝对路径（TOPDIR = SDK 根目录，由 rules.mk 设置）
+SLP_BIN_FILE:=$(TOPDIR)/package/proxypool/slp-client-bin/files/slp-client-linux-$(SLP_ARCH)
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -36,7 +36,7 @@ endef
 
 define Build/Prepare
 	mkdir -p $(PKG_BUILD_DIR)
-	$(CP) ./files/slp-client-linux-$(SLP_ARCH) $(PKG_BUILD_DIR)/slp-client
+	$(CP) $(SLP_BIN_FILE) $(PKG_BUILD_DIR)/slp-client
 	chmod +x $(PKG_BUILD_DIR)/slp-client
 endef
 

@@ -79,6 +79,10 @@ jobs:
         cp -r slp-client-bin sdk/package/proxypool/
         cp -r luci-app-proxypool sdk/package/proxypool/
 
+        echo "=== 验证 slp-client 二进制 ==="
+        ls -la sdk/package/proxypool/slp-client-bin/files/
+        file sdk/package/proxypool/slp-client-bin/files/slp-client-linux-* || echo "WARNING: binary file not found!"
+
     - name: 编译软件包
       run: |
         cd sdk
