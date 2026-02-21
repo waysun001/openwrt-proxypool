@@ -76,6 +76,7 @@ jobs:
       run: |
         mkdir -p sdk/package/proxypool
         cp -r proxypool-core sdk/package/proxypool/
+        cp -r slp-client-bin sdk/package/proxypool/
         cp -r luci-app-proxypool sdk/package/proxypool/
 
     - name: 编译软件包
@@ -114,10 +115,12 @@ jobs:
 
         ./scripts/feeds install -a
 
+        echo "CONFIG_PACKAGE_slp-client-bin=m" >> .config
         echo "CONFIG_PACKAGE_proxypool-core=m" >> .config
         echo "CONFIG_PACKAGE_luci-app-proxypool=m" >> .config
         make defconfig
 
+        make package/proxypool/slp-client-bin/compile V=s -j$(nproc) || make package/proxypool/slp-client-bin/compile V=s -j1
         make package/proxypool/proxypool-core/compile V=s -j$(nproc) || make package/proxypool/proxypool-core/compile V=s -j1
         make package/proxypool/luci-app-proxypool/compile V=s -j$(nproc) || make package/proxypool/luci-app-proxypool/compile V=s -j1
 
