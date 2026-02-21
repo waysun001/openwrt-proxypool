@@ -121,6 +121,36 @@ check_socks5() {
     fi
 }
 
+# 检查 SLP 客户端健康状态
+check_slp() {
+    local client="$1"
+    local config_dir="$RUN_DIR/slp/${client}"
+    local pid_file="$config_dir/slp.pid"
+
+    # 检查 PID 文件是否存在
+    if [ ! -f "$pid_file" ]; then
+        do_restart "$client" "SLP pid file missing"
+        return
+    fi
+
+    # 检查进程是否存活
+    local pid=$(cat "$pid_file" 2>/dev/null)
+    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+        do_restart "$client" "SLP process not running (pid=$pid)"
+        return
+    fi
+
+    # 进程存活，检测 SOCKS5 端口是否可达
+    local port_file="$config_dir/socks5.port"
+    if [ -f "$port_file" ]; then
+        local socks5_port=$(cat "$port_file" 2>/dev/null)
+        if [ -n "$socks5_port" ] && ! nc -z -w 3 127.0.0.1 "$socks5_port" >/dev/null 2>&1; then
+            do_restart "$client" "SLP SOCKS5 port $socks5_port unreachable"
+            return
+        fi
+    fi
+}
+
 # 主逻辑
 run() {
     mkdir -p "$WD_DIR"
@@ -137,6 +167,9 @@ run() {
                 ;;
             socks5)
                 check_socks5 "$client"
+                ;;
+            slp)
+                check_slp "$client"
                 ;;
         esac
     done

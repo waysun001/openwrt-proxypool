@@ -13,12 +13,12 @@ define Package/proxypool-core
   SECTION:=net
   CATEGORY:=Network
   TITLE:=智联盒子核心服务
-  DEPENDS:=+xl2tpd +ppp +ppp-mod-pppol2tp +redsocks +nftables +ip-full +conntrack
+  DEPENDS:=+xl2tpd +ppp +ppp-mod-pppol2tp +redsocks +nftables +ip-full +conntrack +slp-client-bin
 endef
 
 define Package/proxypool-core/description
   智联盒子核心服务 - 多代理客户端管理系统
-  支持 L2TP 和 SOCKS5 协议，严格网络隔离
+  支持 L2TP、SOCKS5 和 SLP 协议，严格网络隔离
 endef
 
 define Package/proxypool-core/conffiles

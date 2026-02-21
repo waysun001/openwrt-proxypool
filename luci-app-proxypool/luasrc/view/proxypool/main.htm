@@ -166,6 +166,7 @@
                 <option value="all">全部</option>
                 <option value="l2tp">L2TP</option>
                 <option value="socks5">SOCKS5</option>
+                <option value="slp">SLP</option>
                 <option value="connected">已连接</option>
                 <option value="disconnected">未连接</option>
                 <option value="disabled">已禁用</option>
@@ -280,7 +281,7 @@
                         <label>传输模式</label>
                         <select id="form-slp-transport">
                             <option value="quic">QUIC</option>
-                            <option value="websocket">WebSocket</option>
+                            <option value="kcp">KCP</option>
                         </select>
                     </div>
                 </div>
@@ -345,14 +346,15 @@
         <div id="batch-step1" class="pp-import-step active">
             <div class="pp-form-group">
                 <label>协议类型</label>
-                <select id="batch-type">
+                <select id="batch-type" onchange="onBatchTypeChange()">
                     <option value="l2tp">L2TP</option>
                     <option value="socks5">SOCKS5</option>
+                    <option value="slp">SLP</option>
                 </select>
             </div>
             <div class="pp-form-group">
                 <label>粘贴数据（每行一条，字段用 | 分隔）</label>
-                <textarea id="batch-text" style="min-height:160px;font-family:monospace;font-size:12px;" placeholder="L2TP 示例:&#10;59.36.216.195|用户名|密码|2026-01-30&#10;124.225.78.235|0|用户名|密码|2026-12-09&#10;124.225.163.189|2018|用户名|密码|2026-02-25&#10;&#10;SOCKS5 示例:&#10;1.2.3.4|1080|用户名|密码"></textarea>
+                <textarea id="batch-text" style="min-height:160px;font-family:monospace;font-size:12px;" placeholder="L2TP 示例:&#10;59.36.216.195|用户名|密码|2026-01-30&#10;124.225.78.235|0|用户名|密码|2026-12-09&#10;124.225.163.189|2018|用户名|密码|2026-02-25&#10;&#10;SOCKS5 示例:&#10;1.2.3.4|1080|用户名|密码&#10;&#10;SLP 示例:&#10;1.2.3.4|443|token值|quic&#10;1.2.3.4|443|token值"></textarea>
             </div>
             <div style="display:flex;gap:10px;justify-content:flex-end;">
                 <button type="button" class="pp-btn pp-btn-secondary" onclick="closeBatchModal()">取消</button>
@@ -459,7 +461,7 @@ function getFilteredAndSortedClients() {
     // 类型/状态筛选
     if (filterType !== 'all') {
         list = list.filter(function(c) {
-            if (filterType === 'l2tp' || filterType === 'socks5') return c.type === filterType;
+            if (filterType === 'l2tp' || filterType === 'socks5' || filterType === 'slp') return c.type === filterType;
             if (filterType === 'connected') return c.status === 'connected';
             if (filterType === 'disconnected') return c.enabled && c.status !== 'connected' && c.status !== 'disabled';
             if (filterType === 'disabled') return !c.enabled || c.status === 'disabled';
@@ -1189,6 +1191,37 @@ function parseSocks5Line(line) {
     };
 }
 
+/* 解析单行 SLP 数据: 服务器|端口|token|传输方式(可选，默认quic) */
+function parseSLPLine(line) {
+    var parts = line.split('|');
+    if (parts.length < 3) return null;
+
+    var transport = (parts[3] || 'quic').trim();
+    if (transport !== 'quic' && transport !== 'kcp') {
+        transport = 'quic';
+    }
+
+    return {
+        server: parts[0].trim(),
+        port: parts[1].trim() || '443',
+        slp_token: parts[2].trim(),
+        slp_transport: transport
+    };
+}
+
+/* 批量导入协议切换时更新 placeholder */
+function onBatchTypeChange() {
+    var type = document.getElementById('batch-type').value;
+    var textarea = document.getElementById('batch-text');
+    if (type === 'l2tp') {
+        textarea.placeholder = 'L2TP 示例:\n59.36.216.195|用户名|密码|2026-01-30\n124.225.78.235|0|用户名|密码|2026-12-09';
+    } else if (type === 'socks5') {
+        textarea.placeholder = 'SOCKS5 示例:\n1.2.3.4|1080|用户名|密码';
+    } else if (type === 'slp') {
+        textarea.placeholder = 'SLP 示例:\n1.2.3.4|443|token值|quic\n1.2.3.4|443|token值';
+    }
+}
+
 /* 解析并预览 */
 function batchParse() {
     var type = document.getElementById('batch-type').value;
@@ -1214,6 +1247,8 @@ function batchParse() {
         var parsed = null;
         if (type === 'l2tp') {
             parsed = parseL2tpLine(line);
+        } else if (type === 'slp') {
+            parsed = parseSLPLine(line);
         } else {
             parsed = parseSocks5Line(line);
         }
@@ -1223,7 +1258,7 @@ function batchParse() {
             return;
         }
 
-        var dedupKey = parsed.server + ':' + parsed.port + ':' + parsed.username;
+        var dedupKey = parsed.server + ':' + parsed.port + ':' + (parsed.username || parsed.slp_token || '');
 
         if (existingKeys[dedupKey]) {
             items.push({ line: line, status: 'skip', reason: '已存在: ' + existingKeys[dedupKey], parsed: parsed });
@@ -1258,20 +1293,35 @@ function batchParse() {
     var skipCount = items.filter(function(i) { return i.status === 'skip'; }).length;
 
     var html = '<p>共 <strong>' + items.length + '</strong> 行，将导入 <strong style="color:#28a745;">' + okCount + '</strong> 条，跳过 <strong style="color:#856404;">' + skipCount + '</strong> 条</p>';
-    html += '<table class="pp-preview-table"><thead><tr><th>#</th><th>服务器</th><th>端口</th><th>用户名</th><th>到期</th><th>状态</th></tr></thead><tbody>';
+    if (type === 'slp') {
+        html += '<table class="pp-preview-table"><thead><tr><th>#</th><th>服务器</th><th>端口</th><th>Token</th><th>传输</th><th>状态</th></tr></thead><tbody>';
+    } else {
+        html += '<table class="pp-preview-table"><thead><tr><th>#</th><th>服务器</th><th>端口</th><th>用户名</th><th>到期</th><th>状态</th></tr></thead><tbody>';
+    }
 
     items.forEach(function(item, idx) {
         var rowClass = item.status === 'ok' ? 'pp-preview-row-ok' : 'pp-preview-row-skip';
         var statusHtml = item.status === 'ok' ? '<span style="color:#155724;">✓ 将导入</span>' : '<span style="color:#856404;">⚠ ' + item.reason + '</span>';
         var p = item.parsed;
-        html += '<tr class="' + rowClass + '">' +
-            '<td>' + (idx + 1) + '</td>' +
-            '<td>' + (p ? p.server : '-') + '</td>' +
-            '<td>' + (p ? p.port : '-') + '</td>' +
-            '<td>' + (p ? (p.username || '-') : '-') + '</td>' +
-            '<td>' + (p ? (p.expiry || '-') : '-') + '</td>' +
-            '<td>' + statusHtml + '</td>' +
-            '</tr>';
+        if (type === 'slp') {
+            html += '<tr class="' + rowClass + '">' +
+                '<td>' + (idx + 1) + '</td>' +
+                '<td>' + (p ? p.server : '-') + '</td>' +
+                '<td>' + (p ? p.port : '-') + '</td>' +
+                '<td>' + (p ? (p.slp_token || '-') : '-') + '</td>' +
+                '<td>' + (p ? (p.slp_transport || 'quic') : '-') + '</td>' +
+                '<td>' + statusHtml + '</td>' +
+                '</tr>';
+        } else {
+            html += '<tr class="' + rowClass + '">' +
+                '<td>' + (idx + 1) + '</td>' +
+                '<td>' + (p ? p.server : '-') + '</td>' +
+                '<td>' + (p ? p.port : '-') + '</td>' +
+                '<td>' + (p ? (p.username || '-') : '-') + '</td>' +
+                '<td>' + (p ? (p.expiry || '-') : '-') + '</td>' +
+                '<td>' + statusHtml + '</td>' +
+                '</tr>';
+        }
     });
 
     html += '</tbody></table>';
@@ -1288,18 +1338,27 @@ function batchConfirmImport() {
     if (toImport.length === 0) return;
 
     var payload = toImport.map(function(item) {
-        return {
+        var obj = {
             id: item.clientId,
             enabled: '1',
             name: item.name,
             type: item.type,
             server: item.parsed.server,
             port: item.parsed.port,
-            username: item.parsed.username || '',
-            password: item.parsed.password || '',
-            expiry: item.parsed.expiry || '',
             bind_ip: []
         };
+        if (item.type === 'slp') {
+            obj.slp_token = item.parsed.slp_token || '';
+            obj.slp_transport = item.parsed.slp_transport || 'quic';
+            obj.slp_obfs = '0';
+            obj.slp_obfs_key = '';
+            obj.slp_insecure = '1';
+        } else {
+            obj.username = item.parsed.username || '';
+            obj.password = item.parsed.password || '';
+            obj.expiry = item.parsed.expiry || '';
+        }
+        return obj;
     });
 
     var btn = document.getElementById('batch-confirm-btn');
@@ -1362,6 +1421,7 @@ function showExportModal(filterIds) {
 
             var l2tp = clients.filter(function(c) { return c.type === 'l2tp'; });
             var socks5 = clients.filter(function(c) { return c.type === 'socks5'; });
+            var slp = clients.filter(function(c) { return c.type === 'slp'; });
             var lines = [];
 
             if (l2tp.length > 0) {
@@ -1376,6 +1436,14 @@ function showExportModal(filterIds) {
                 lines.push('# SOCKS5 线路 (' + socks5.length + ' 条)');
                 socks5.forEach(function(c) {
                     lines.push(c.server + '|' + (c.port || '1080') + '|' + c.username + '|' + c.password);
+                });
+                lines.push('');
+            }
+
+            if (slp.length > 0) {
+                lines.push('# SLP 线路 (' + slp.length + ' 条)');
+                slp.forEach(function(c) {
+                    lines.push(c.server + '|' + (c.port || '443') + '|' + (c.slp_token || '') + '|' + (c.slp_transport || 'quic'));
                 });
             }
 

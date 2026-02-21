@@ -7,8 +7,9 @@ SLP_RUN_DIR="/var/run/proxypool/slp"
 SLP_BIN="/usr/bin/slp-client"
 LOG_FILE="/var/log/proxypool.log"
 
-# SOCKS5 端口基址
+# SOCKS5 端口范围: 10801-10999
 BASE_SOCKS5_PORT=10800
+PORT_RANGE=199
 
 log_info() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [slp] $*" >> "$LOG_FILE"
@@ -26,18 +27,19 @@ get_config() {
     uci -q get "proxypool.$section.$option" || echo "$default"
 }
 
-# 从客户端 ID 中提取编号
-get_client_num() {
-    local num=$(echo "$1" | sed 's/[^0-9]//g')
-    [ -z "$num" ] && num=0
-    echo "$num"
-}
-
-# 计算 SOCKS5 端口
+# 基于客户端 ID 的稳定哈希计算端口，避免不同 ID 提取相同数字导致冲突
 get_socks5_port() {
     local client="$1"
-    local num=$(get_client_num "$client")
-    echo $((BASE_SOCKS5_PORT + num))
+    # 优先使用已分配的端口（持久化）
+    local port_file="$SLP_RUN_DIR/$client/socks5.port"
+    if [ -f "$port_file" ]; then
+        cat "$port_file"
+        return
+    fi
+    # 用 cksum 对客户端 ID 做哈希，映射到端口范围内
+    local hash=$(echo -n "$client" | cksum | cut -d' ' -f1)
+    local offset=$(( (hash % PORT_RANGE) + 1 ))
+    echo $((BASE_SOCKS5_PORT + offset))
 }
 
 # 检查 slp-client 是否已安装
@@ -64,6 +66,15 @@ generate_config() {
         log_error "Missing server or token for $client"
         return 1
     fi
+
+    # 校验传输方式（仅支持 quic 和 kcp，websocket 暂不可用）
+    case "$transport" in
+        quic|kcp) ;;
+        *)
+            log_error "Invalid transport '$transport' for $client, fallback to quic"
+            transport="quic"
+            ;;
+    esac
     
     local socks5_port=$(get_socks5_port "$client")
     local config_dir="$SLP_RUN_DIR/$client"

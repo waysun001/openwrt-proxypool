@@ -59,22 +59,56 @@ check_socks5() {
 check_l2tp() {
     local client="$1"
     local ppp_iface="ppp-${client}"
-    
+
     # 检查接口是否存在且有 IP
     if ! ip link show "$ppp_iface" >/dev/null 2>&1; then
         return 1
     fi
-    
+
     local ip=$(ip -4 addr show "$ppp_iface" 2>/dev/null | grep -o 'inet [0-9.]*' | cut -d' ' -f2)
     if [ -z "$ip" ]; then
         return 1
     fi
-    
+
     # 尝试 ping 网关或外网（可选，更严格）
     # ping -c 1 -W 2 8.8.8.8 -I "$ppp_iface" >/dev/null 2>&1
     # return $?
-    
+
     return 0
+}
+
+# 检测 SLP 客户端
+check_slp() {
+    local client="$1"
+    local config_dir="/var/run/proxypool/slp/${client}"
+    local port_file="$config_dir/socks5.port"
+
+    # 读取本地 SOCKS5 端口
+    if [ ! -f "$port_file" ]; then
+        return 1
+    fi
+
+    local socks5_port=$(cat "$port_file" 2>/dev/null)
+    if [ -z "$socks5_port" ]; then
+        return 1
+    fi
+
+    local curl_bin=$(command -v curl 2>/dev/null)
+
+    if [ -z "$curl_bin" ]; then
+        # 没有 curl，用 nc 简单测端口
+        if nc -z -w 3 127.0.0.1 "$socks5_port" >/dev/null 2>&1; then
+            return 0
+        else
+            return 1
+        fi
+    fi
+
+    # 用 curl 通过本地 SOCKS5 端口检测
+    "$curl_bin" --socks5 "127.0.0.1:${socks5_port}" \
+        --max-time 5 --silent --output /dev/null --head https://ip.sb
+
+    return $?
 }
 
 # 主逻辑
@@ -82,10 +116,10 @@ for client in $(get_clients); do
     local enabled=$(get_config "$client" "enabled" "0")
     local type=$(get_config "$client" "type" "")
     local name=$(get_config "$client" "name" "$client")
-    
+
     # 只检测已启用的
     [ "$enabled" != "1" ] && continue
-    
+
     # 获取当前状态
     local status="disconnected"
     case "$type" in
@@ -97,11 +131,15 @@ for client in $(get_clients); do
             local result=$(/usr/lib/proxypool/l2tp-manager.sh status "$client" 2>/dev/null | head -1)
             status="$result"
             ;;
+        slp)
+            local result=$(/usr/lib/proxypool/slp-manager.sh status "$client" 2>/dev/null | head -1)
+            status="$result"
+            ;;
     esac
-    
+
     # 只检测状态为 connected 的客户端
     [ "$status" != "connected" ] && continue
-    
+
     # 执行检测
     local check_result=1
     case "$type" in
@@ -113,8 +151,12 @@ for client in $(get_clients); do
             check_l2tp "$client"
             check_result=$?
             ;;
+        slp)
+            check_slp "$client"
+            check_result=$?
+            ;;
     esac
-    
+
     # 检测失败，计数 +1
     if [ $check_result -ne 0 ]; then
         local cur=$(cat "$TIMEOUT_DIR/${client}.today" 2>/dev/null || echo 0)
