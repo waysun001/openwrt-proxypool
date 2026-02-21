@@ -120,8 +120,12 @@ jobs:
         echo "CONFIG_PACKAGE_luci-app-proxypool=m" >> .config
         make defconfig
 
-        make package/proxypool/slp-client-bin/compile V=s -j$(nproc) || make package/proxypool/slp-client-bin/compile V=s -j1
+        # 逐个编译，失败立即中断
+        echo "=== 编译 slp-client-bin ==="
+        make package/proxypool/slp-client-bin/compile V=s -j1
+        echo "=== 编译 proxypool-core ==="
         make package/proxypool/proxypool-core/compile V=s -j$(nproc) || make package/proxypool/proxypool-core/compile V=s -j1
+        echo "=== 编译 luci-app-proxypool ==="
         make package/proxypool/luci-app-proxypool/compile V=s -j$(nproc) || make package/proxypool/luci-app-proxypool/compile V=s -j1
 
         mkdir -p ../packages
@@ -129,6 +133,14 @@ jobs:
 
         echo "=== Built packages ==="
         ls -la ../packages/
+
+        # 验证关键包存在
+        for pkg in slp-client-bin proxypool-core luci-app-proxypool; do
+          if ! ls ../packages/ | grep -q "$pkg"; then
+            echo "ERROR: $pkg.ipk not found!"
+            exit 1
+          fi
+        done
 
     - name: 下载 OpenWrt ImageBuilder
       run: |
