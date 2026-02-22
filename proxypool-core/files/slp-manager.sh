@@ -227,11 +227,13 @@ start() {
     local pid_file="$config_dir/slp.pid"
     local config_file="$config_dir/config.yaml"
     
-    # 防重复：如果进程已存活，跳过
+    # 防重复：如果进程已存活，只确保 redsocks 也在运行
     if [ -f "$pid_file" ]; then
         local old_pid=$(cat "$pid_file")
         if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
-            log_info "SLP client $name already running (PID: $old_pid), skipping"
+            log_info "SLP client $name already running (PID: $old_pid), ensuring redsocks"
+            local socks5_port=$(get_socks5_port "$client")
+            start_redsocks "$client" "$socks5_port"
             return 0
         fi
         rm -f "$pid_file"

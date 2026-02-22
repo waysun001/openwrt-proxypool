@@ -328,7 +328,10 @@ _rebuild_locked() {
     build_nft_ruleset "$nft_file"
 
     if ! nft -f "$nft_file" 2>> "$LOG_FILE"; then
-        log_error "Failed to apply nft rules, check $nft_file"
+        log_error "Failed to apply nft rules (file kept: $nft_file), falling back to block-all"
+        # nft -f 非原子：前几行可能已删除旧表，若新规则创建失败则无任何规则
+        # 回退到 init 的 block-all 规则，确保绝不出现无防火墙的空窗期
+        init
     else
         rm -f "$nft_file"
     fi

@@ -127,20 +127,34 @@ check_slp() {
     local config_dir="$RUN_DIR/slp/${client}"
     local pid_file="$config_dir/slp.pid"
 
-    # 检查 PID 文件是否存在
+    # 检查 slp-client PID 文件是否存在
     if [ ! -f "$pid_file" ]; then
         do_restart "$client" "SLP pid file missing"
         return
     fi
 
-    # 检查进程是否存活
+    # 检查 slp-client 进程是否存活
     local pid=$(cat "$pid_file" 2>/dev/null)
     if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
         do_restart "$client" "SLP process not running (pid=$pid)"
         return
     fi
 
-    # 进程存活，检测 SOCKS5 端口是否可达
+    # 检查 redsocks 进程（透明代理所需，挂了则手机无法上网）
+    local rs_pid_file="$RUN_DIR/redsocks/${client}.pid"
+    if [ -f "$rs_pid_file" ]; then
+        local rs_pid=$(cat "$rs_pid_file" 2>/dev/null)
+        if [ -n "$rs_pid" ] && ! kill -0 "$rs_pid" 2>/dev/null; then
+            do_restart "$client" "SLP redsocks not running (pid=$rs_pid)"
+            return
+        fi
+    else
+        # redsocks PID 文件不存在 → 从未启动或被清理
+        do_restart "$client" "SLP redsocks pid file missing"
+        return
+    fi
+
+    # 所有进程存活，检测 SOCKS5 端口是否可达
     local port_file="$config_dir/socks5.port"
     if [ -f "$port_file" ]; then
         local socks5_port=$(cat "$port_file" 2>/dev/null)
