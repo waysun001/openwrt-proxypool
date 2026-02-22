@@ -101,7 +101,7 @@ jobs:
     - name: 安装自定义软件包
       run: |
         cd openwrt
-        ./scripts/feeds install luci-app-proxypool proxypool-core slp-client-bin
+        ./scripts/feeds install luci-app-proxypool proxypool-core
 
     - name: 加载编译配置
       run: |
