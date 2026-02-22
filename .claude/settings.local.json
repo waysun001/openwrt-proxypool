@@ -7,7 +7,11 @@
       "WebFetch(domain:ip2region.net)",
       "WebFetch(domain:raw.githubusercontent.com)",
       "Bash(python:*)",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfix: 修复 slp-client-bin SDK 编译路径和错误处理\n\n- Makefile: $\\(CURDIR\\) 在 SDK 中指向根目录导致找不到二进制，\n  改用 $\\(dir $\\(abspath $\\(lastword $\\(MAKEFILE_LIST\\)\\)\\)\\) 定位包目录\n- build-fast.yml: slp-client-bin 编译失败不再被 || 吞掉，\n  增加编译后 .ipk 存在性验证\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git push:*)",
+      "Bash(git commit:*)"
     ]
   }
 }
