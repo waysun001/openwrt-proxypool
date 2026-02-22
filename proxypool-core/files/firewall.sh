@@ -98,6 +98,22 @@ is_client_online() {
                 fi
             fi
             ;;
+        slp)
+            # SLP: 需同时检查 slp-client 进程和 redsocks 进程
+            local slp_pid_file="/var/run/proxypool/slp/${client}/slp.pid"
+            if [ -f "$slp_pid_file" ]; then
+                local slp_pid=$(cat "$slp_pid_file")
+                if [ -n "$slp_pid" ] && kill -0 "$slp_pid" 2>/dev/null; then
+                    local rs_pid_file="$RUN_DIR/redsocks/${client}.pid"
+                    if [ -f "$rs_pid_file" ]; then
+                        local rs_pid=$(cat "$rs_pid_file")
+                        if [ -n "$rs_pid" ] && kill -0 "$rs_pid" 2>/dev/null; then
+                            return 0
+                        fi
+                    fi
+                fi
+            fi
+            ;;
     esac
     return 1
 }
@@ -149,7 +165,7 @@ build_nft_ruleset() {
 
         for ip in $bind_ips; do
             case "$type" in
-                socks5)
+                socks5|slp)
                     local tcp_port=$(get_client_port "$client")
                     if [ -n "$tcp_port" ]; then
                         allowed_ips="$allowed_ips $ip"

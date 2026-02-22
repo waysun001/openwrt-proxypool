@@ -4,12 +4,17 @@
 
 RUN_DIR="/var/run/proxypool"
 SLP_RUN_DIR="/var/run/proxypool/slp"
+REDSOCKS_DIR="/var/run/proxypool/redsocks"
 SLP_BIN="/usr/bin/slp-client"
 LOG_FILE="/var/log/proxypool.log"
 
-# SOCKS5 端口范围: 10801-10999
+# SLP 本地 SOCKS5 端口范围: 10801-10999
 BASE_SOCKS5_PORT=10800
 PORT_RANGE=199
+
+# redsocks 本地端口（透明代理 → SLP SOCKS5，避免与 socks5-manager 的 12300/12400 冲突）
+BASE_REDSOCKS_TCP_PORT=12500
+BASE_REDSOCKS_UDP_PORT=12600
 
 log_info() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [slp] $*" >> "$LOG_FILE"
@@ -36,8 +41,9 @@ get_socks5_port() {
         cat "$port_file"
         return
     fi
-    # 用 cksum 对客户端 ID 做哈希，映射到端口范围内
-    local hash=$(echo -n "$client" | cksum | cut -d' ' -f1)
+    # 用 md5sum 对客户端 ID 做哈希，取前 8 位十六进制转十进制
+    local hash=$(echo -n "$client" | md5sum | cut -c1-8)
+    hash=$((0x$hash))
     local offset=$(( (hash % PORT_RANGE) + 1 ))
     echo $((BASE_SOCKS5_PORT + offset))
 }
@@ -104,6 +110,110 @@ EOF
     return 0
 }
 
+# ============================================================
+# redsocks 透明代理管理（将 nftables 重定向的流量转为 SOCKS5）
+# ============================================================
+
+get_redsocks_port() {
+    local client="$1"
+    local type="$2"
+    local num=$(echo "$client" | sed 's/[^0-9]//g')
+    [ -z "$num" ] && num=0
+    if [ "$type" = "tcp" ]; then
+        echo $((BASE_REDSOCKS_TCP_PORT + num))
+    else
+        echo $((BASE_REDSOCKS_UDP_PORT + num))
+    fi
+}
+
+# 生成 redsocks 配置（指向 SLP 本地 SOCKS5 端口）
+generate_redsocks_config() {
+    local client="$1"
+    local socks5_port="$2"
+
+    mkdir -p "$REDSOCKS_DIR"
+
+    local config_file="$REDSOCKS_DIR/${client}.conf"
+    local local_tcp_port=$(get_redsocks_port "$client" "tcp")
+
+    cat > "$config_file" << EOF
+base {
+    log_debug = off;
+    log_info = on;
+    log = "file:$REDSOCKS_DIR/${client}.log";
+    daemon = on;
+    redirector = iptables;
+}
+
+redsocks {
+    local_ip = 0.0.0.0;
+    local_port = ${local_tcp_port};
+    ip = 127.0.0.1;
+    port = ${socks5_port};
+    type = socks5;
+}
+EOF
+
+    log_info "Generated redsocks config for SLP $client: tcp=$local_tcp_port -> 127.0.0.1:$socks5_port"
+}
+
+start_redsocks() {
+    local client="$1"
+    local socks5_port="$2"
+    local pid_file="$REDSOCKS_DIR/${client}.pid"
+
+    # 防重复
+    if [ -f "$pid_file" ]; then
+        local old_pid=$(cat "$pid_file")
+        if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+            log_info "Redsocks for SLP $client already running (PID: $old_pid)"
+            return 0
+        fi
+        rm -f "$pid_file"
+    fi
+
+    generate_redsocks_config "$client" "$socks5_port" || return 1
+
+    redsocks -c "$REDSOCKS_DIR/${client}.conf" -p "$pid_file"
+    sleep 1
+
+    if [ -f "$pid_file" ]; then
+        local pid=$(cat "$pid_file")
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            local tcp_port=$(get_redsocks_port "$client" "tcp")
+            echo "${tcp_port}:0" > "$REDSOCKS_DIR/${client}.ports"
+            log_info "Redsocks started for SLP $client (PID: $pid, TCP: $tcp_port)"
+            return 0
+        fi
+    fi
+
+    log_error "Failed to start redsocks for SLP $client"
+    return 1
+}
+
+stop_redsocks() {
+    local client="$1"
+    local pid_file="$REDSOCKS_DIR/${client}.pid"
+
+    if [ -f "$pid_file" ]; then
+        local pid=$(cat "$pid_file")
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+            sleep 1
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+        rm -f "$pid_file"
+    fi
+
+    rm -f "$REDSOCKS_DIR/${client}.conf"
+    rm -f "$REDSOCKS_DIR/${client}.log"
+    rm -f "$REDSOCKS_DIR/${client}.ports"
+}
+
+# ============================================================
+# SLP 客户端生命周期
+# ============================================================
+
 start() {
     local client="$1"
     local name=$(get_config "$client" "name" "$client")
@@ -140,16 +250,19 @@ start() {
     # 检查是否启动成功
     if kill -0 "$pid" 2>/dev/null; then
         log_info "SLP client started: $name (PID: $pid)"
-        
+
         # 记录客户端状态
         mkdir -p "$RUN_DIR/clients"
         local config_hash=$(uci show "proxypool.$client" | md5sum | cut -d' ' -f1)
         echo "$config_hash" > "$RUN_DIR/clients/$client"
-        
+
         # 记录端口
         local socks5_port=$(get_socks5_port "$client")
         echo "$socks5_port" > "$config_dir/socks5.port"
-        
+
+        # 启动 redsocks 透明代理（nftables redirect → redsocks → SLP SOCKS5）
+        start_redsocks "$client" "$socks5_port"
+
         return 0
     else
         log_error "Failed to start SLP client: $name"
@@ -161,12 +274,16 @@ start() {
 stop() {
     local client="$1"
     local name=$(get_config "$client" "name" "$client")
-    
+
     log_info "Stopping SLP client: $name"
-    
+
+    # 先停 redsocks 透明代理
+    stop_redsocks "$client"
+
+    # 再停 slp-client
     local config_dir="$SLP_RUN_DIR/$client"
     local pid_file="$config_dir/slp.pid"
-    
+
     if [ -f "$pid_file" ]; then
         local pid=$(cat "$pid_file")
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
@@ -176,11 +293,11 @@ stop() {
         fi
         rm -f "$pid_file"
     fi
-    
+
     # 清理运行文件
     rm -rf "$config_dir"
     rm -f "$RUN_DIR/clients/$client"
-    
+
     log_info "SLP client stopped: $name"
 }
 

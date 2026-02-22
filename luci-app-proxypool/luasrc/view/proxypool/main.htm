@@ -280,8 +280,8 @@
                     <div class="pp-form-group">
                         <label>传输模式</label>
                         <select id="form-slp-transport">
-                            <option value="quic">QUIC</option>
-                            <option value="kcp">KCP</option>
+                            <option value="quic">标准协议</option>
+                            <option value="kcp">弱网协议</option>
                         </select>
                     </div>
                 </div>
@@ -1309,7 +1309,7 @@ function batchParse() {
                 '<td>' + (p ? p.server : '-') + '</td>' +
                 '<td>' + (p ? p.port : '-') + '</td>' +
                 '<td>' + (p ? (p.slp_token || '-') : '-') + '</td>' +
-                '<td>' + (p ? (p.slp_transport || 'quic') : '-') + '</td>' +
+                '<td>' + (p ? ((p.slp_transport || 'quic') === 'kcp' ? '弱网协议' : '标准协议') : '-') + '</td>' +
                 '<td>' + statusHtml + '</td>' +
                 '</tr>';
         } else {
