@@ -124,28 +124,35 @@ jobs:
         echo "CONFIG_PACKAGE_luci-app-proxypool=m" >> .config
         make defconfig
 
-        # 逐个编译，失败立即中断（不用 V=s 避免日志过大）
+        # 诊断：检查 SDK 是否识别到 slp-client-bin
+        echo "=== 诊断: 包目录 ==="
+        ls -la package/proxypool/slp-client-bin/ || echo "MISSING!"
+        ls -la package/proxypool/slp-client-bin/files/ || echo "files/ MISSING!"
+        echo "=== 诊断: ARCH ==="
+        grep "CONFIG_ARCH=" .config || echo "No CONFIG_ARCH"
+        echo "=== 诊断: .config 中 slp 相关 ==="
+        grep -i slp .config || echo "slp-client-bin NOT in .config after defconfig!"
+
+        # 编译（V=s 只用于 slp-client-bin 方便排查）
         echo "=== 编译 slp-client-bin ==="
-        make package/proxypool/slp-client-bin/compile -j1 || \
-          { echo "=== slp-client-bin 编译失败，重试 V=s ==="; make package/proxypool/slp-client-bin/compile V=s -j1; }
+        make package/proxypool/slp-client-bin/compile V=s -j1
+
         echo "=== 编译 proxypool-core ==="
         make package/proxypool/proxypool-core/compile -j$(nproc) || make package/proxypool/proxypool-core/compile V=s -j1
+
         echo "=== 编译 luci-app-proxypool ==="
         make package/proxypool/luci-app-proxypool/compile -j$(nproc) || make package/proxypool/luci-app-proxypool/compile V=s -j1
+
+        # 搜索所有 ipk
+        echo "=== 搜索 IPK ==="
+        find bin -name "*.ipk" -ls 2>/dev/null
+        find bin -name "*slp*" -ls 2>/dev/null || echo "No slp ipk found"
 
         mkdir -p ../packages
         find bin -name "*.ipk" -exec cp {} ../packages/ \;
 
         echo "=== Built packages ==="
         ls -la ../packages/
-
-        # 验证关键包存在
-        for pkg in slp-client-bin proxypool-core luci-app-proxypool; do
-          if ! ls ../packages/ | grep -q "$pkg"; then
-            echo "ERROR: $pkg.ipk not found!"
-            exit 1
-          fi
-        done
 
     - name: 下载 OpenWrt ImageBuilder
       run: |

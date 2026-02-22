@@ -1,12 +1,13 @@
 name: Build OpenWrt
 
 on:
-  push:
-    branches: [ main ]
-    paths-ignore:
-      - '**.md'
-  pull_request:
-    branches: [ main ]
+  # push 触发已禁用，仅保留手动触发（避免与 build-fast 冲突）
+  # push:
+  #   branches: [ main ]
+  #   paths-ignore:
+  #     - '**.md'
+  # pull_request:
+  #   branches: [ main ]
   workflow_dispatch:
     inputs:
       openwrt_version:
