@@ -25,8 +25,21 @@ function api_handler()
     local action = http.formvalue("action") or ""
 
     if action == "status" then
-        local result = sys.exec("/usr/lib/proxypool/status.sh get 2>/dev/null")
+        -- stderr 输出到日志便于排查，不丢弃
+        local result = sys.exec("/usr/lib/proxypool/status.sh get 2>>/var/log/proxypool.log")
         http.prepare_content("application/json")
+        if not result or result == "" then
+            -- status.sh 无输出：返回兜底 JSON + 记录日志
+            sys.exec("echo '[status.sh] 返回空，可能脚本不存在或执行出错' >> /var/log/proxypool.log")
+            result = '{"timestamp":0,"datetime":"","global_enabled":1,"summary":{"total":0,"enabled":0,"connected":0,"disconnected":0},"clients":[],"devices":[],"error":"status.sh returned empty"}'
+        else
+            -- 验证 JSON 有效性：尝试解析，失败则返回兜底
+            local parsed = json.parse(result)
+            if not parsed then
+                sys.exec("echo '[status.sh] 输出非法 JSON' >> /var/log/proxypool.log")
+                result = '{"timestamp":0,"datetime":"","global_enabled":1,"summary":{"total":0,"enabled":0,"connected":0,"disconnected":0},"clients":[],"devices":[],"error":"status.sh returned invalid JSON"}'
+            end
+        end
         http.write(result)
 
     elseif action == "get_client" then
@@ -54,6 +67,9 @@ function api_handler()
             data.slp_insecure = uci:get("proxypool", client, "slp_insecure") or "1"
             http.prepare_content("application/json")
             http.write(json.stringify(data))
+        else
+            http.prepare_content("application/json")
+            http.write('{"error": "Invalid client ID"}')
         end
 
     elseif action == "save_client" then
@@ -105,7 +121,13 @@ function api_handler()
                 end
                 http.prepare_content("application/json")
                 http.write('{"success": true}')
+            else
+                http.prepare_content("application/json")
+                http.write('{"error": "Invalid JSON data"}')
             end
+        else
+            http.prepare_content("application/json")
+            http.write('{"error": "Missing client or data"}')
         end
 
     elseif action == "delete_client" then
@@ -117,6 +139,9 @@ function api_handler()
             uci:commit("proxypool")
             http.prepare_content("application/json")
             http.write('{"success": true, "async": true}')
+        else
+            http.prepare_content("application/json")
+            http.write('{"error": "Invalid client ID"}')
         end
 
     elseif action == "toggle_client" then
@@ -130,6 +155,9 @@ function api_handler()
             sys.exec("nohup /usr/lib/proxypool/proxypool.sh toggle_client " .. client .. " >/dev/null 2>&1 &")
             http.prepare_content("application/json")
             http.write('{"success": true, "async": true}')
+        else
+            http.prepare_content("application/json")
+            http.write('{"error": "Invalid client or enabled parameter"}')
         end
 
     elseif action == "start_client" then
@@ -139,6 +167,9 @@ function api_handler()
             sys.exec("nohup /usr/lib/proxypool/proxypool.sh start_client " .. client .. " >/dev/null 2>&1 &")
             http.prepare_content("application/json")
             http.write('{"success": true, "async": true}')
+        else
+            http.prepare_content("application/json")
+            http.write('{"error": "Invalid client ID"}')
         end
 
     elseif action == "stop_client" then
@@ -148,6 +179,9 @@ function api_handler()
             sys.exec("nohup /usr/lib/proxypool/proxypool.sh stop_client " .. client .. " >/dev/null 2>&1 &")
             http.prepare_content("application/json")
             http.write('{"success": true, "async": true}')
+        else
+            http.prepare_content("application/json")
+            http.write('{"error": "Invalid client ID"}')
         end
 
     elseif action == "save_remark" then
@@ -162,6 +196,9 @@ function api_handler()
             uci:commit("proxypool")
             http.prepare_content("application/json")
             http.write('{"success": true}')
+        else
+            http.prepare_content("application/json")
+            http.write('{"error": "Invalid client ID"}')
         end
 
     elseif action == "restart_client" then
@@ -170,6 +207,9 @@ function api_handler()
             sys.exec("/usr/lib/proxypool/proxypool.sh restart_client " .. client .. " 2>/dev/null")
             http.prepare_content("application/json")
             http.write('{"success": true}')
+        else
+            http.prepare_content("application/json")
+            http.write('{"error": "Invalid client ID"}')
         end
 
     elseif action == "get_dhcp_lease" then

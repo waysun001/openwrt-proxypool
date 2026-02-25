@@ -4,6 +4,11 @@
 RUN_DIR="/var/run/proxypool"
 LOG_FILE="/var/log/proxypool.log"
 
+# JSON 字符串转义：处理双引号、反斜杠、换行符、制表符等特殊字符
+json_escape() {
+    printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/	/\\t/g' | tr -d '\n\r'
+}
+
 get_config() {
     uci -q get "proxypool.$1.$2" || echo "$3"
 }
@@ -116,21 +121,32 @@ get_client_status() {
     local timeout_today=$(cat "$timeout_dir/${client}.today" 2>/dev/null || echo 0)
     local timeout_yesterday=$(cat "$timeout_dir/${client}.yesterday" 2>/dev/null || echo 0)
 
+    # 转义所有字符串字段，防止特殊字符破坏 JSON
+    local j_name=$(json_escape "$name")
+    local j_server=$(json_escape "$server")
+    local j_port=$(json_escape "$port")
+    local j_username=$(json_escape "$username")
+    local j_password=$(json_escape "$password")
+    local j_expiry=$(json_escape "$expiry")
+    local j_remark=$(json_escape "$remark")
+    local j_location=$(json_escape "$location")
+    local j_ip_addr=$(json_escape "$ip_addr")
+
     cat << EOF
 {
   "id": "$client",
-  "name": "$name",
+  "name": "$j_name",
   "type": "$type",
-  "server": "$server",
-  "port": "$port",
-  "username": "$username",
-  "password": "$password",
-  "expiry": "$expiry",
-  "remark": "$remark",
-  "location": "$location",
+  "server": "$j_server",
+  "port": "$j_port",
+  "username": "$j_username",
+  "password": "$j_password",
+  "expiry": "$j_expiry",
+  "remark": "$j_remark",
+  "location": "$j_location",
   "enabled": $enabled,
   "status": "$status",
-  "ip_addr": "$ip_addr",
+  "ip_addr": "$j_ip_addr",
   "bind_ips": $bind_ips_json,
   "rx_bytes": $rx,
   "tx_bytes": $tx,
@@ -171,7 +187,8 @@ get_bound_devices() {
                 devices="$devices,"
             fi
             first=0
-            devices="$devices{\"ip\":\"$ip\",\"mac\":\"$mac\",\"online\":$online,\"client\":\"$client\",\"client_name\":\"$client_name\"}"
+            local j_client_name=$(json_escape "$client_name")
+            devices="$devices{\"ip\":\"$ip\",\"mac\":\"$mac\",\"online\":$online,\"client\":\"$client\",\"client_name\":\"$j_client_name\"}"
         done
     done
 
@@ -240,7 +257,14 @@ EOF
 
 case "$1" in
     get)
-        get_full_status
+        # 捕获输出，确保即使脚本内部出错也返回有效 JSON
+        _output=$(get_full_status 2>>"$LOG_FILE")
+        if [ -z "$_output" ]; then
+            echo '{"timestamp":0,"datetime":"","global_enabled":1,"summary":{"total":0,"enabled":0,"connected":0,"disconnected":0},"clients":[],"devices":[],"error":"get_full_status returned empty"}'
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] status.sh: get_full_status 返回空" >> "$LOG_FILE"
+        else
+            echo "$_output"
+        fi
         # 本次查询完成后，后台并发探测所有客户端连通性
         # 结果写入缓存，供下次 status 查询使用（不阻塞当前响应）
         nohup /usr/lib/proxypool/proxypool.sh probe_all >/dev/null 2>&1 &

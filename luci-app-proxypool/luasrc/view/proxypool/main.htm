@@ -419,6 +419,25 @@
 
 <script>
 var apiUrl = '<%=luci.dispatcher.build_url("admin", "services", "proxypool", "api")%>';
+
+// 安全 JSON 解析：处理空响应、HTTP 错误、非法 JSON
+function safeJson(r) {
+    if (!r.ok) {
+        return Promise.reject(new Error('HTTP ' + r.status));
+    }
+    return r.text().then(function(text) {
+        if (!text || !text.trim()) {
+            return Promise.reject(new Error('Empty response'));
+        }
+        try {
+            return JSON.parse(text);
+        } catch (e) {
+            console.error('JSON parse failed, raw:', text.substring(0, 200));
+            return Promise.reject(e);
+        }
+    });
+}
+
 var clientData = [];
 var nextClientId = 1;
 var pendingActions = {};
@@ -674,7 +693,7 @@ function batchOp(action) {
     formData.append('clients', JSON.stringify(ids));
 
     fetch(apiUrl, { method: 'POST', body: formData })
-        .then(function(r) { return r.json(); })
+        .then(safeJson)
         .then(function(result) {
             ids.forEach(function(id) { clearPendingState(id); });
             if (result.success) {
@@ -855,7 +874,7 @@ function showAddModal() {
 
 function editClient(id) {
     fetch(apiUrl + '?action=get_client&client=' + id)
-        .then(function(r) { return r.json(); })
+        .then(safeJson)
         .then(function(data) {
             document.getElementById('modal-title').textContent = '编辑客户端';
             document.getElementById('form-id').value = data.id;
@@ -921,7 +940,7 @@ function saveClient(e) {
     }
 
     fetch(apiUrl + '?action=save_client&client=' + id + '&data=' + encodeURIComponent(JSON.stringify(data)))
-        .then(function(r) { return r.json(); })
+        .then(safeJson)
         .then(function(result) {
             if (result.success) {
                 closeModal();
@@ -951,7 +970,7 @@ function toggleClient(id, enabled) {
     renderClients();
 
     fetch(apiUrl + '?action=toggle_client&client=' + id + '&enabled=' + (enabled ? '1' : '0'))
-        .then(function(r) { return r.json(); })
+        .then(safeJson)
         .then(function() {
             clearPendingState(id);
             refreshStatusFull();
@@ -1041,7 +1060,7 @@ function editRemark(id) {
 
 function saveRemark(id, remark) {
     fetch(apiUrl + '?action=save_remark&client=' + id + '&remark=' + encodeURIComponent(remark))
-        .then(function(r) { return r.json(); })
+        .then(safeJson)
         .then(function(result) {
             if (result.success) {
                 // 更新本地数据
@@ -1061,7 +1080,7 @@ function saveRemark(id, remark) {
 
 function reloadConfig() {
     fetch(apiUrl + '?action=reload')
-        .then(function(r) { return r.json(); })
+        .then(safeJson)
         .then(function(result) {
             if (result.success) {
                 alert('配置已应用');
@@ -1146,7 +1165,7 @@ function updateTopMenuStats(summary) {
 
 function refreshStatusFull() {
     fetch(apiUrl + '?action=status')
-        .then(function(r) { return r.json(); })
+        .then(safeJson)
         .then(function(data) {
             if (data && data.summary) {
                 updateTopMenuStats(data.summary);
@@ -1481,7 +1500,7 @@ function batchConfirmImport() {
         method: 'POST',
         body: formData
     })
-    .then(function(r) { return r.json(); })
+    .then(safeJson)
     .then(function(result) {
         if (result.success) {
             alert('成功导入 ' + result.imported + ' 条线路');
@@ -1517,7 +1536,7 @@ function showExportModal(filterIds) {
     document.getElementById('export-modal').classList.add('active');
 
     fetch(apiUrl + '?action=export_all')
-        .then(function(r) { return r.json(); })
+        .then(safeJson)
         .then(function(clients) {
             // 如果有 filterIds，只导出选中的
             if (filterIds && filterIds.length > 0) {
@@ -1579,7 +1598,7 @@ function copyExportText() {
 // DHCP 租约配置
 function loadDhcpLease() {
     fetch(apiUrl + '?action=get_dhcp_lease')
-        .then(function(r) { return r.json(); })
+        .then(safeJson)
         .then(function(result) {
             if (result.leasetime) {
                 document.getElementById('dhcp-lease-select').value = result.leasetime;
@@ -1592,7 +1611,7 @@ function saveDhcpLease() {
     var leasetime = document.getElementById('dhcp-lease-select').value;
     var label = document.getElementById('dhcp-lease-select').selectedOptions[0].text;
     fetch(apiUrl + '?action=set_dhcp_lease&leasetime=' + encodeURIComponent(leasetime))
-        .then(function(r) { return r.json(); })
+        .then(safeJson)
         .then(function(result) {
             if (result.success) {
                 alert('DHCP 租约已更新为 ' + label + '，DHCP 服务已重启');

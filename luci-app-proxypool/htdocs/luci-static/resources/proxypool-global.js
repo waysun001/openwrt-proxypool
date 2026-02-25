@@ -99,9 +99,17 @@
         document.head.appendChild(style);
     }
 
+    function safeJson(r) {
+        if (!r.ok) return Promise.reject(new Error('HTTP ' + r.status));
+        return r.text().then(function(text) {
+            if (!text || !text.trim()) return Promise.reject(new Error('Empty response'));
+            try { return JSON.parse(text); } catch (e) { return Promise.reject(e); }
+        });
+    }
+
     function updateStats() {
         fetch('/cgi-bin/luci/admin/services/proxypool/api?action=status')
-            .then(function(r) { return r.json(); })
+            .then(safeJson)
             .then(function(data) {
                 if (data && data.summary) {
                     var el;
