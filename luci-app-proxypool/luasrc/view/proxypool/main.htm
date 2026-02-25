@@ -131,6 +131,15 @@
 .pp-batch-bar span { font-weight: 600; color: #1a56db; font-size: 13px; }
 .pp-table td.pp-checkbox-cell, .pp-table th.pp-checkbox-cell { width: 36px; text-align: center; }
 .pp-table td.pp-checkbox-cell input, .pp-table th.pp-checkbox-cell input { cursor: pointer; width: 16px; height: 16px; accent-color: #1a73e8; }
+
+/* 分页控件 */
+.pp-pagination { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; font-size: 13px; color: #5f6368; flex-wrap: wrap; gap: 8px; }
+.pp-pagination-btns { display: flex; gap: 4px; align-items: center; }
+.pp-pagination-btns button { padding: 5px 12px; border: 1px solid #dadce0; background: #fff; border-radius: 4px; cursor: pointer; font-size: 12px; transition: all 0.15s; }
+.pp-pagination-btns button:hover:not(:disabled) { background: #f1f3f4; border-color: #bdc1c6; }
+.pp-pagination-btns button:disabled { opacity: 0.4; cursor: not-allowed; }
+.pp-pagination-btns button.active { background: #1a73e8; color: #fff; border-color: #1a73e8; }
+.pp-pagination select { padding: 4px 8px; border: 1px solid #dadce0; border-radius: 4px; font-size: 12px; }
 </style>
 
 <div class="pp-page-title">
@@ -206,6 +215,25 @@
                 <tr><td colspan="12" style="text-align:center;padding:40px;color:#666;">加载中...</td></tr>
             </tbody>
         </table>
+        <div class="pp-pagination" id="pagination-bar" style="display:none;">
+            <span id="pagination-info"></span>
+            <div style="display:flex;align-items:center;gap:12px;">
+                <label style="font-size:12px;">每页:
+                    <select id="page-size-select" onchange="changePageSize(this.value)">
+                        <option value="50">50</option>
+                        <option value="100">100</option>
+                        <option value="200">200</option>
+                    </select>
+                </label>
+                <div class="pp-pagination-btns">
+                    <button onclick="goToPage(1)" id="pg-first">首页</button>
+                    <button onclick="goToPage(currentPage-1)" id="pg-prev">上页</button>
+                    <span id="pg-numbers"></span>
+                    <button onclick="goToPage(currentPage+1)" id="pg-next">下页</button>
+                    <button onclick="goToPage(totalPages)" id="pg-last">末页</button>
+                </div>
+            </div>
+        </div>
     </div>
 
     <div id="panel-log" class="pp-panel">
@@ -420,6 +448,11 @@ var filterType = 'all';
 var sortColumn = '';
 var sortAscending = true;
 
+// 分页状态
+var currentPage = 1;
+var pageSize = 50;
+var totalPages = 1;
+
 // #4 - 批量选择
 var selectedClients = {};
 
@@ -431,7 +464,7 @@ function switchTab(tab) {
     if (tab === 'log') refreshLog();
 }
 
-function refreshStatus() { refreshStatusFull(); }
+function refreshStatus() { stopRapidPoll(); refreshStatusFull(); }
 
 /* R2 - 协议类型徽章 */
 function getTypeBadge(type) {
@@ -488,6 +521,7 @@ function getFilteredAndSortedClients() {
 function applyFilterAndSort() {
     searchQuery = document.getElementById('search-input').value.trim();
     filterType = document.getElementById('filter-select').value;
+    currentPage = 1;
     renderClients();
 }
 
@@ -508,6 +542,51 @@ function updateSortIndicators() {
         var el = document.getElementById('sort-' + c);
         if (el) el.textContent = (sortColumn === c) ? (sortAscending ? '▲' : '▼') : '';
     });
+}
+
+/* 分页控制 */
+function goToPage(page) {
+    if (page < 1) page = 1;
+    if (page > totalPages) page = totalPages;
+    currentPage = page;
+    renderClients();
+}
+
+function changePageSize(size) {
+    pageSize = parseInt(size) || 50;
+    currentPage = 1;
+    renderClients();
+}
+
+function renderPagination(filteredTotal) {
+    var bar = document.getElementById('pagination-bar');
+    if (filteredTotal <= pageSize) {
+        bar.style.display = 'none';
+        return;
+    }
+    bar.style.display = 'flex';
+
+    totalPages = Math.ceil(filteredTotal / pageSize);
+    if (currentPage > totalPages) currentPage = totalPages;
+
+    var start = (currentPage - 1) * pageSize + 1;
+    var end = Math.min(currentPage * pageSize, filteredTotal);
+    document.getElementById('pagination-info').textContent = '显示 ' + start + '-' + end + ' / 共 ' + filteredTotal + ' 条';
+
+    document.getElementById('pg-first').disabled = (currentPage <= 1);
+    document.getElementById('pg-prev').disabled = (currentPage <= 1);
+    document.getElementById('pg-next').disabled = (currentPage >= totalPages);
+    document.getElementById('pg-last').disabled = (currentPage >= totalPages);
+
+    // 页码按钮（最多显示 5 个）
+    var nums = '';
+    var startPage = Math.max(1, currentPage - 2);
+    var endPage = Math.min(totalPages, startPage + 4);
+    if (endPage - startPage < 4) startPage = Math.max(1, endPage - 4);
+    for (var i = startPage; i <= endPage; i++) {
+        nums += '<button onclick="goToPage(' + i + ')"' + (i === currentPage ? ' class="active"' : '') + '>' + i + '</button>';
+    }
+    document.getElementById('pg-numbers').innerHTML = nums;
 }
 
 /* #5 - 到期预警 HTML */
@@ -620,11 +699,22 @@ function renderClients() {
 
     if (filtered.length === 0) {
         tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;padding:40px;color:#666;">暂无客户端</td></tr>';
+        renderPagination(0);
         return;
     }
 
+    // 分页切片：只渲染当前页
+    var filteredTotal = filtered.length;
+    totalPages = Math.ceil(filteredTotal / pageSize);
+    if (currentPage > totalPages) currentPage = totalPages;
+    var startIdx = (currentPage - 1) * pageSize;
+    var endIdx = Math.min(startIdx + pageSize, filteredTotal);
+    var pageItems = filtered.slice(startIdx, endIdx);
+
+    renderPagination(filteredTotal);
+
     var html = '';
-    filtered.forEach(function(c) {
+    pageItems.forEach(function(c) {
         var pendingInfo = pendingActions[c.id];
         var statusClass;
         var statusText;
@@ -1002,20 +1092,24 @@ function clearLog() {
     }
 }
 
-// 快速轮询 - 操作后短时间内高频刷新状态
+// 快速轮询 - 操作后短时间内高频刷新状态（自适应：大量客户端时降频）
 var rapidPollTimer = null;
 var rapidPollCount = 0;
 
 function startRapidPoll() {
     stopRapidPoll();
     rapidPollCount = 0;
+    // >50 客户端时 3s 间隔、5 次；否则 1.5s、10 次
+    var n = clientData.length;
+    var interval = (n > 50) ? 3000 : 1500;
+    var maxCount = (n > 50) ? 5 : 10;
     rapidPollTimer = setInterval(function() {
         rapidPollCount++;
         refreshStatusFull();
-        if (rapidPollCount >= 10) {
+        if (rapidPollCount >= maxCount) {
             stopRapidPoll();
         }
-    }, 1500);
+    }, interval);
 }
 
 function stopRapidPoll() {
@@ -1026,8 +1120,18 @@ function stopRapidPoll() {
     }
 }
 
+/* 自适应刷新间隔：根据客户端数量动态调整 */
+function getAdaptiveInterval() {
+    var n = clientData.length;
+    if (n <= 20) return 10000;
+    if (n <= 50) return 15000;
+    if (n <= 100) return 20000;
+    return 30000;
+}
+
 // 绑定 IP 在线状态（从 devices 数据中获取）
 var deviceData = [];
+var deviceMap = {};  // O(1) 查找: ip -> device
 
 /* 更新顶部菜单统计数据（ID 与 proxypool-global.js 一致） */
 function updateTopMenuStats(summary) {
@@ -1050,6 +1154,11 @@ function refreshStatusFull() {
 
             if (data && data.devices) {
                 deviceData = data.devices;
+                // 构建 deviceMap 用于 O(1) 查找
+                deviceMap = {};
+                data.devices.forEach(function(d) {
+                    deviceMap[d.ip] = d;
+                });
             }
 
             if (data && data.clients) {
@@ -1080,10 +1189,9 @@ function getBindIpHtml(bindIps) {
     var details = [];
 
     bindIps.forEach(function(ip) {
-        var online = false;
-        deviceData.forEach(function(d) {
-            if (d.ip === ip && d.online) online = true;
-        });
+        // O(1) Map 查找替代 O(n) 遍历
+        var d = deviceMap[ip];
+        var online = d && d.online;
         if (online) {
             onlineCount++;
             details.push('<span style="color:#28a745;" title="在线">' + ip + ' ●</span>');
@@ -1510,7 +1618,17 @@ function saveDhcpLease() {
 
 refreshStatusFull();
 loadDhcpLease();
-setInterval(refreshStatusFull, 10000);
+
+// 自适应刷新：根据客户端数量动态调整轮询间隔
+var _autoRefreshTimer = null;
+function scheduleNextRefresh() {
+    if (_autoRefreshTimer) clearTimeout(_autoRefreshTimer);
+    _autoRefreshTimer = setTimeout(function() {
+        refreshStatusFull();
+        scheduleNextRefresh();
+    }, getAdaptiveInterval());
+}
+scheduleNextRefresh();
 </script>
 
 <%+footer%>

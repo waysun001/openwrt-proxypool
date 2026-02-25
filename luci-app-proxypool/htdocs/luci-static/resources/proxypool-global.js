@@ -70,7 +70,13 @@
         }
 
         updateStats();
-        setInterval(updateStats, 10000);
+        // 去重：主页（/proxypool 无 tab= 参数）已有自己的 10s 轮询，跳过 global.js 的轮询
+        var path = window.location.pathname.replace(/\/+$/, '');
+        var search = window.location.search || '';
+        var isMainPage = (path.indexOf('/proxypool') >= 0) && (search.indexOf('tab=') < 0);
+        if (!isMainPage) {
+            setInterval(updateStats, 10000);
+        }
     }
 
     function injectCSS() {

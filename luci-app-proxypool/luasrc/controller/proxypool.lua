@@ -111,11 +111,12 @@ function api_handler()
     elseif action == "delete_client" then
         local client = sanitize_client(http.formvalue("client"))
         if client then
-            sys.exec("/usr/lib/proxypool/proxypool.sh stop_client " .. client .. " 2>/dev/null")
+            -- 异步停止进程，UCI 立即删除
+            sys.exec("nohup /usr/lib/proxypool/proxypool.sh stop_client " .. client .. " >/dev/null 2>&1 &")
             uci:delete("proxypool", client)
             uci:commit("proxypool")
             http.prepare_content("application/json")
-            http.write('{"success": true}')
+            http.write('{"success": true, "async": true}')
         end
 
     elseif action == "toggle_client" then
@@ -125,26 +126,28 @@ function api_handler()
             -- 保存 enabled 状态到 UCI
             uci:set("proxypool", client, "enabled", enabled == "1" and "1" or "0")
             uci:commit("proxypool")
-            -- 调用 proxypool.sh toggle_client 执行实际的 stop/start + firewall rebuild
-            sys.exec("/usr/lib/proxypool/proxypool.sh toggle_client " .. client .. " 2>/dev/null")
+            -- 异步调用 proxypool.sh toggle_client
+            sys.exec("nohup /usr/lib/proxypool/proxypool.sh toggle_client " .. client .. " >/dev/null 2>&1 &")
             http.prepare_content("application/json")
-            http.write('{"success": true}')
+            http.write('{"success": true, "async": true}')
         end
 
     elseif action == "start_client" then
         local client = sanitize_client(http.formvalue("client"))
         if client then
-            sys.exec("/usr/lib/proxypool/proxypool.sh start_client " .. client .. " 2>/dev/null")
+            -- 异步启动
+            sys.exec("nohup /usr/lib/proxypool/proxypool.sh start_client " .. client .. " >/dev/null 2>&1 &")
             http.prepare_content("application/json")
-            http.write('{"success": true}')
+            http.write('{"success": true, "async": true}')
         end
 
     elseif action == "stop_client" then
         local client = sanitize_client(http.formvalue("client"))
         if client then
-            sys.exec("/usr/lib/proxypool/proxypool.sh stop_client " .. client .. " 2>/dev/null")
+            -- 异步停止
+            sys.exec("nohup /usr/lib/proxypool/proxypool.sh stop_client " .. client .. " >/dev/null 2>&1 &")
             http.prepare_content("application/json")
-            http.write('{"success": true}')
+            http.write('{"success": true, "async": true}')
         end
 
     elseif action == "save_remark" then
@@ -247,62 +250,48 @@ function api_handler()
 
     elseif action == "batch_action" then
         -- 批量操作：enable/disable/delete/connect/disconnect
+        -- 使用 proxypool.sh batch_xxx 命令，单次 firewall rebuild，nohup 异步执行
         local batch_action = http.formvalue("batch_action") or ""
         local raw_clients = http.formvalue("clients")
         if raw_clients then
             local client_list = json.parse(raw_clients)
             if client_list and type(client_list) == "table" then
-                local processed = 0
-                if batch_action == "enable" or batch_action == "disable" then
-                    local val = (batch_action == "enable") and "1" or "0"
-                    for _, cid in ipairs(client_list) do
-                        local clean = sanitize_client(cid)
-                        if clean then
-                            uci:set("proxypool", clean, "enabled", val)
-                            processed = processed + 1
-                        end
-                    end
-                    uci:commit("proxypool")
-                    for _, cid in ipairs(client_list) do
-                        local clean = sanitize_client(cid)
-                        if clean then
-                            sys.exec("/usr/lib/proxypool/proxypool.sh toggle_client " .. clean .. " 2>/dev/null")
-                        end
-                    end
-                elseif batch_action == "delete" then
-                    for _, cid in ipairs(client_list) do
-                        local clean = sanitize_client(cid)
-                        if clean then
-                            sys.exec("/usr/lib/proxypool/proxypool.sh stop_client " .. clean .. " 2>/dev/null")
-                        end
-                    end
-                    for _, cid in ipairs(client_list) do
-                        local clean = sanitize_client(cid)
-                        if clean then
-                            uci:delete("proxypool", clean)
-                            processed = processed + 1
-                        end
-                    end
-                    uci:commit("proxypool")
-                elseif batch_action == "connect" then
-                    for _, cid in ipairs(client_list) do
-                        local clean = sanitize_client(cid)
-                        if clean then
-                            sys.exec("/usr/lib/proxypool/proxypool.sh start_client " .. clean .. " 2>/dev/null")
-                            processed = processed + 1
-                        end
-                    end
-                elseif batch_action == "disconnect" then
-                    for _, cid in ipairs(client_list) do
-                        local clean = sanitize_client(cid)
-                        if clean then
-                            sys.exec("/usr/lib/proxypool/proxypool.sh stop_client " .. clean .. " 2>/dev/null")
-                            processed = processed + 1
-                        end
+                -- 清洗 ID 列表
+                local clean_ids = {}
+                for _, cid in ipairs(client_list) do
+                    local clean = sanitize_client(cid)
+                    if clean then
+                        clean_ids[#clean_ids + 1] = clean
                     end
                 end
+                local id_str = table.concat(clean_ids, " ")
+                local processed = #clean_ids
+
+                if batch_action == "enable" or batch_action == "disable" then
+                    -- 先同步写 UCI enabled 状态
+                    local val = (batch_action == "enable") and "1" or "0"
+                    for _, clean in ipairs(clean_ids) do
+                        uci:set("proxypool", clean, "enabled", val)
+                    end
+                    uci:commit("proxypool")
+                    -- 异步执行 batch_enable/batch_disable（单次 firewall rebuild）
+                    local cmd = (batch_action == "enable") and "batch_enable" or "batch_disable"
+                    sys.exec("nohup /usr/lib/proxypool/proxypool.sh " .. cmd .. " " .. id_str .. " >/dev/null 2>&1 &")
+                elseif batch_action == "delete" then
+                    -- 先同步删除 UCI 条目
+                    for _, clean in ipairs(clean_ids) do
+                        uci:delete("proxypool", clean)
+                    end
+                    uci:commit("proxypool")
+                    -- 异步执行 batch_delete（停进程 + 单次 firewall rebuild）
+                    sys.exec("nohup /usr/lib/proxypool/proxypool.sh batch_delete " .. id_str .. " >/dev/null 2>&1 &")
+                elseif batch_action == "connect" then
+                    sys.exec("nohup /usr/lib/proxypool/proxypool.sh batch_connect " .. id_str .. " >/dev/null 2>&1 &")
+                elseif batch_action == "disconnect" then
+                    sys.exec("nohup /usr/lib/proxypool/proxypool.sh batch_disconnect " .. id_str .. " >/dev/null 2>&1 &")
+                end
                 http.prepare_content("application/json")
-                http.write('{"success": true, "processed": ' .. processed .. '}')
+                http.write('{"success": true, "async": true, "processed": ' .. processed .. '}')
             else
                 http.prepare_content("application/json")
                 http.write('{"error": "Invalid clients data"}')

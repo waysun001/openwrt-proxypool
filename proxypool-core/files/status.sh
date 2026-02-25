@@ -147,12 +147,15 @@ get_bound_devices() {
     local devices="["
     local first=1
 
+    # 单次 ip neigh show 缓存全表（替代每个 IP 单独查询，212 次 → 1 次）
+    local NEIGH_CACHE=$(ip neigh show 2>/dev/null)
+
     for client in $clients; do
         local bind_ips=$(uci -q get "proxypool.$client.bind_ip" 2>/dev/null || true)
         local client_name=$(get_config "$client" "name" "$client")
 
         for ip in $bind_ips; do
-            local neigh_entry=$(ip neigh show "$ip" 2>/dev/null | head -1)
+            local neigh_entry=$(echo "$NEIGH_CACHE" | grep "^$ip " | head -1)
             local mac=$(echo "$neigh_entry" | awk '{print $5}')
             local state=$(echo "$neigh_entry" | awk '{print $NF}')
             local online="false"
@@ -238,6 +241,9 @@ EOF
 case "$1" in
     get)
         get_full_status
+        # 本次查询完成后，后台并发探测所有客户端连通性
+        # 结果写入缓存，供下次 status 查询使用（不阻塞当前响应）
+        nohup /usr/lib/proxypool/proxypool.sh probe_all >/dev/null 2>&1 &
         ;;
     client)
         get_client_status "$2" "$(nft list chain inet proxypool count_out 2>/dev/null)" "$(nft list chain inet proxypool count_in 2>/dev/null)"

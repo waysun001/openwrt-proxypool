@@ -5,6 +5,7 @@
 RUN_DIR="/var/run/proxypool"
 SLP_RUN_DIR="/var/run/proxypool/slp"
 REDSOCKS_DIR="/var/run/proxypool/redsocks"
+PROBE_DIR="/var/run/proxypool/probe"
 SLP_BIN="/usr/bin/slp-client"
 LOG_FILE="/var/log/proxypool.log"
 
@@ -194,7 +195,14 @@ start_redsocks() {
     generate_redsocks_config "$client" "$socks5_port" || return 1
 
     redsocks -c "$REDSOCKS_DIR/${client}.conf" -p "$pid_file"
-    sleep 1
+
+    # PID 文件轮询（替代固定 sleep 1，最长 2s，通常 <200ms）
+    local _wait=0
+    while [ $_wait -lt 20 ]; do
+        [ -f "$pid_file" ] && break
+        sleep 0.1
+        _wait=$((_wait + 1))
+    done
 
     if [ -f "$pid_file" ]; then
         local pid=$(cat "$pid_file")
@@ -265,9 +273,22 @@ start() {
     $SLP_BIN -c "$config_file" > "$config_dir/slp.log" 2>&1 &
     local pid=$!
     echo "$pid" > "$pid_file"
-    
-    sleep 2
-    
+
+    # 端口轮询（替代固定 sleep 2，最长 2s，端口可达立即退出）
+    local socks5_port_check=$(get_socks5_port "$client")
+    local _wait=0
+    while [ $_wait -lt 10 ]; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            break
+        fi
+        # 检查本地 SOCKS5 端口是否已监听
+        if nc -z -w 1 127.0.0.1 "$socks5_port_check" >/dev/null 2>&1; then
+            break
+        fi
+        sleep 0.2
+        _wait=$((_wait + 1))
+    done
+
     # 检查是否启动成功
     if kill -0 "$pid" 2>/dev/null; then
         log_info "SLP client started: $name (PID: $pid)"
@@ -329,26 +350,52 @@ status() {
     local client="$1"
     local config_dir="$SLP_RUN_DIR/$client"
     local pid_file="$config_dir/slp.pid"
-    
+    local redsocks_pid_file="$REDSOCKS_DIR/${client}.pid"
+
     if [ -f "$pid_file" ]; then
         local pid=$(cat "$pid_file")
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-            # 进程存活，测试连接
-            local conn_result=$(test_connection "$client")
-            if [ "$conn_result" = "ok" ]; then
-                echo "connected"
-                if [ -f "$config_dir/socks5.port" ]; then
-                    cat "$config_dir/socks5.port"
+            # slp-client 进程存活，检查 redsocks 是否也在运行
+            local rs_ok="false"
+            if [ -f "$redsocks_pid_file" ]; then
+                local rs_pid=$(cat "$redsocks_pid_file")
+                if [ -n "$rs_pid" ] && kill -0 "$rs_pid" 2>/dev/null; then
+                    rs_ok="true"
                 fi
-                return 0
+            fi
+            if [ "$rs_ok" = "true" ]; then
+                # 双进程存活，读探测缓存判断实际连通性
+                local probe_file="$PROBE_DIR/${client}"
+                if [ -f "$probe_file" ]; then
+                    local probe_result=$(cat "$probe_file")
+                    if [ "$probe_result" = "ok" ]; then
+                        echo "connected"
+                    else
+                        echo "disconnected"
+                    fi
+                else
+                    echo "connected"
+                fi
             else
                 echo "connecting"
-                return 0
             fi
+            if [ -f "$config_dir/socks5.port" ]; then
+                cat "$config_dir/socks5.port"
+            fi
+            return 0
         fi
     fi
-    
+
+    rm -f "$PROBE_DIR/${client}" 2>/dev/null
     echo "disconnected"
+}
+
+# 探测本地 SOCKS5 端口连通性并写入缓存（供 probe_all 后台并发调用）
+probe() {
+    local client="$1"
+    mkdir -p "$PROBE_DIR"
+    local result=$(test_connection "$client")
+    echo "$result" > "$PROBE_DIR/${client}"
 }
 
 test_connection() {
@@ -381,11 +428,14 @@ case "$1" in
     test)
         test_connection "$2"
         ;;
+    probe)
+        probe "$2"
+        ;;
     port)
         get_local_port "$2"
         ;;
     *)
-        echo "Usage: $0 {start|stop|status|test|port} <client_id>"
+        echo "Usage: $0 {start|stop|status|test|probe|port} <client_id>"
         exit 1
         ;;
 esac

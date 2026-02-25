@@ -3,6 +3,7 @@
 
 RUN_DIR="/var/run/proxypool"
 REDSOCKS_DIR="/var/run/proxypool/redsocks"
+PROBE_DIR="/var/run/proxypool/probe"
 LOG_FILE="/var/log/proxypool.log"
 
 BASE_TCP_PORT=12300
@@ -120,7 +121,13 @@ start() {
 
     redsocks -c "$config_file" -p "$pid_file"
 
-    sleep 1
+    # PID 文件轮询（替代固定 sleep 1，最长 2s，通常 <200ms）
+    local _wait=0
+    while [ $_wait -lt 20 ]; do
+        [ -f "$pid_file" ] && break
+        sleep 0.1
+        _wait=$((_wait + 1))
+    done
 
     if [ -f "$pid_file" ]; then
         local pid=$(cat "$pid_file")
@@ -176,21 +183,37 @@ status() {
     if [ -f "$pid_file" ]; then
         local pid=$(cat "$pid_file")
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-            local conn_result=$(test_connection "$client")
-            if [ "$conn_result" = "ok" ]; then
-                echo "connected"
-                if [ -f "$REDSOCKS_DIR/${client}.ports" ]; then
-                    cat "$REDSOCKS_DIR/${client}.ports"
+            # PID 存活，读取探测缓存判断远程连通性
+            local probe_file="$PROBE_DIR/${client}"
+            if [ -f "$probe_file" ]; then
+                local probe_result=$(cat "$probe_file")
+                if [ "$probe_result" = "ok" ]; then
+                    echo "connected"
+                else
+                    echo "disconnected"
                 fi
-                return 0
             else
-                echo "disconnected"
-                return 1
+                # 无缓存（首次启动），PID 存活先显示 connected
+                echo "connected"
             fi
+            if [ -f "$REDSOCKS_DIR/${client}.ports" ]; then
+                cat "$REDSOCKS_DIR/${client}.ports"
+            fi
+            return 0
         fi
     fi
 
+    # PID 不存在或已死，清理过期探测缓存
+    rm -f "$PROBE_DIR/${client}" 2>/dev/null
     echo "disconnected"
+}
+
+# 探测远程连通性并写入缓存（供 probe_all 后台并发调用）
+probe() {
+    local client="$1"
+    mkdir -p "$PROBE_DIR"
+    local result=$(test_connection "$client")
+    echo "$result" > "$PROBE_DIR/${client}"
 }
 
 test_connection() {
@@ -229,11 +252,14 @@ case "$1" in
     test)
         test_connection "$2"
         ;;
+    probe)
+        probe "$2"
+        ;;
     port)
         get_local_port "$2" "$3"
         ;;
     *)
-        echo "Usage: $0 {start|stop|status|test|port} <client_id> [tcp|udp]"
+        echo "Usage: $0 {start|stop|status|test|probe|port} <client_id> [tcp|udp]"
         exit 1
         ;;
 esac

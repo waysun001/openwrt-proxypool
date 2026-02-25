@@ -182,6 +182,75 @@ toggle_client() {
     fi
 }
 
+# ============================================================
+# 批量操作：循环调用 _nofirewall 变体，最后单次 rebuild
+# 供 LuCI batch_action 异步调用
+# ============================================================
+
+batch_connect() {
+    log_info "Batch connect: $*"
+    for client in "$@"; do
+        _start_client_nofirewall "$client"
+    done
+    "$SCRIPT_DIR/firewall.sh" rebuild
+    "$SCRIPT_DIR/dns-manager.sh" configure
+    log_info "Batch connect done"
+}
+
+batch_disconnect() {
+    log_info "Batch disconnect: $*"
+    # 先标记所有客户端为 stopping（防止 IP 泄漏）
+    for client in "$@"; do
+        _mark_stopping "$client"
+    done
+    "$SCRIPT_DIR/firewall.sh" rebuild
+    # 再逐个停止进程并清标记
+    for client in "$@"; do
+        _stop_client_nofirewall "$client"
+        _clear_stopping "$client"
+    done
+    "$SCRIPT_DIR/dns-manager.sh" check
+    log_info "Batch disconnect done"
+}
+
+batch_enable() {
+    log_info "Batch enable: $*"
+    for client in "$@"; do
+        _start_client_nofirewall "$client"
+    done
+    "$SCRIPT_DIR/firewall.sh" rebuild
+    "$SCRIPT_DIR/dns-manager.sh" configure
+    log_info "Batch enable done"
+}
+
+batch_disable() {
+    log_info "Batch disable: $*"
+    for client in "$@"; do
+        _mark_stopping "$client"
+    done
+    "$SCRIPT_DIR/firewall.sh" rebuild
+    for client in "$@"; do
+        _stop_client_nofirewall "$client"
+        _clear_stopping "$client"
+    done
+    "$SCRIPT_DIR/dns-manager.sh" check
+    log_info "Batch disable done"
+}
+
+batch_delete() {
+    log_info "Batch delete: $*"
+    for client in "$@"; do
+        _mark_stopping "$client"
+    done
+    "$SCRIPT_DIR/firewall.sh" rebuild
+    for client in "$@"; do
+        _stop_client_nofirewall "$client"
+        _clear_stopping "$client"
+    done
+    "$SCRIPT_DIR/dns-manager.sh" check
+    log_info "Batch delete done"
+}
+
 # 启动所有客户端（批量启动后单次 rebuild）
 start_all_clients() {
     log_info "Starting all proxy clients..."
@@ -266,6 +335,56 @@ reload_config() {
     log_info "Configuration reloaded"
 }
 
+# 后台并发探测所有活跃客户端连通性
+# 分批并发（每批 PROBE_BATCH_SIZE 个），防止瞬间进程风暴
+# 互斥锁防止多次 status 轮询导致 probe_all 叠加运行
+PROBE_BATCH_SIZE=20
+PROBE_LOCK="$RUN_DIR/probe.lock"
+
+probe_all() {
+    # 互斥锁：如果已有 probe_all 在运行，直接退出
+    if [ -f "$PROBE_LOCK" ]; then
+        local lock_pid=$(cat "$PROBE_LOCK" 2>/dev/null)
+        if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
+            return 0
+        fi
+        # 进程已死，清理残留锁
+        rm -f "$PROBE_LOCK"
+    fi
+    echo "$$" > "$PROBE_LOCK"
+    # 确保退出时释放锁
+    trap 'rm -f "$PROBE_LOCK"' EXIT
+
+    local clients=$(get_clients)
+    local count=0
+    for client in $clients; do
+        if is_client_enabled "$client" && [ -f "$RUN_DIR/clients/$client" ]; then
+            local type=$(get_config "$client" "type" "")
+            case "$type" in
+                socks5)
+                    "$SCRIPT_DIR/socks5-manager.sh" probe "$client" &
+                    ;;
+                slp)
+                    "$SCRIPT_DIR/slp-manager.sh" probe "$client" &
+                    ;;
+                *)
+                    continue
+                    ;;
+            esac
+            count=$((count + 1))
+            # 达到批次上限，等待本批完成再继续
+            if [ $count -ge $PROBE_BATCH_SIZE ]; then
+                wait
+                count=0
+            fi
+        fi
+    done
+    wait
+
+    rm -f "$PROBE_LOCK"
+    trap - EXIT
+}
+
 # 获取状态
 status() {
     "$SCRIPT_DIR/status.sh" get
@@ -323,8 +442,26 @@ main() {
         status)
             status
             ;;
+        probe_all)
+            probe_all
+            ;;
+        batch_connect)
+            batch_connect "$@"
+            ;;
+        batch_disconnect)
+            batch_disconnect "$@"
+            ;;
+        batch_enable)
+            batch_enable "$@"
+            ;;
+        batch_disable)
+            batch_disable "$@"
+            ;;
+        batch_delete)
+            batch_delete "$@"
+            ;;
         *)
-            echo "Usage: $0 {start|stop|restart|reload|start_client|stop_client|restart_client|toggle_client|status} [client_id]"
+            echo "Usage: $0 {start|stop|restart|reload|start_client|stop_client|restart_client|toggle_client|batch_connect|batch_disconnect|batch_enable|batch_disable|batch_delete|status} [client_id...]"
             exit 1
             ;;
     esac
