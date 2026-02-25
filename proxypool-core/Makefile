@@ -63,6 +63,9 @@ define Package/proxypool-core/install
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/ip2region_searcher $(1)/usr/lib/proxypool/ip2region_searcher
 	$(INSTALL_DATA) ./files/ip2region.xdb $(1)/usr/lib/proxypool/ip2region.xdb
 
+	$(INSTALL_DIR) $(1)/usr/bin
+	$(INSTALL_BIN) ./files/slp-client $(1)/usr/bin/slp-client
+
 	$(INSTALL_DIR) $(1)/etc/ppp
 	$(INSTALL_BIN) ./files/ip-up $(1)/etc/ppp/ip-up
 	$(INSTALL_BIN) ./files/ip-down $(1)/etc/ppp/ip-down
