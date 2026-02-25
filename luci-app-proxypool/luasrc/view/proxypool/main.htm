@@ -145,7 +145,7 @@
                 <button class="pp-btn pp-btn-warning" onclick="showBatchImportModal()">批量导入</button>
                 <button class="pp-btn pp-btn-success" onclick="reloadConfig()">应用配置</button>
                 <button class="pp-btn pp-btn-secondary" onclick="refreshStatus()">刷新状态</button>
-                <button class="pp-btn pp-btn-secondary" onclick="showExportModal()">导出</button>
+                <button class="pp-btn pp-btn-secondary" onclick="showExportModal(getSelectedIds())">导出</button>
                 <label style="display:flex;align-items:center;gap:5px;font-size:13px;">
                     <span>内网租约:</span>
                     <select id="dhcp-lease-select" onchange="saveDhcpLease()" style="padding:4px 8px;border:1px solid #ddd;border-radius:4px;font-size:13px;">
