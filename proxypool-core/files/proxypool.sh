@@ -118,10 +118,12 @@ start_client() {
     local client="$1"
     _start_client_nofirewall "$client"
     "$SCRIPT_DIR/firewall.sh" rebuild
+    # SLP 客户端启动后尝试配置 DNS 代理
+    "$SCRIPT_DIR/dns-manager.sh" configure
 }
 
 # 停止单个客户端
-# 顺序：标记停止 → 重建防火墙（移除规则） → 杀进程 → 清标记
+# 顺序：标记停止 → 重建防火墙（移除规则） → 杀进程 → 清标记 → 检查 DNS
 # 防止"先杀进程后重建防火墙"导致的 IP 泄漏窗口期
 stop_client() {
     local client="$1"
@@ -129,6 +131,8 @@ stop_client() {
     "$SCRIPT_DIR/firewall.sh" rebuild
     _stop_client_nofirewall "$client"
     _clear_stopping "$client"
+    # 检查 DNS 代理是否需要切换端口或恢复
+    "$SCRIPT_DIR/dns-manager.sh" check
 }
 
 # 重启单个客户端
@@ -142,6 +146,7 @@ restart_client() {
     sleep 1
     _start_client_nofirewall "$client"
     "$SCRIPT_DIR/firewall.sh" rebuild
+    "$SCRIPT_DIR/dns-manager.sh" configure
 }
 
 save_restart_client() {
@@ -153,6 +158,7 @@ save_restart_client() {
     sleep 1
     _start_client_nofirewall "$client"
     "$SCRIPT_DIR/firewall.sh" rebuild
+    "$SCRIPT_DIR/dns-manager.sh" configure
 }
 
 # 切换客户端启用/禁用状态（LuCI toggle 开关专用）
@@ -165,12 +171,14 @@ toggle_client() {
         log_info "Toggle: enabling client $client"
         _start_client_nofirewall "$client"
         "$SCRIPT_DIR/firewall.sh" rebuild
+        "$SCRIPT_DIR/dns-manager.sh" configure
     else
         log_info "Toggle: disabling client $client"
         _mark_stopping "$client"
         "$SCRIPT_DIR/firewall.sh" rebuild
         _stop_client_nofirewall "$client"
         _clear_stopping "$client"
+        "$SCRIPT_DIR/dns-manager.sh" check
     fi
 }
 
@@ -272,19 +280,27 @@ main() {
 
     case "$action" in
         start)
+            # 启动前先恢复 ISP DNS（防止上次异常退出遗留 noresolv 配置导致 DNS 不可用）
+            "$SCRIPT_DIR/dns-manager.sh" restore
             "$SCRIPT_DIR/firewall.sh" init
             start_all_clients
+            # 所有客户端启动后，配置 DNS 走 SLP 隧道
+            "$SCRIPT_DIR/dns-manager.sh" configure
             ;;
         stop)
+            # 先恢复 ISP DNS（确保停止期间路由器自身 DNS 可用）
+            "$SCRIPT_DIR/dns-manager.sh" restore
             stop_all_clients
             "$SCRIPT_DIR/firewall.sh" cleanup
             ;;
         restart)
+            "$SCRIPT_DIR/dns-manager.sh" restore
             stop_all_clients
             "$SCRIPT_DIR/firewall.sh" cleanup
             sleep 2
             "$SCRIPT_DIR/firewall.sh" init
             start_all_clients
+            "$SCRIPT_DIR/dns-manager.sh" configure
             ;;
         reload)
             reload_config

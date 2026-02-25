@@ -14,7 +14,15 @@
       "Bash(git commit:*)",
       "Bash(ls -la \"C:\\\\Users\\\\Administrator\\\\IdeaProjects\\\\openwrt-proxypool\\\\slp-client-bin\\\\files\"\" 2>/dev/null || echo \"Directory not found \")",
       "Bash(dir:*)",
-      "Bash(go build:*)"
+      "Bash(go build:*)",
+      "Bash(where:*)",
+      "Bash(go version:*)",
+      "Bash(\"C:\\\\Program Files\\\\Git\\\\usr\\\\bin\\\\bash.exe\" -n \"C:\\\\Users\\\\Administrator\\\\IdeaProjects\\\\openwrt-proxypool\\\\proxypool-core\\\\files\\\\firewall.sh\")",
+      "Bash(\"C:\\\\Program Files\\\\Git\\\\usr\\\\bin\\\\bash.exe\" -n \"C:\\\\Users\\\\Administrator\\\\IdeaProjects\\\\openwrt-proxypool\\\\proxypool-core\\\\files\\\\proxypool.sh\")",
+      "Bash(\"C:\\\\Program Files\\\\Git\\\\usr\\\\bin\\\\bash.exe\" -n \"C:\\\\Users\\\\Administrator\\\\IdeaProjects\\\\openwrt-proxypool\\\\proxypool-core\\\\files\\\\status.sh\")",
+      "Bash(\"C:\\\\Program Files\\\\Git\\\\usr\\\\bin\\\\bash.exe\" -n \"C:\\\\Users\\\\Administrator\\\\IdeaProjects\\\\openwrt-proxypool\\\\proxypool-core\\\\files\\\\slp-manager.sh\")",
+      "Bash(ssh:*)",
+      "Bash(git status:*)"
     ]
   }
 }

@@ -195,39 +195,15 @@ status() {
 
 test_connection() {
     local client="$1"
-    local server=$(get_config "$client" "server" "" | tr -d ' 	
+    local server=$(get_config "$client" "server" "" | tr -d '
 
 ')
-    local port=$(get_config "$client" "port" "1080" | tr -d ' 	
-
-')
-    local curl_bin=$(command -v curl 2>/dev/null)
-
-    if [ -z "$curl_bin" ]; then
-        if nc -z -w 3 "$server" "$port" >/dev/null 2>&1; then
-            echo "ok"
-        else
-            echo "fail"
-        fi
-        return
-    fi
-
-    local user=$(get_config "$client" "username" "" | tr -d ' 	
-
-')
-    local pass=$(get_config "$client" "password" "" | tr -d ' 	
+    local port=$(get_config "$client" "port" "1080" | tr -d '
 
 ')
 
-    if [ -n "$user" ] || [ -n "$pass" ]; then
-        "$curl_bin" --socks5 "${server}:${port}" --proxy-user "${user}:${pass}" \
-            --max-time 5 --silent --output /dev/null --head https://ip.sb
-    else
-        "$curl_bin" --socks5 "${server}:${port}" \
-            --max-time 5 --silent --output /dev/null --head https://ip.sb
-    fi
-
-    if [ $? -eq 0 ]; then
+    # 仅检测远程 SOCKS5 端口是否可达（毫秒级，不走外网代理）
+    if nc -z -w 2 "$server" "$port" >/dev/null 2>&1; then
         echo "ok"
     else
         echo "fail"

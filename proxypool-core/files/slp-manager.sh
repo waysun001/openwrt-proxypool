@@ -332,23 +332,9 @@ status() {
 test_connection() {
     local client="$1"
     local socks5_port=$(get_socks5_port "$client")
-    local curl_bin=$(command -v curl 2>/dev/null)
-    
-    if [ -z "$curl_bin" ]; then
-        # 没有 curl，用 nc 测试端口
-        if nc -z -w 3 127.0.0.1 "$socks5_port" >/dev/null 2>&1; then
-            echo "ok"
-        else
-            echo "fail"
-        fi
-        return
-    fi
-    
-    # 用 curl 测试 SOCKS5 代理
-    "$curl_bin" --socks5 "127.0.0.1:${socks5_port}" \
-        --max-time 5 --silent --output /dev/null --head https://ip.sb
-    
-    if [ $? -eq 0 ]; then
+
+    # 仅检测本地 SOCKS5 端口是否在监听（毫秒级，不走外网）
+    if nc -z -w 2 127.0.0.1 "$socks5_port" >/dev/null 2>&1; then
         echo "ok"
     else
         echo "fail"
@@ -358,21 +344,6 @@ test_connection() {
 get_local_port() {
     local client="$1"
     get_socks5_port "$client"
-}
-
-# 获取出口 IP（通过 SOCKS5 代理查询）
-get_outbound_ip() {
-    local client="$1"
-    local socks5_port=$(get_socks5_port "$client")
-    local curl_bin=$(command -v curl 2>/dev/null)
-    
-    if [ -z "$curl_bin" ]; then
-        echo ""
-        return
-    fi
-    
-    "$curl_bin" --socks5 "127.0.0.1:${socks5_port}" \
-        --max-time 10 --silent https://ip.sb 2>/dev/null
 }
 
 case "$1" in
@@ -391,11 +362,8 @@ case "$1" in
     port)
         get_local_port "$2"
         ;;
-    ip)
-        get_outbound_ip "$2"
-        ;;
     *)
-        echo "Usage: $0 {start|stop|status|test|port|ip} <client_id>"
+        echo "Usage: $0 {start|stop|status|test|port} <client_id>"
         exit 1
         ;;
 esac

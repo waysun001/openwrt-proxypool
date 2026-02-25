@@ -82,10 +82,6 @@ get_client_status() {
             slp)
                 local result=$(/usr/lib/proxypool/slp-manager.sh status "$client" 2>/dev/null || echo "disconnected")
                 status=$(echo "$result" | head -1)
-                # SLP 可以获取出口 IP
-                if [ "$status" = "connected" ]; then
-                    ip_addr=$(/usr/lib/proxypool/slp-manager.sh ip "$client" 2>/dev/null || echo "")
-                fi
                 ;;
             *)
                 status="disconnected"
