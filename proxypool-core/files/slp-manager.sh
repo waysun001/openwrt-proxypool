@@ -12,6 +12,9 @@ LOG_FILE="/var/log/proxypool.log"
 BASE_SOCKS5_PORT=10800
 PORT_RANGE=199
 
+# SLP 内置 DNS 代理端口范围: 5301-5499（与 SOCKS5 端口哈希计算复用）
+BASE_DNS_PORT=5300
+
 # redsocks 本地端口（透明代理 → SLP SOCKS5，避免与 socks5-manager 的 12300/12400 冲突）
 BASE_REDSOCKS_TCP_PORT=12500
 BASE_REDSOCKS_UDP_PORT=12600
@@ -46,6 +49,20 @@ get_socks5_port() {
     hash=$((0x$hash))
     local offset=$(( (hash % PORT_RANGE) + 1 ))
     echo $((BASE_SOCKS5_PORT + offset))
+}
+
+# 基于客户端 ID 计算 DNS 代理端口（与 SOCKS5 端口哈希复用）
+get_dns_port() {
+    local client="$1"
+    local port_file="$SLP_RUN_DIR/$client/dns.port"
+    if [ -f "$port_file" ]; then
+        cat "$port_file"
+        return
+    fi
+    local hash=$(echo -n "$client" | md5sum | cut -c1-8)
+    hash=$((0x$hash))
+    local offset=$(( (hash % PORT_RANGE) + 1 ))
+    echo $((BASE_DNS_PORT + offset))
 }
 
 # 检查 slp-client 是否已安装
@@ -83,11 +100,12 @@ generate_config() {
     esac
     
     local socks5_port=$(get_socks5_port "$client")
+    local dns_port=$(get_dns_port "$client")
     local config_dir="$SLP_RUN_DIR/$client"
     mkdir -p "$config_dir"
-    
+
     local config_file="$config_dir/config.yaml"
-    
+
     # 生成 YAML 配置
     cat > "$config_file" << EOF
 log_level: info
@@ -100,6 +118,7 @@ tunnels:
     transport: "$transport"
     token: "$token"
     local_port: $socks5_port
+    dns_port: $dns_port
     insecure: $([ "$insecure" = "1" ] && echo "true" || echo "false")
     obfs: $([ "$obfs" = "1" ] && echo "true" || echo "false")
     obfs_key: "$obfs_key"
@@ -261,6 +280,9 @@ start() {
         # 记录端口
         local socks5_port=$(get_socks5_port "$client")
         echo "$socks5_port" > "$config_dir/socks5.port"
+
+        local dns_port=$(get_dns_port "$client")
+        echo "$dns_port" > "$config_dir/dns.port"
 
         # 启动 redsocks 透明代理（nftables redirect → redsocks → SLP SOCKS5）
         start_redsocks "$client" "$socks5_port"

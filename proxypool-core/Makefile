@@ -13,7 +13,7 @@ define Package/proxypool-core
   SECTION:=net
   CATEGORY:=Network
   TITLE:=智联盒子核心服务
-  DEPENDS:=+xl2tpd +ppp +ppp-mod-pppol2tp +redsocks +nftables +ip-full +conntrack +dnscrypt-proxy2
+  DEPENDS:=+xl2tpd +ppp +ppp-mod-pppol2tp +redsocks +nftables +ip-full +conntrack
 endef
 
 define Package/proxypool-core/description
