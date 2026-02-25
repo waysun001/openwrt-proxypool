@@ -2,6 +2,11 @@
 # 智联盒子 - 防火墙管理脚本
 # 使用 nftables 实现严格的网络隔离
 # 所有规则通过 nft -f 原子化加载，杜绝重建时的安全空窗期
+#
+# 架构说明：
+# - count_out/count_in 链：prerouting/postrouting 位置，捕获所有协议流量计数
+# - forward 链：L2TP 放行全协议，SOCKS5/SLP 无 accept 规则（仅 TCP 经 NAT redirect 走代理）
+# - proxypool_nat 表：SOCKS5/SLP TCP redirect 到 redsocks
 
 RUN_DIR="/var/run/proxypool"
 LOG_FILE="/var/log/proxypool.log"
@@ -76,6 +81,10 @@ setup_l2tp_routing() {
 
 is_client_online() {
     local client="$1"
+
+    # 正在停止的客户端视为离线（防止断开瞬间 IP 泄漏）
+    [ -f "$RUN_DIR/stopping/$client" ] && return 1
+
     local type=$(get_config "$client" "type" "")
 
     case "$type" in
@@ -121,14 +130,19 @@ is_client_online() {
 COUNTER_DIR="$RUN_DIR/counters"
 
 # 保存当前 nftables 计数器到持久化文件
-# 每个 IP 一个文件，格式：out_bytes in_bytes（累加值）
+# 从专用计数链 count_out / count_in 读取（捕获所有协议流量）
+# 每个 IP 一个文件，格式：累加字节数
 _save_counters() {
     mkdir -p "$COUNTER_DIR"
-    local nft_output=$(nft list chain inet proxypool forward 2>/dev/null) || return 0
-    [ -z "$nft_output" ] && return 0
 
-    # 解析每条带 comment 的规则，提取 IP 和 bytes
-    echo "$nft_output" | grep 'comment "out_' | while read -r line; do
+    # 从专用计数链读取（不再从 forward 链读取）
+    local nft_out
+    nft_out=$(nft list chain inet proxypool count_out 2>/dev/null) || true
+    local nft_in
+    nft_in=$(nft list chain inet proxypool count_in 2>/dev/null) || true
+    [ -z "$nft_out" ] && [ -z "$nft_in" ] && return 0
+
+    echo "$nft_out" | grep 'comment "out_' | while read -r line; do
         local ip=$(echo "$line" | grep -o 'comment "out_[^"]*"' | sed 's/comment "out_//;s/"//')
         local bytes=$(echo "$line" | grep -o 'bytes [0-9]*' | awk '{print $2}')
         [ -z "$ip" ] || [ -z "$bytes" ] && continue
@@ -136,7 +150,7 @@ _save_counters() {
         echo $((old + bytes)) > "$COUNTER_DIR/${ip}.out"
     done
 
-    echo "$nft_output" | grep 'comment "in_' | while read -r line; do
+    echo "$nft_in" | grep 'comment "in_' | while read -r line; do
         local ip=$(echo "$line" | grep -o 'comment "in_[^"]*"' | sed 's/comment "in_//;s/"//')
         local bytes=$(echo "$line" | grep -o 'bytes [0-9]*' | awk '{print $2}')
         [ -z "$ip" ] || [ -z "$bytes" ] && continue
@@ -146,12 +160,20 @@ _save_counters() {
 }
 
 # 构建 nftables 规则文件（原子化加载）
+#
+# 新架构：
+# - count_out (prerouting -200)：所有绑定 IP 出站流量计数（TCP/UDP/ICMP 全捕获）
+# - count_in (postrouting 200)：所有绑定 IP 入站流量计数（conntrack 已反转 NAT）
+# - forward：L2TP IP 放行全协议；SOCKS5/SLP IP 无 accept → UDP/ICMP 被末尾 drop 规则阻断
+# - proxypool_nat：SOCKS5/SLP TCP redirect 到 redsocks
 build_nft_ruleset() {
     local nft_file="$1"
     local clients=$(get_clients)
 
-    # 收集允许的 IP 和 NAT 规则
-    local allowed_ips=""
+    # 分类收集规则
+    local count_out_lines=""
+    local count_in_lines=""
+    local l2tp_allow_lines=""
     local socks5_rules=""
 
     for client in $clients; do
@@ -164,30 +186,36 @@ build_nft_ruleset() {
         [ -z "$bind_ips" ] && continue
 
         for ip in $bind_ips; do
+            # 所有在线绑定 IP 都生成计数规则（全协议）
+            count_out_lines="$count_out_lines
+        ip saddr $ip ip daddr != { 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12 } counter comment \"out_$ip\""
+            count_in_lines="$count_in_lines
+        ip daddr $ip ip saddr != { 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12 } counter comment \"in_$ip\""
+
             case "$type" in
                 socks5|slp)
                     local tcp_port=$(get_client_port "$client")
                     if [ -n "$tcp_port" ]; then
-                        allowed_ips="$allowed_ips $ip"
-                        # 排除内网目标，只重定向外网流量（保留对路由器和内网设备的直接访问）
+                        # NAT redirect：仅 TCP，排除 SSH
                         socks5_rules="$socks5_rules
         ip saddr $ip ip daddr != { 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12 } tcp dport != 22 redirect to :$tcp_port"
                     fi
+                    # SOCKS5/SLP 不在 forward 链中添加 accept 规则
+                    # → TCP 被 NAT redirect 到 redsocks，不经过 forward
+                    # → UDP/ICMP 等非 TCP 流量落到末尾 drop 规则 → 被阻断
+                    # → 浏览器 HTTP/3 (QUIC/UDP:443) 被 drop → 自动降级 TCP → 走代理
+                    # → DNS (UDP:53) 到路由器 LAN IP 是内网流量 → 被内网互访规则放行
+                    log_info "SOCKS5/SLP IP: $ip (TCP only, UDP/ICMP blocked)"
                     ;;
                 l2tp)
-                    allowed_ips="$allowed_ips $ip"
+                    # L2TP：策略路由处理全协议，forward 链放行
+                    l2tp_allow_lines="$l2tp_allow_lines
+        ip saddr $ip accept
+        ip daddr $ip accept"
+                    log_info "L2TP IP: $ip (all protocols via policy routing)"
                     ;;
             esac
         done
-    done
-
-    # 构建允许 IP 的 nft 规则行（带 counter 用于流量统计）
-    local allow_lines=""
-    for ip in $allowed_ips; do
-        allow_lines="$allow_lines
-        ip saddr $ip counter accept comment \"out_$ip\"
-        ip daddr $ip counter accept comment \"in_$ip\""
-        log_info "Allowing IP: $ip"
     done
 
     # 写入原子化 nft 规则文件
@@ -198,18 +226,37 @@ table ip proxypool_nat;
 delete table ip proxypool_nat;
 
 table inet proxypool {
+    # 流量计数（prerouting，优先级 -200，在 NAT 之前）
+    # 捕获所有协议（TCP/UDP/ICMP）的出站流量
+    chain count_out {
+        type filter hook prerouting priority -200; policy accept;
+${count_out_lines}
+    }
+
+    # 流量计数（postrouting，优先级 200，在 NAT 之后）
+    # conntrack 已反转 NAT，正确捕获所有回包
+    chain count_in {
+        type filter hook postrouting priority 200; policy accept;
+${count_in_lines}
+    }
+
+    # 访问控制
     chain forward {
         type filter hook forward priority -1; policy accept;
 
-        # 允许内网互访
+        # 允许内网互访（包括 DNS 到路由器 LAN IP）
         ip saddr 192.168.0.0/16 ip daddr 192.168.0.0/16 accept
         ip saddr 10.0.0.0/8 ip daddr 10.0.0.0/8 accept
         ip saddr 172.16.0.0/12 ip daddr 172.16.0.0/12 accept
 
-        # 允许绑定了在线客户端的 IP（不使用 ct state，确保断开后立即阻断）
-${allow_lines}
+        # L2TP 绑定 IP：放行全协议（策略路由走 PPP 接口）
+${l2tp_allow_lines}
 
-        # 阻止所有其他内网到外网的流量（包括已建立的连接）
+        # SOCKS5/SLP 绑定 IP：此处无 accept 规则
+        # TCP 已在 NAT prerouting 被 REDIRECT → 不经过 forward
+        # UDP/ICMP/其他协议 → 落到下面的 drop 规则 → 阻断泄漏
+
+        # 阻止所有未授权的 LAN→WAN 流量（包括已建立的连接）
         ip saddr 192.168.0.0/16 ip daddr != { 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12 } drop
         ip saddr 10.0.0.0/8 ip daddr != { 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12 } drop
     }
@@ -241,6 +288,12 @@ table ip proxypool_nat;
 delete table ip proxypool_nat;
 
 table inet proxypool {
+    chain count_out {
+        type filter hook prerouting priority -200; policy accept;
+    }
+    chain count_in {
+        type filter hook postrouting priority 200; policy accept;
+    }
     chain forward {
         type filter hook forward priority -1; policy accept;
         ip saddr 192.168.0.0/16 ip daddr 192.168.0.0/16 accept

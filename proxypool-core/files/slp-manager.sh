@@ -73,9 +73,9 @@ generate_config() {
         return 1
     fi
 
-    # 校验传输方式（仅支持 quic 和 kcp，websocket 暂不可用）
+    # 校验传输方式（仅支持 quic）
     case "$transport" in
-        quic|kcp) ;;
+        quic) ;;
         *)
             log_error "Invalid transport '$transport' for $client, fallback to quic"
             transport="quic"

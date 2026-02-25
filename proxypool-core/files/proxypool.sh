@@ -47,6 +47,20 @@ is_client_enabled() {
 }
 
 # ============================================================
+# Stopping 标记：防止断开瞬间 IP 泄漏
+# 标记客户端为"正在停止"，firewall rebuild 时视为离线
+# ============================================================
+
+_mark_stopping() {
+    mkdir -p "$RUN_DIR/stopping"
+    touch "$RUN_DIR/stopping/$1"
+}
+
+_clear_stopping() {
+    rm -f "$RUN_DIR/stopping/$1"
+}
+
+# ============================================================
 # 内部函数：启停客户端但不触发 firewall rebuild
 # 供批量操作使用，避免 N+1 次 rebuild
 # ============================================================
@@ -107,25 +121,36 @@ start_client() {
 }
 
 # 停止单个客户端
+# 顺序：标记停止 → 重建防火墙（移除规则） → 杀进程 → 清标记
+# 防止"先杀进程后重建防火墙"导致的 IP 泄漏窗口期
 stop_client() {
     local client="$1"
-    _stop_client_nofirewall "$client"
+    _mark_stopping "$client"
     "$SCRIPT_DIR/firewall.sh" rebuild
+    _stop_client_nofirewall "$client"
+    _clear_stopping "$client"
 }
 
 # 重启单个客户端
+# 顺序：标记停止 → 重建防火墙（阻断流量） → 杀进程 → 清标记 → 重启 → 重建防火墙（放行）
 restart_client() {
     local client="$1"
+    _mark_stopping "$client"
+    "$SCRIPT_DIR/firewall.sh" rebuild
     _stop_client_nofirewall "$client"
-    "$SCRIPT_DIR/firewall.sh" rebuild  # 先 rebuild，可能触发内核清理
-    sleep 2
+    _clear_stopping "$client"
+    sleep 1
     _start_client_nofirewall "$client"
     "$SCRIPT_DIR/firewall.sh" rebuild
 }
 
 save_restart_client() {
     local client="$1"
+    _mark_stopping "$client"
+    "$SCRIPT_DIR/firewall.sh" rebuild
     _stop_client_nofirewall "$client"
+    _clear_stopping "$client"
+    sleep 1
     _start_client_nofirewall "$client"
     "$SCRIPT_DIR/firewall.sh" rebuild
 }
@@ -139,12 +164,14 @@ toggle_client() {
     if [ "$enabled" = "1" ]; then
         log_info "Toggle: enabling client $client"
         _start_client_nofirewall "$client"
+        "$SCRIPT_DIR/firewall.sh" rebuild
     else
         log_info "Toggle: disabling client $client"
+        _mark_stopping "$client"
+        "$SCRIPT_DIR/firewall.sh" rebuild
         _stop_client_nofirewall "$client"
+        _clear_stopping "$client"
     fi
-
-    "$SCRIPT_DIR/firewall.sh" rebuild
 }
 
 # 启动所有客户端（批量启动后单次 rebuild）

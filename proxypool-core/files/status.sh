@@ -27,7 +27,8 @@ format_bytes() {
 
 get_client_status() {
     local client="$1"
-    local nft_fwd_cache="$2"
+    local nft_out_cache="$2"
+    local nft_in_cache="$3"
     local type=$(get_config "$client" "type" "")
     local name=$(get_config "$client" "name" "$client")
     local server=$(get_config "$client" "server" "")
@@ -95,17 +96,16 @@ get_client_status() {
     fi
 
     # 读取流量统计：持久化累加值 + 当前 nftables counter（适用于所有客户端类型）
+    # 从专用计数链 count_out / count_in 读取（捕获 TCP/UDP/ICMP 全协议）
     local counter_dir="$RUN_DIR/counters"
-    # 使用调用方传入的 nft 缓存，避免每个客户端重复查询
-    local nft_fwd="$nft_fwd_cache"
     local bind_ip_list=$(echo "$bind_ips" | tr ',' ' ')
     for bip in $bind_ip_list; do
         # 持久化累加值（rebuild 前保存的历史流量）
         local saved_out=$(cat "$counter_dir/${bip}.out" 2>/dev/null || echo 0)
         local saved_in=$(cat "$counter_dir/${bip}.in" 2>/dev/null || echo 0)
-        # 当前 nftables counter（本次 rebuild 后的增量）
-        local cur_out=$(echo "$nft_fwd" | grep "comment \"out_$bip\"" | grep -o 'bytes [0-9]*' | awk '{print $2}')
-        local cur_in=$(echo "$nft_fwd" | grep "comment \"in_$bip\"" | grep -o 'bytes [0-9]*' | awk '{print $2}')
+        # 当前 nftables counter（本次 rebuild 后的增量，从专用计数链读取）
+        local cur_out=$(echo "$nft_out_cache" | grep "comment \"out_$bip\"" | grep -o 'bytes [0-9]*' | awk '{print $2}')
+        local cur_in=$(echo "$nft_in_cache" | grep "comment \"in_$bip\"" | grep -o 'bytes [0-9]*' | awk '{print $2}')
         tx=$((tx + saved_out + ${cur_out:-0}))
         rx=$((rx + saved_in + ${cur_in:-0}))
     done
@@ -192,10 +192,12 @@ get_full_status() {
     local first=1
 
     # 循环前查询一次 nft，缓存结果避免 N 次系统调用
-    local NFT_FWD_CACHE=$(nft list chain inet proxypool forward 2>/dev/null)
+    # 从专用计数链读取（count_out/count_in 捕获全协议流量）
+    local NFT_OUT_CACHE=$(nft list chain inet proxypool count_out 2>/dev/null)
+    local NFT_IN_CACHE=$(nft list chain inet proxypool count_in 2>/dev/null)
 
     for client in $clients; do
-        local status_json=$(get_client_status "$client" "$NFT_FWD_CACHE")
+        local status_json=$(get_client_status "$client" "$NFT_OUT_CACHE" "$NFT_IN_CACHE")
 
         if [ $first -eq 0 ]; then
             clients_json="$clients_json,"
@@ -242,7 +244,7 @@ case "$1" in
         get_full_status
         ;;
     client)
-        get_client_status "$2" "$(nft list chain inet proxypool forward 2>/dev/null)"
+        get_client_status "$2" "$(nft list chain inet proxypool count_out 2>/dev/null)" "$(nft list chain inet proxypool count_in 2>/dev/null)"
         ;;
     devices)
         get_bound_devices
