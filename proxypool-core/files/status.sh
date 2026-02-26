@@ -10,7 +10,13 @@ json_escape() {
 }
 
 get_config() {
-    uci -q get "proxypool.$1.$2" || echo "$3"
+    local val
+    val=$(uci -q get "proxypool.$1.$2")
+    if [ -z "$val" ]; then
+        echo "$3"
+    else
+        echo "$val"
+    fi
 }
 
 get_clients() {
@@ -18,7 +24,7 @@ get_clients() {
 }
 
 format_bytes() {
-    local bytes="$1"
+    local bytes="${1:-0}"
     if [ "$bytes" -ge 1073741824 ] 2>/dev/null; then
         awk "BEGIN {printf \"%.2f GB\", $bytes/1073741824}"
     elif [ "$bytes" -ge 1048576 ] 2>/dev/null; then
@@ -120,6 +126,13 @@ get_client_status() {
     local timeout_dir="$RUN_DIR/timeout"
     local timeout_today=$(cat "$timeout_dir/${client}.today" 2>/dev/null || echo 0)
     local timeout_yesterday=$(cat "$timeout_dir/${client}.yesterday" 2>/dev/null || echo 0)
+
+    # 确保数值变量非空（空值会导致 JSON 断裂）
+    enabled="${enabled:-0}"
+    rx="${rx:-0}"
+    tx="${tx:-0}"
+    timeout_today="${timeout_today:-0}"
+    timeout_yesterday="${timeout_yesterday:-0}"
 
     # 转义所有字符串字段，防止特殊字符破坏 JSON
     local j_name=$(json_escape "$name")
@@ -237,6 +250,8 @@ get_full_status() {
     clients_json="$clients_json]"
     local devices=$(get_bound_devices)
     local disconnected=$((enabled_count - connected))
+    [ "$disconnected" -lt 0 ] 2>/dev/null && disconnected=0
+    global_enabled="${global_enabled:-1}"
 
     cat << EOF
 {
@@ -267,7 +282,8 @@ case "$1" in
         fi
         # 本次查询完成后，后台并发探测所有客户端连通性
         # 结果写入缓存，供下次 status 查询使用（不阻塞当前响应）
-        nohup /usr/lib/proxypool/proxypool.sh probe_all >/dev/null 2>&1 &
+        # 用子 shell 隔离：防止后台进程继承 popen pipe fd 导致 read("*a") 阻塞
+        (nohup /usr/lib/proxypool/proxypool.sh probe_all >/dev/null 2>&1 &)
         ;;
     client)
         get_client_status "$2" "$(nft list chain inet proxypool count_out 2>/dev/null)" "$(nft list chain inet proxypool count_in 2>/dev/null)"

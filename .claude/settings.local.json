@@ -23,7 +23,10 @@
       "Bash(\"C:\\\\Program Files\\\\Git\\\\usr\\\\bin\\\\bash.exe\" -n \"C:\\\\Users\\\\Administrator\\\\IdeaProjects\\\\openwrt-proxypool\\\\proxypool-core\\\\files\\\\slp-manager.sh\")",
       "Bash(ssh:*)",
       "Bash(git status:*)",
-      "Bash(ls -la \"C:\\\\Users\\\\Administrator\\\\IdeaProjects\\\\openwrt-proxypool\"\" && echo \"---\" && ls -la \"C:UsersAdministratorIdeaProjectsopenwrt-proxypoolluci-app-proxypool \")"
+      "Bash(ls -la \"C:\\\\Users\\\\Administrator\\\\IdeaProjects\\\\openwrt-proxypool\"\" && echo \"---\" && ls -la \"C:UsersAdministratorIdeaProjectsopenwrt-proxypoolluci-app-proxypool \")",
+      "Bash(git diff:*)",
+      "Bash(findstr:*)",
+      "Bash(wc:*)"
     ]
   }
 }

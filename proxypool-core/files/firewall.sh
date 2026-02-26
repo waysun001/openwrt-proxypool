@@ -14,6 +14,41 @@ LOCK_DIR="/var/lock/proxypool-fw.lock"
 # 锁超时（秒）：超过此时间的残留锁视为 stale 并强制清除
 LOCK_TIMEOUT=15
 
+# 获取防火墙锁（mkdir 原子锁，POSIX 兼容）
+_acquire_lock() {
+    local waited=0
+
+    # 检测并清除 stale 锁（进程崩溃后残留）
+    if [ -d "$LOCK_DIR" ]; then
+        local lock_ts=$(cat "$LOCK_DIR/ts" 2>/dev/null || echo 0)
+        local now_ts=$(date +%s)
+        local lock_age=$((now_ts - lock_ts))
+        if [ "$lock_age" -gt "$LOCK_TIMEOUT" ]; then
+            log_info "Removing stale firewall lock (age: ${lock_age}s)"
+            rm -rf "$LOCK_DIR"
+        fi
+    fi
+
+    # 自旋等待获取锁
+    while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+        waited=$((waited + 1))
+        if [ $waited -ge $LOCK_TIMEOUT ]; then
+            log_error "Failed to acquire firewall lock after ${LOCK_TIMEOUT}s, forcing"
+            rm -rf "$LOCK_DIR"
+            mkdir "$LOCK_DIR" 2>/dev/null || true
+            break
+        fi
+        sleep 1
+    done
+
+    echo "$(date +%s)" > "$LOCK_DIR/ts" 2>/dev/null
+}
+
+# 释放防火墙锁
+_release_lock() {
+    rm -rf "$LOCK_DIR"
+}
+
 log_info() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [firewall] $*" >> "$LOG_FILE"
 }
@@ -259,6 +294,12 @@ ${l2tp_allow_lines}
         # 阻止所有未授权的 LAN→WAN 流量（包括已建立的连接）
         ip saddr 192.168.0.0/16 ip daddr != { 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12 } drop
         ip saddr 10.0.0.0/8 ip daddr != { 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12 } drop
+
+        # 阻止所有 IPv6 外出流量（防止 IPv6 绕过代理规则）
+        # 允许 IPv6 链路本地 (fe80::/10) 和组播 (ff00::/8) 互访
+        ip6 saddr fe80::/10 accept
+        ip6 daddr ff00::/8 accept
+        ip6 saddr != ::1 ip6 daddr != { ::1, fe80::/10, ff00::/8 } drop
     }
 }
 
@@ -301,6 +342,9 @@ table inet proxypool {
         ip saddr 172.16.0.0/12 ip daddr 172.16.0.0/12 accept
         ip saddr 192.168.0.0/16 ip daddr != { 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12 } drop
         ip saddr 10.0.0.0/8 ip daddr != { 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12 } drop
+        ip6 saddr fe80::/10 accept
+        ip6 daddr ff00::/8 accept
+        ip6 saddr != ::1 ip6 daddr != { ::1, fe80::/10, ff00::/8 } drop
     }
 }
 
@@ -318,7 +362,7 @@ NFTEOF
     nft -f "$nft_file"
     rm -f "$nft_file"
 
-    log_info "Firewall initialized - all LAN devices blocked by default"
+    log_info "Firewall initialized - all LAN devices blocked by default (IPv4+IPv6)"
 }
 
 # 清理防火墙
@@ -331,40 +375,10 @@ cleanup() {
 }
 
 # 重建所有规则（原子化，无安全空窗期）
-# 使用 mkdir 原子锁防止并发 rebuild 竞态（POSIX 兼容，busybox ash 可用）
 rebuild() {
-    local waited=0
-
-    # 检测并清除 stale 锁（进程崩溃后残留）
-    # 使用 lock 目录内的时间戳文件（兼容 busybox，不依赖 date -r / stat）
-    if [ -d "$LOCK_DIR" ]; then
-        local lock_ts=$(cat "$LOCK_DIR/ts" 2>/dev/null || echo 0)
-        local now_ts=$(date +%s)
-        local lock_age=$((now_ts - lock_ts))
-        if [ "$lock_age" -gt "$LOCK_TIMEOUT" ]; then
-            log_info "Removing stale firewall lock (age: ${lock_age}s)"
-            rm -rf "$LOCK_DIR"
-        fi
-    fi
-
-    # 自旋等待获取锁
-    while ! mkdir "$LOCK_DIR" 2>/dev/null; do
-        waited=$((waited + 1))
-        if [ $waited -ge $LOCK_TIMEOUT ]; then
-            log_error "Failed to acquire firewall lock after ${LOCK_TIMEOUT}s, forcing"
-            rm -rf "$LOCK_DIR"
-            mkdir "$LOCK_DIR" 2>/dev/null || true
-            break
-        fi
-        sleep 1
-    done
-
-    # 写入时间戳用于 stale 检测
-    echo "$(date +%s)" > "$LOCK_DIR/ts" 2>/dev/null
-
+    _acquire_lock
     _rebuild_locked
-
-    rm -rf "$LOCK_DIR"
+    _release_lock
 }
 
 _rebuild_locked() {
@@ -406,11 +420,187 @@ _rebuild_locked() {
     log_info "Firewall rules rebuilt"
 }
 
-# 更新单个客户端的规则
+# ============================================================
+# 增量操作：仅修改单个客户端的规则（替代全量 rebuild）
+# remove_client: ~4 次 nft 调用 + grep/awk（毫秒级）
+# add_client:    ~2 次 nft 调用（毫秒级）
+# 对比 rebuild:  ~500 次 fork（50 客户端时 5-10 秒）
+# ============================================================
+
+# 增量移除单个客户端的所有防火墙规则
+_remove_client_locked() {
+    local client="$1"
+    local bind_ips=$(uci -q get "proxypool.$client.bind_ip" 2>/dev/null || true)
+    [ -z "$bind_ips" ] && return 0
+
+    log_info "Incremental remove: $client (IPs: $bind_ips)"
+
+    # 读取各链规则（带 handle），4 次 nft 调用
+    local chain_cout=$(nft -a list chain inet proxypool count_out 2>/dev/null) || true
+    local chain_cin=$(nft -a list chain inet proxypool count_in 2>/dev/null) || true
+    local chain_fwd=$(nft -a list chain inet proxypool forward 2>/dev/null) || true
+    local chain_nat=$(nft -a list chain ip proxypool_nat prerouting 2>/dev/null) || true
+
+    mkdir -p "$COUNTER_DIR"
+    local nft_file=$(mktemp /tmp/proxypool-nft-rm.XXXXXX) || return 1
+    > "$nft_file"
+
+    for ip in $bind_ips; do
+        # 保存计数器（删除前持久化，防止流量归零）
+        local bytes_out=$(echo "$chain_cout" | grep "\"out_${ip}\"" | grep -o 'bytes [0-9]*' | awk '{print $2}')
+        if [ -n "$bytes_out" ] && [ "$bytes_out" -gt 0 ] 2>/dev/null; then
+            local old=$(cat "$COUNTER_DIR/${ip}.out" 2>/dev/null || echo 0)
+            echo $((old + bytes_out)) > "$COUNTER_DIR/${ip}.out"
+        fi
+        local bytes_in=$(echo "$chain_cin" | grep "\"in_${ip}\"" | grep -o 'bytes [0-9]*' | awk '{print $2}')
+        if [ -n "$bytes_in" ] && [ "$bytes_in" -gt 0 ] 2>/dev/null; then
+            local old=$(cat "$COUNTER_DIR/${ip}.in" 2>/dev/null || echo 0)
+            echo $((old + bytes_in)) > "$COUNTER_DIR/${ip}.in"
+        fi
+
+        # 删除 count_out 规则（按 comment 匹配，精确到 IP）
+        echo "$chain_cout" | grep "\"out_${ip}\"" | grep -o '# handle [0-9]*' | awk '{print $3}' | while read -r h; do
+            echo "delete rule inet proxypool count_out handle $h" >> "$nft_file"
+        done
+
+        # 删除 count_in 规则
+        echo "$chain_cin" | grep "\"in_${ip}\"" | grep -o '# handle [0-9]*' | awk '{print $3}' | while read -r h; do
+            echo "delete rule inet proxypool count_in handle $h" >> "$nft_file"
+        done
+
+        # 删除 forward 链 L2TP accept 规则（按 IP 精确匹配，IP 后跟空格防止前缀误匹配）
+        echo "$chain_fwd" | grep -E "ip (saddr|daddr) ${ip} accept" | grep -o '# handle [0-9]*' | awk '{print $3}' | while read -r h; do
+            echo "delete rule inet proxypool forward handle $h" >> "$nft_file"
+        done
+
+        # 删除 NAT prerouting redirect 规则
+        echo "$chain_nat" | grep "ip saddr ${ip} " | grep -o '# handle [0-9]*' | awk '{print $3}' | while read -r h; do
+            echo "delete rule ip proxypool_nat prerouting handle $h" >> "$nft_file"
+        done
+    done
+
+    # 批量执行删除
+    if [ -s "$nft_file" ]; then
+        if nft -f "$nft_file" 2>> "$LOG_FILE"; then
+            log_info "Removed $(wc -l < "$nft_file") rules for $client"
+        else
+            log_error "Incremental remove failed for $client, falling back to full rebuild"
+            rm -f "$nft_file"
+            _rebuild_locked
+            return
+        fi
+    else
+        log_info "No rules found for $client, nothing to remove"
+    fi
+    rm -f "$nft_file"
+
+    # 清理 L2TP 策略路由
+    local type=$(get_config "$client" "type" "")
+    if [ "$type" = "l2tp" ]; then
+        local num=$(get_client_num "$client")
+        local table_id=$((100 + num))
+        while ip rule del table "$table_id" 2>/dev/null; do :; done
+        ip route flush table "$table_id" 2>/dev/null || true
+    fi
+}
+
+# 增量添加单个客户端的防火墙规则
+_add_client_locked() {
+    local client="$1"
+    local enabled=$(get_config "$client" "enabled" "0")
+    [ "$enabled" != "1" ] && { log_info "Client $client not enabled, skip add"; return 0; }
+    is_client_online "$client" || { log_info "Client $client not online, skip add"; return 0; }
+
+    local type=$(get_config "$client" "type" "")
+    local bind_ips=$(uci -q get "proxypool.$client.bind_ip" 2>/dev/null || true)
+    [ -z "$bind_ips" ] && return 0
+
+    log_info "Incremental add: $client ($type, IPs: $bind_ips)"
+
+    # 检查 nft 表是否存在（服务未启动时表不存在）
+    if ! nft list table inet proxypool >/dev/null 2>&1; then
+        log_error "Table inet proxypool not found, falling back to full rebuild"
+        _rebuild_locked
+        return
+    fi
+
+    local nft_file=$(mktemp /tmp/proxypool-nft-add.XXXXXX) || return 1
+    > "$nft_file"
+
+    for ip in $bind_ips; do
+        # 流量计数规则（全协议）
+        echo "add rule inet proxypool count_out ip saddr $ip ip daddr != { 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12 } counter comment \"out_$ip\"" >> "$nft_file"
+        echo "add rule inet proxypool count_in ip daddr $ip ip saddr != { 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12 } counter comment \"in_$ip\"" >> "$nft_file"
+
+        case "$type" in
+            socks5|slp)
+                local tcp_port=$(get_client_port "$client")
+                if [ -n "$tcp_port" ]; then
+                    echo "add rule ip proxypool_nat prerouting ip saddr $ip ip daddr != { 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12 } tcp dport != 22 redirect to :$tcp_port" >> "$nft_file"
+                fi
+                ;;
+        esac
+    done
+
+    # L2TP: forward 链 accept 规则必须插入在 drop 规则之前
+    if [ "$type" = "l2tp" ]; then
+        local drop_handle=$(nft -a list chain inet proxypool forward 2>/dev/null | grep 'drop' | head -1 | grep -o '# handle [0-9]*' | awk '{print $3}')
+        for ip in $bind_ips; do
+            if [ -n "$drop_handle" ]; then
+                echo "insert rule inet proxypool forward position $drop_handle ip saddr $ip accept" >> "$nft_file"
+                echo "insert rule inet proxypool forward position $drop_handle ip daddr $ip accept" >> "$nft_file"
+            else
+                echo "add rule inet proxypool forward ip saddr $ip accept" >> "$nft_file"
+                echo "add rule inet proxypool forward ip daddr $ip accept" >> "$nft_file"
+            fi
+        done
+    fi
+
+    # 批量执行添加
+    if [ -s "$nft_file" ]; then
+        if nft -f "$nft_file" 2>> "$LOG_FILE"; then
+            log_info "Added $(wc -l < "$nft_file") rules for $client"
+        else
+            log_error "Incremental add failed for $client, falling back to full rebuild"
+            rm -f "$nft_file"
+            _rebuild_locked
+            return
+        fi
+    fi
+    rm -f "$nft_file"
+
+    # L2TP 策略路由
+    if [ "$type" = "l2tp" ]; then
+        setup_l2tp_routing "$client"
+    fi
+}
+
+# 增量移除（公开接口，带锁）
+remove_client() {
+    local client="$1"
+    log_info "Remove client rules: $client"
+    _acquire_lock
+    _remove_client_locked "$client"
+    _release_lock
+}
+
+# 增量添加（公开接口，带锁）
+add_client() {
+    local client="$1"
+    log_info "Add client rules: $client"
+    _acquire_lock
+    _add_client_locked "$client"
+    _release_lock
+}
+
+# 更新单个客户端的规则（移除旧规则 + 添加新规则）
 update_client() {
     local client="$1"
     log_info "Updating rules for client: $client"
-    rebuild
+    _acquire_lock
+    _remove_client_locked "$client"
+    _add_client_locked "$client"
+    _release_lock
 }
 
 # 显示当前规则
@@ -431,6 +621,12 @@ case "$1" in
     rebuild)
         rebuild
         ;;
+    remove_client)
+        remove_client "$2"
+        ;;
+    add_client)
+        add_client "$2"
+        ;;
     update_client)
         update_client "$2"
         ;;
@@ -438,7 +634,7 @@ case "$1" in
         show
         ;;
     *)
-        echo "Usage: $0 {init|cleanup|rebuild|update_client|show} [client_id]"
+        echo "Usage: $0 {init|cleanup|rebuild|remove_client|add_client|update_client|show} [client_id]"
         exit 1
         ;;
 esac

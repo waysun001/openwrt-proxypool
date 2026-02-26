@@ -77,9 +77,10 @@ sed -i '/<\/head>/i\
 #proxypool-global-menu .menu-stats .stat-disconnected { color: #dc3545; }\
 </style>\
 <script>\
+function ppSafeJson(r) { if(!r.ok) return Promise.reject(); return r.text().then(function(t){ if(!t||!t.trim()) return Promise.reject(); return JSON.parse(t); }); }\
 function updateProxyPoolStats() {\
-    fetch("/cgi-bin/luci/admin/services/proxypool?action=status")\
-        .then(r => r.json())\
+    fetch("/cgi-bin/luci/admin/services/proxypool/api?action=status")\
+        .then(ppSafeJson)\
         .then(data => {\
             if (data && data.summary) {\
                 document.getElementById("pp-stat-total").textContent = data.summary.total;\

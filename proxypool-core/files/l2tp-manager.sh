@@ -5,6 +5,7 @@
 
 RUN_DIR="/var/run/proxypool"
 L2TP_RUN_DIR="/var/run/proxypool/l2tp"
+PROBE_DIR="/var/run/proxypool/probe"
 PPP_DIR="/etc/ppp/peers"
 LOG_FILE="/var/log/proxypool.log"
 
@@ -227,6 +228,9 @@ start() {
     echo "c ${lac_name}" > "$control_file"
     log_info "Sent connect command: c ${lac_name}"
 
+    # 清除旧探测缓存（防止上次 probe=fail 导致新启动的客户端显示"未连接"）
+    rm -f "$PROBE_DIR/${client}" 2>/dev/null
+
     # 记录客户端状态
     mkdir -p "$RUN_DIR/clients"
     local config_hash=$(uci show "proxypool.$client" | md5sum | cut -d' ' -f1)
@@ -306,7 +310,19 @@ status() {
     if ip link show "$ppp_iface" >/dev/null 2>&1; then
         local ip=$(ip -4 addr show "$ppp_iface" 2>/dev/null | grep -o 'inet [0-9.]*' | cut -d' ' -f2)
         if [ -n "$ip" ]; then
-            echo "connected"
+            # PPP 接口存活且有 IP，读探测缓存判断实际连通性
+            local probe_file="$PROBE_DIR/${client}"
+            if [ -f "$probe_file" ]; then
+                local probe_result=$(cat "$probe_file")
+                if [ "$probe_result" = "ok" ]; then
+                    echo "connected"
+                else
+                    echo "disconnected"
+                fi
+            else
+                # 无缓存（首次启动），PPP 存活先显示 connected
+                echo "connected"
+            fi
             echo "$ip"
             return 0
         fi
@@ -321,7 +337,55 @@ status() {
         fi
     fi
 
+    # PID 不存在或已死，清理过期探测缓存
+    rm -f "$PROBE_DIR/${client}" 2>/dev/null
     echo "disconnected"
+}
+
+# 探测 L2TP 隧道实际连通性并写入缓存
+probe() {
+    local client="$1"
+    mkdir -p "$PROBE_DIR"
+    local result=$(test_connection "$client")
+    echo "$result" > "$PROBE_DIR/${client}"
+}
+
+# 通过 PPP 接口实际发 HTTP 请求（准确判断隧道是否可上网）
+test_connection() {
+    local client="$1"
+    local ppp_iface="ppp-${client}"
+
+    # PPP 接口不存在或无 IP，直接判定失败
+    if ! ip link show "$ppp_iface" >/dev/null 2>&1; then
+        echo "fail"
+        return
+    fi
+    local ppp_ip=$(ip -4 addr show "$ppp_iface" 2>/dev/null | grep -o 'inet [0-9.]*' | cut -d' ' -f2)
+    if [ -z "$ppp_ip" ]; then
+        echo "fail"
+        return
+    fi
+
+    # 通过 PPP 接口发 HTTP 请求验证实际连通性
+    if command -v curl >/dev/null 2>&1; then
+        local http_code
+        http_code=$(curl --interface "$ppp_iface" \
+            --connect-timeout 3 --max-time 8 \
+            -s -o /dev/null -w "%{http_code}" \
+            "http://www.baidu.com" 2>/dev/null)
+        if [ "$http_code" -ge 200 ] 2>/dev/null && [ "$http_code" -lt 400 ] 2>/dev/null; then
+            echo "ok"
+        else
+            echo "fail"
+        fi
+    else
+        # curl 不可用，回退到 ping（通过 PPP 接口）
+        if ping -I "$ppp_iface" -c 1 -W 3 8.8.8.8 >/dev/null 2>&1; then
+            echo "ok"
+        else
+            echo "fail"
+        fi
+    fi
 }
 
 case "$1" in
@@ -334,8 +398,14 @@ case "$1" in
     status)
         status "$2"
         ;;
+    test)
+        test_connection "$2"
+        ;;
+    probe)
+        probe "$2"
+        ;;
     *)
-        echo "Usage: $0 {start|stop|status} <client_id>"
+        echo "Usage: $0 {start|stop|status|test|probe} <client_id>"
         exit 1
         ;;
 esac

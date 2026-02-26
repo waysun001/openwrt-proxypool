@@ -134,6 +134,9 @@ start() {
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
             log_info "SOCKS5 client started: $name (PID: $pid)"
 
+            # 清除旧探测缓存（防止上次 probe=fail 导致新启动的客户端显示"未连接"）
+            rm -f "$PROBE_DIR/${client}" 2>/dev/null
+
             mkdir -p "$RUN_DIR/clients"
             local config_hash=$(uci show "proxypool.$client" | md5sum | cut -d' ' -f1)
             echo "$config_hash" > "$RUN_DIR/clients/$client"
@@ -162,8 +165,12 @@ stop() {
         local pid=$(cat "$pid_file")
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
             kill "$pid" 2>/dev/null || true
-            sleep 1
-            kill -9 "$pid" 2>/dev/null || true
+            # 快速轮询等待进程退出（最长 0.5s，通常 <50ms）
+            local _w=0
+            while [ $_w -lt 5 ] && kill -0 "$pid" 2>/dev/null; do
+                sleep 0.1; _w=$((_w + 1))
+            done
+            kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
         fi
         rm -f "$pid_file"
     fi
@@ -218,18 +225,34 @@ probe() {
 
 test_connection() {
     local client="$1"
-    local server=$(get_config "$client" "server" "" | tr -d '
+    local server=$(get_config "$client" "server" "" | tr -d ' \t\n\r')
+    local port=$(get_config "$client" "port" "1080" | tr -d ' \t\n\r')
+    local username=$(get_config "$client" "username" "" | tr -d ' \t\n\r')
+    local password=$(get_config "$client" "password" "" | tr -d ' \t\n\r')
 
-')
-    local port=$(get_config "$client" "port" "1080" | tr -d '
-
-')
-
-    # 仅检测远程 SOCKS5 端口是否可达（毫秒级，不走外网代理）
-    if nc -z -w 2 "$server" "$port" >/dev/null 2>&1; then
-        echo "ok"
+    # 通过代理实际发 HTTP 请求（准确判断线路是否可上网）
+    if command -v curl >/dev/null 2>&1; then
+        local auth_args=""
+        if [ -n "$username" ]; then
+            auth_args="--proxy-user ${username}:${password}"
+        fi
+        local http_code
+        http_code=$(curl --socks5-hostname "${server}:${port}" $auth_args \
+            --connect-timeout 3 --max-time 8 \
+            -s -o /dev/null -w "%{http_code}" \
+            "http://www.baidu.com" 2>/dev/null)
+        if [ "$http_code" -ge 200 ] 2>/dev/null && [ "$http_code" -lt 400 ] 2>/dev/null; then
+            echo "ok"
+        else
+            echo "fail"
+        fi
     else
-        echo "fail"
+        # curl 不可用，回退到端口检测（不可靠但无依赖）
+        if nc -z -w 2 "$server" "$port" >/dev/null 2>&1; then
+            echo "ok"
+        else
+            echo "fail"
+        fi
     fi
 }
 

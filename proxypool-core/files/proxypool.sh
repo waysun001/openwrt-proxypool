@@ -110,75 +110,113 @@ _stop_client_nofirewall() {
 }
 
 # ============================================================
-# 公开函数：启停客户端 + 单次 firewall rebuild
+# 公开函数：启停客户端 + 增量 firewall 操作
+# 单客户端操作使用 add_client/remove_client（毫秒级）
+# 批量操作仍使用 rebuild（原子化）
 # ============================================================
 
-# 启动单个客户端
+# 探测单个客户端连通性（curl 实际请求百度，准确判断是否可上网）
+_probe_client() {
+    local client="$1"
+    local type=$(get_config "$client" "type" "")
+    case "$type" in
+        socks5)
+            "$SCRIPT_DIR/socks5-manager.sh" probe "$client"
+            ;;
+        slp)
+            "$SCRIPT_DIR/slp-manager.sh" probe "$client"
+            ;;
+        l2tp)
+            "$SCRIPT_DIR/l2tp-manager.sh" probe "$client"
+            ;;
+    esac
+}
+
+# 启动单个客户端（增量添加规则，替代全量 rebuild）
 start_client() {
     local client="$1"
     _start_client_nofirewall "$client"
-    "$SCRIPT_DIR/firewall.sh" rebuild
-    # SLP 客户端启动后尝试配置 DNS 代理
-    "$SCRIPT_DIR/dns-manager.sh" configure
+    "$SCRIPT_DIR/firewall.sh" add_client "$client"
+    # DNS 代理仅 SLP 客户端需要
+    local type=$(get_config "$client" "type" "")
+    [ "$type" = "slp" ] && "$SCRIPT_DIR/dns-manager.sh" configure
+    # 操作完成，清除 pending 状态文件
+    rm -f "$RUN_DIR/pending/$client"
+    # 同步探测：API 返回时状态已准确
+    _probe_client "$client"
 }
 
-# 停止单个客户端
-# 顺序：标记停止 → 重建防火墙（移除规则） → 杀进程 → 清标记 → 检查 DNS
-# 防止"先杀进程后重建防火墙"导致的 IP 泄漏窗口期
+# 停止单个客户端（增量移除规则，替代全量 rebuild）
+# 顺序：标记停止 → 移除该客户端规则 → 杀进程 → 清标记
+# 防止"先杀进程后移除规则"导致的 IP 泄漏窗口期
 stop_client() {
     local client="$1"
+    local type=$(get_config "$client" "type" "")
     _mark_stopping "$client"
-    "$SCRIPT_DIR/firewall.sh" rebuild
+    "$SCRIPT_DIR/firewall.sh" remove_client "$client"
     _stop_client_nofirewall "$client"
     _clear_stopping "$client"
-    # 检查 DNS 代理是否需要切换端口或恢复
-    "$SCRIPT_DIR/dns-manager.sh" check
+    rm -f "$RUN_DIR/pending/$client"
+    # 清除探测缓存（PID 已死，状态码直接判 disconnected）
+    rm -f "$RUN_DIR/probe/$client"
+    [ "$type" = "slp" ] && "$SCRIPT_DIR/dns-manager.sh" check
 }
 
-# 重启单个客户端
-# 顺序：标记停止 → 重建防火墙（阻断流量） → 杀进程 → 清标记 → 重启 → 重建防火墙（放行）
+# 重启单个客户端（增量移除 + 添加，替代两次全量 rebuild）
 restart_client() {
     local client="$1"
+    local type=$(get_config "$client" "type" "")
     _mark_stopping "$client"
-    "$SCRIPT_DIR/firewall.sh" rebuild
+    "$SCRIPT_DIR/firewall.sh" remove_client "$client"
     _stop_client_nofirewall "$client"
     _clear_stopping "$client"
     sleep 1
     _start_client_nofirewall "$client"
-    "$SCRIPT_DIR/firewall.sh" rebuild
-    "$SCRIPT_DIR/dns-manager.sh" configure
+    "$SCRIPT_DIR/firewall.sh" add_client "$client"
+    rm -f "$RUN_DIR/pending/$client"
+    [ "$type" = "slp" ] && "$SCRIPT_DIR/dns-manager.sh" configure
+    _probe_client "$client"
 }
 
+# 保存配置后重启
 save_restart_client() {
     local client="$1"
+    local type=$(get_config "$client" "type" "")
     _mark_stopping "$client"
-    "$SCRIPT_DIR/firewall.sh" rebuild
+    "$SCRIPT_DIR/firewall.sh" remove_client "$client"
     _stop_client_nofirewall "$client"
     _clear_stopping "$client"
     sleep 1
     _start_client_nofirewall "$client"
-    "$SCRIPT_DIR/firewall.sh" rebuild
-    "$SCRIPT_DIR/dns-manager.sh" configure
+    "$SCRIPT_DIR/firewall.sh" add_client "$client"
+    rm -f "$RUN_DIR/pending/$client"
+    [ "$type" = "slp" ] && "$SCRIPT_DIR/dns-manager.sh" configure
+    _probe_client "$client"
 }
 
-# 切换客户端启用/禁用状态（LuCI toggle 开关专用）
-# 读取当前 enabled 状态，执行对应的 stop/start + 单次 rebuild
+# 切换客户端启用/禁用状态（LuCI toggle 开关专用，增量操作）
 toggle_client() {
     local client="$1"
     local enabled=$(get_config "$client" "enabled" "0")
+    local type=$(get_config "$client" "type" "")
 
     if [ "$enabled" = "1" ]; then
         log_info "Toggle: enabling client $client"
         _start_client_nofirewall "$client"
-        "$SCRIPT_DIR/firewall.sh" rebuild
-        "$SCRIPT_DIR/dns-manager.sh" configure
+        "$SCRIPT_DIR/firewall.sh" add_client "$client"
+        [ "$type" = "slp" ] && "$SCRIPT_DIR/dns-manager.sh" configure
+        rm -f "$RUN_DIR/pending/$client"
+        _probe_client "$client"
     else
         log_info "Toggle: disabling client $client"
         _mark_stopping "$client"
-        "$SCRIPT_DIR/firewall.sh" rebuild
+        "$SCRIPT_DIR/firewall.sh" remove_client "$client"
         _stop_client_nofirewall "$client"
         _clear_stopping "$client"
-        "$SCRIPT_DIR/dns-manager.sh" check
+        [ "$type" = "slp" ] && "$SCRIPT_DIR/dns-manager.sh" check
+        rm -f "$RUN_DIR/pending/$client"
+        # 停止后清除探测缓存（PID 已死，状态码直接判 disconnected）
+        rm -f "$RUN_DIR/probe/$client"
     fi
 }
 
@@ -194,20 +232,28 @@ batch_connect() {
     done
     "$SCRIPT_DIR/firewall.sh" rebuild
     "$SCRIPT_DIR/dns-manager.sh" configure
+    for client in "$@"; do
+        rm -f "$RUN_DIR/pending/$client"
+    done
+    # 并发探测所有客户端连通性（curl 通过代理请求百度）
+    for client in "$@"; do
+        _probe_client "$client" &
+    done
+    wait
     log_info "Batch connect done"
 }
 
 batch_disconnect() {
     log_info "Batch disconnect: $*"
-    # 先标记所有客户端为 stopping（防止 IP 泄漏）
     for client in "$@"; do
         _mark_stopping "$client"
     done
     "$SCRIPT_DIR/firewall.sh" rebuild
-    # 再逐个停止进程并清标记
     for client in "$@"; do
         _stop_client_nofirewall "$client"
         _clear_stopping "$client"
+        rm -f "$RUN_DIR/pending/$client"
+        rm -f "$RUN_DIR/probe/$client"
     done
     "$SCRIPT_DIR/dns-manager.sh" check
     log_info "Batch disconnect done"
@@ -220,6 +266,14 @@ batch_enable() {
     done
     "$SCRIPT_DIR/firewall.sh" rebuild
     "$SCRIPT_DIR/dns-manager.sh" configure
+    for client in "$@"; do
+        rm -f "$RUN_DIR/pending/$client"
+    done
+    # 并发探测
+    for client in "$@"; do
+        _probe_client "$client" &
+    done
+    wait
     log_info "Batch enable done"
 }
 
@@ -232,6 +286,8 @@ batch_disable() {
     for client in "$@"; do
         _stop_client_nofirewall "$client"
         _clear_stopping "$client"
+        rm -f "$RUN_DIR/pending/$client"
+        rm -f "$RUN_DIR/probe/$client"
     done
     "$SCRIPT_DIR/dns-manager.sh" check
     log_info "Batch disable done"
@@ -246,6 +302,8 @@ batch_delete() {
     for client in "$@"; do
         _stop_client_nofirewall "$client"
         _clear_stopping "$client"
+        rm -f "$RUN_DIR/pending/$client"
+        rm -f "$RUN_DIR/probe/$client"
     done
     "$SCRIPT_DIR/dns-manager.sh" check
     log_info "Batch delete done"
@@ -366,6 +424,9 @@ probe_all() {
                     ;;
                 slp)
                     "$SCRIPT_DIR/slp-manager.sh" probe "$client" &
+                    ;;
+                l2tp)
+                    "$SCRIPT_DIR/l2tp-manager.sh" probe "$client" &
                     ;;
                 *)
                     continue
