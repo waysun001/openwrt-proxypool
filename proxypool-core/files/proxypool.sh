@@ -293,6 +293,25 @@ batch_disable() {
     log_info "Batch disable done"
 }
 
+# ============================================================
+# 逐个启动：和手动点"连接"完全一致
+# 每个客户端依次执行：启动进程 → 增量防火墙 → 同步探测
+# 完成后状态即准确（已连接/未连接），无假"已连接"
+# 后台运行（由 Lua 层 setsid 调用），不阻塞 API 响应
+# ============================================================
+sequential_start() {
+    log_info "Sequential start: $# clients"
+    local _done=0
+    for client in "$@"; do
+        if is_client_enabled "$client"; then
+            start_client "$client"
+            _done=$((_done + 1))
+            log_info "Sequential start: $_done done ($client)"
+        fi
+    done
+    log_info "Sequential start complete: $_done clients started"
+}
+
 batch_delete() {
     log_info "Batch delete: $*"
     for client in "$@"; do
@@ -521,8 +540,11 @@ main() {
         batch_delete)
             batch_delete "$@"
             ;;
+        sequential_start)
+            sequential_start "$@"
+            ;;
         *)
-            echo "Usage: $0 {start|stop|restart|reload|start_client|stop_client|restart_client|toggle_client|batch_connect|batch_disconnect|batch_enable|batch_disable|batch_delete|status} [client_id...]"
+            echo "Usage: $0 {start|stop|restart|reload|start_client|stop_client|restart_client|toggle_client|batch_connect|batch_disconnect|batch_enable|batch_disable|batch_delete|sequential_start|status} [client_id...]"
             exit 1
             ;;
     esac

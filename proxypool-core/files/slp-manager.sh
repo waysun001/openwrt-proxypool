@@ -296,9 +296,6 @@ start() {
     if kill -0 "$pid" 2>/dev/null; then
         log_info "SLP client started: $name (PID: $pid)"
 
-        # 清除旧探测缓存（防止上次 probe=fail 导致新启动的客户端显示"未连接"）
-        rm -f "$PROBE_DIR/${client}" 2>/dev/null
-
         # 记录客户端状态
         mkdir -p "$RUN_DIR/clients"
         local config_hash=$(uci show "proxypool.$client" | md5sum | cut -d' ' -f1)
@@ -383,7 +380,8 @@ status() {
                         echo "disconnected"
                     fi
                 else
-                    echo "connected"
+                    # 无缓存（探测尚未完成），保守显示 disconnected
+                    echo "disconnected"
                 fi
             else
                 echo "connecting"

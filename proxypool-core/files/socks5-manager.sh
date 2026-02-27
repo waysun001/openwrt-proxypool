@@ -134,9 +134,6 @@ start() {
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
             log_info "SOCKS5 client started: $name (PID: $pid)"
 
-            # 清除旧探测缓存（防止上次 probe=fail 导致新启动的客户端显示"未连接"）
-            rm -f "$PROBE_DIR/${client}" 2>/dev/null
-
             mkdir -p "$RUN_DIR/clients"
             local config_hash=$(uci show "proxypool.$client" | md5sum | cut -d' ' -f1)
             echo "$config_hash" > "$RUN_DIR/clients/$client"
@@ -200,8 +197,8 @@ status() {
                     echo "disconnected"
                 fi
             else
-                # 无缓存（首次启动），PID 存活先显示 connected
-                echo "connected"
+                # 无缓存（探测尚未完成），保守显示 disconnected，等探测确认后才转 connected
+                echo "disconnected"
             fi
             if [ -f "$REDSOCKS_DIR/${client}.ports" ]; then
                 cat "$REDSOCKS_DIR/${client}.ports"

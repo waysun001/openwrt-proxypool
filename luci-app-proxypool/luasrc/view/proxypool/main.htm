@@ -131,6 +131,8 @@
 .pp-batch-bar span { font-weight: 600; color: #1a56db; font-size: 13px; }
 .pp-table td.pp-checkbox-cell, .pp-table th.pp-checkbox-cell { width: 36px; text-align: center; }
 .pp-table td.pp-checkbox-cell input, .pp-table th.pp-checkbox-cell input { cursor: pointer; width: 16px; height: 16px; accent-color: #1a73e8; }
+/* 拖拽多选时禁止文本选中 */
+.pp-drag-selecting { -webkit-user-select: none; -moz-user-select: none; -ms-user-select: none; user-select: none; }
 
 /* 分页控件 */
 .pp-pagination { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; font-size: 13px; color: #5f6368; flex-wrap: wrap; gap: 8px; }
@@ -671,6 +673,105 @@ function getSelectedIds() {
     return ids;
 }
 
+/* 拖拽多选：仅在勾选框列（第一列）上拖拽可批量勾选/取消 */
+/* 其他列保持正常文本选择，方便复制服务器地址、账号密码等信息 */
+(function() {
+    var dragging = false;
+    var dragMode = null; // true=勾选, false=取消
+    var dragProcessed = {}; // 已处理的行（防止反复切换）
+
+    // 从事件目标向上查找所在 <tr>，提取 client ID
+    function getRowClientId(el) {
+        while (el && el.tagName !== 'TR') el = el.parentElement;
+        if (!el) return null;
+        var cb = el.querySelector('td.pp-checkbox-cell input[type="checkbox"]');
+        if (!cb) return null;
+        var oc = cb.getAttribute('onchange') || '';
+        var m = oc.match(/toggleSelectClient\('([^']+)'/);
+        return m ? m[1] : null;
+    }
+
+    // 判断元素是否在勾选框列内
+    function isInCheckboxCell(el) {
+        while (el && el.tagName !== 'TD' && el.tagName !== 'TH') el = el.parentElement;
+        return el && el.classList.contains('pp-checkbox-cell');
+    }
+
+    var tbody = null;
+    function getTbody() {
+        if (!tbody) tbody = document.getElementById('client-list');
+        return tbody;
+    }
+
+    // mousedown：仅在勾选框列按下才启动拖拽
+    document.addEventListener('mousedown', function(e) {
+        if (e.button !== 0) return;
+
+        var tb = getTbody();
+        if (!tb || !tb.contains(e.target)) return;
+        // 只在勾选框列触发拖拽，其他列不拦截（允许正常文本选择）
+        if (!isInCheckboxCell(e.target)) return;
+
+        var id = getRowClientId(e.target);
+        if (!id) return;
+
+        var tag = e.target.tagName;
+        var isCheckbox = (tag === 'INPUT' && e.target.type === 'checkbox');
+
+        if (isCheckbox) {
+            dragging = true;
+            dragMode = !selectedClients[id];
+            dragProcessed = {};
+            dragProcessed[id] = true;
+        } else {
+            // 点击勾选框列的空白区域（checkbox 旁边）
+            dragging = true;
+            dragMode = !selectedClients[id];
+            dragProcessed = {};
+            dragProcessed[id] = true;
+            selectedClients[id] = dragMode;
+            // 直接更新该行 checkbox
+            var row = e.target;
+            while (row && row.tagName !== 'TR') row = row.parentElement;
+            if (row) {
+                var cb = row.querySelector('td.pp-checkbox-cell input[type="checkbox"]');
+                if (cb) cb.checked = dragMode;
+            }
+            updateBatchBar();
+        }
+        document.body.classList.add('pp-drag-selecting');
+    });
+
+    // mouseover：拖拽经过的行自动勾选/取消
+    document.addEventListener('mouseover', function(e) {
+        if (!dragging) return;
+        var id = getRowClientId(e.target);
+        if (!id || dragProcessed[id]) return;
+        dragProcessed[id] = true;
+        selectedClients[id] = dragMode;
+        var row = e.target;
+        while (row && row.tagName !== 'TR') row = row.parentElement;
+        if (row) {
+            var cb = row.querySelector('td.pp-checkbox-cell input[type="checkbox"]');
+            if (cb) cb.checked = dragMode;
+        }
+        updateBatchBar();
+        var filtered = getFilteredAndSortedClients();
+        var allChecked = filtered.length > 0 && filtered.every(function(c) { return selectedClients[c.id]; });
+        document.getElementById('select-all-cb').checked = allChecked;
+    });
+
+    // mouseup：结束拖拽
+    document.addEventListener('mouseup', function() {
+        if (dragging) {
+            dragging = false;
+            dragMode = null;
+            dragProcessed = {};
+            document.body.classList.remove('pp-drag-selecting');
+        }
+    });
+})();
+
 function batchOp(action) {
     var ids = getSelectedIds();
     if (ids.length === 0) return;
@@ -679,8 +780,15 @@ function batchOp(action) {
         if (!confirm('确定要删除选中的 ' + ids.length + ' 个客户端吗？')) return;
     }
 
+    // 连接：前端逐个调用 start_client（与手动点连接完全一致的同步路径）
+    if (action === 'connect') {
+        clearSelection();
+        sequentialConnect(ids);
+        return;
+    }
+
     // 立即显示处理中状态（同步操作期间保持显示，直到响应返回）
-    var labelMap = { enable: '启用中...', disable: '停用中...', connect: '连接中...', disconnect: '断开中...', 'delete': '删除中...' };
+    var labelMap = { enable: '启用中...', disable: '停用中...', disconnect: '断开中...', 'delete': '删除中...' };
     var label = labelMap[action] || '处理中...';
     ids.forEach(function(id) {
         setPendingState(id, action, label);
@@ -692,15 +800,19 @@ function batchOp(action) {
     formData.append('batch_action', action);
     formData.append('clients', JSON.stringify(ids));
 
-    // 同步批量操作：后端全部执行完才返回，与单客户端操作体验一致
-    // 50 个客户端 ≈ 20-25s，无需 rapid poll
     fetch(apiUrl, { method: 'POST', body: formData })
         .then(safeJson)
         .then(function(result) {
             ids.forEach(function(id) { clearPendingState(id); });
             if (result.success) {
                 clearSelection();
-                refreshStatusFull();
+                if (action === 'enable') {
+                    // UCI 已设置 enabled=1，逐个启动（与手动点连接一致）
+                    refreshStatusFull();
+                    sequentialConnect(ids);
+                } else {
+                    refreshStatusFull();
+                }
             } else {
                 alert('操作失败: ' + (result.error || '未知错误'));
                 refreshStatusFull();
@@ -1006,6 +1118,47 @@ function startClient(id) {
             clearPendingState(id);
             refreshStatusFull();
         });
+}
+
+/* 逐个连接：前端驱动，每个客户端走同步 start_client（与手动点连接完全一致）*/
+var _seqConnecting = false;
+var _seqConnectAbort = false;
+function sequentialConnect(ids, doneCallback) {
+    if (_seqConnecting) return;
+    if (!ids || ids.length === 0) {
+        if (doneCallback) doneCallback();
+        return;
+    }
+    _seqConnecting = true;
+    _seqConnectAbort = false;
+    var total = ids.length;
+    var idx = 0;
+
+    function connectNext() {
+        if (_seqConnectAbort || idx >= total) {
+            _seqConnecting = false;
+            if (doneCallback) doneCallback();
+            return;
+        }
+        var id = ids[idx];
+        idx++;
+        setPendingState(id, 'connect', '连接中 (' + idx + '/' + total + ')');
+        renderClients();
+
+        fetch(apiUrl + '?action=start_client&client=' + id)
+            .then(function() {
+                clearPendingState(id);
+                refreshStatusFull();
+                connectNext();
+            })
+            .catch(function(e) {
+                console.error('Sequential connect error for ' + id + ':', e);
+                clearPendingState(id);
+                refreshStatusFull();
+                connectNext();
+            });
+    }
+    connectNext();
 }
 
 function stopClient(id) {
@@ -1483,9 +1636,17 @@ function batchConfirmImport() {
     .then(safeJson)
     .then(function(result) {
         if (result.success) {
-            alert('成功导入 ' + result.imported + ' 条线路');
+            var msg = '成功导入 ' + result.imported + ' 条线路';
+            if (result.auto_start_ids && result.auto_start_ids.length > 0) {
+                msg += '，即将逐个连接 ' + result.auto_start_ids.length + ' 条已启用线路';
+            }
+            alert(msg);
             closeBatchModal();
             refreshStatusFull();
+            // 逐个启动已启用的客户端（与手动点连接一致的同步路径）
+            if (result.auto_start_ids && result.auto_start_ids.length > 0) {
+                sequentialConnect(result.auto_start_ids);
+            }
         } else {
             alert('导入失败: ' + (result.error || '未知错误'));
         }
@@ -1643,15 +1804,24 @@ function scheduleProbe() {
 }
 scheduleProbe();
 
-// 单客户端操作后延迟探测 + 刷新（验证连通性）
+// 操作后延迟探测 + 刷新（验证连通性）
+// isBatch=true 时多次刷新，逐步更新探测结果（50 客户端探测需 20-30s）
 var _postOpTimer = null;
-function schedulePostOpProbe() {
+var _postOpTimer2 = null;
+function schedulePostOpProbe(isBatch) {
     if (_postOpTimer) clearTimeout(_postOpTimer);
+    if (_postOpTimer2) clearTimeout(_postOpTimer2);
     _postOpTimer = setTimeout(function() {
         triggerProbeAll();
-        // 探测完成后刷新状态显示结果
+        // 首次刷新：显示已完成的探测结果
         setTimeout(refreshStatusFull, 3000);
     }, 2000);
+    // 批量操作额外刷新：等大部分探测完成后再刷一次
+    if (isBatch) {
+        _postOpTimer2 = setTimeout(function() {
+            refreshStatusFull();
+        }, 20000);
+    }
 }
 </script>
 
