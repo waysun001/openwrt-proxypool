@@ -69,6 +69,15 @@
             document.body.insertBefore(menu, document.body.firstChild);
         }
 
+        // 覆盖页面标题为"智联盒子"，并锁定防止 LuCI 动态改回
+        document.title = '智联盒子';
+        var titleEl = document.querySelector('title');
+        if (titleEl) {
+            new MutationObserver(function() {
+                if (document.title !== '智联盒子') document.title = '智联盒子';
+            }).observe(titleEl, { childList: true, characterData: true, subtree: true });
+        }
+
         updateStats();
         // 去重：主页（/proxypool 无 tab= 参数）已有自己的 10s 轮询，跳过 global.js 的轮询
         var path = window.location.pathname.replace(/\/+$/, '');
