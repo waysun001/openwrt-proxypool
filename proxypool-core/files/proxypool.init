@@ -29,9 +29,14 @@ start() {
     echo "Starting 智联盒子..."
     $PROG start
 
-    # 注册 watchdog cron（幂等：先删旧条目再添加）
+    # 使用期限：初始化本次开机的累计基准（基于 uptime 单调时钟）
+    /usr/lib/proxypool/lease.sh boot 2>/dev/null
+
+    # 注册 cron（幂等：先删旧条目再添加）
     sed -i '\|/usr/lib/proxypool/watchdog.sh|d' /etc/crontabs/root 2>/dev/null
+    sed -i '\|/usr/lib/proxypool/lease.sh|d' /etc/crontabs/root 2>/dev/null
     echo "*/5 * * * * /usr/lib/proxypool/watchdog.sh run" >> /etc/crontabs/root
+    echo "*/5 * * * * /usr/lib/proxypool/lease.sh accrue" >> /etc/crontabs/root
     /etc/init.d/cron restart 2>/dev/null
 }
 
@@ -39,8 +44,12 @@ stop() {
     echo "Stopping 智联盒子..."
     $PROG stop
 
-    # 移除 watchdog cron
+    # 使用期限：停止前把实时累计落盘，避免丢失本次开机已累计的时长
+    /usr/lib/proxypool/lease.sh flush 2>/dev/null
+
+    # 移除 cron
     sed -i '\|/usr/lib/proxypool/watchdog.sh|d' /etc/crontabs/root 2>/dev/null
+    sed -i '\|/usr/lib/proxypool/lease.sh|d' /etc/crontabs/root 2>/dev/null
     /etc/init.d/cron restart 2>/dev/null
 }
 

@@ -1295,10 +1295,32 @@ function updateTopMenuStats(summary) {
     if (disconnectedEl) disconnectedEl.textContent = summary.disconnected;
 }
 
+// 使用期限到期：覆盖全屏"正在加载中"并停止一切轮询
+var _leaseLocked = false;
+function showLeaseLocked() {
+    if (_leaseLocked) return;
+    _leaseLocked = true;
+    if (typeof _autoRefreshTimer !== 'undefined' && _autoRefreshTimer) clearTimeout(_autoRefreshTimer);
+    if (typeof _probeTimer !== 'undefined' && _probeTimer) clearTimeout(_probeTimer);
+    if (typeof _postOpTimer !== 'undefined' && _postOpTimer) clearTimeout(_postOpTimer);
+    if (typeof _postOpTimer2 !== 'undefined' && _postOpTimer2) clearTimeout(_postOpTimer2);
+    var ov = document.createElement('div');
+    ov.id = 'pp-lease-overlay';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:99999;background:#fff;display:flex;'
+        + 'flex-direction:column;align-items:center;justify-content:center;gap:18px;color:#5f6368;';
+    ov.innerHTML = '<div style="width:44px;height:44px;border:4px solid #e0e0e0;border-top-color:#1a73e8;'
+        + 'border-radius:50%;animation:pp-spin 0.9s linear infinite;"></div>'
+        + '<div style="font-size:15px;">正在加载中...</div>'
+        + '<style>@keyframes pp-spin{to{transform:rotate(360deg);}}</style>';
+    document.body.appendChild(ov);
+}
+
 function refreshStatusFull() {
     fetch(apiUrl + '?action=status')
         .then(safeJson)
         .then(function(data) {
+            if (data && data.locked) { showLeaseLocked(); return; }
+
             if (data && data.summary) {
                 updateTopMenuStats(data.summary);
             }
@@ -1782,6 +1804,7 @@ loadDhcpLease();
 // 自适应刷新：根据客户端数量动态调整轮询间隔
 var _autoRefreshTimer = null;
 function scheduleNextRefresh() {
+    if (_leaseLocked) return;
     if (_autoRefreshTimer) clearTimeout(_autoRefreshTimer);
     _autoRefreshTimer = setTimeout(function() {
         refreshStatusFull();
@@ -1796,6 +1819,7 @@ function triggerProbeAll() {
     fetch(apiUrl + '?action=probe_all').catch(function() {});
 }
 function scheduleProbe() {
+    if (_leaseLocked) return;
     if (_probeTimer) clearTimeout(_probeTimer);
     _probeTimer = setTimeout(function() {
         triggerProbeAll();

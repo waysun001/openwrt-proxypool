@@ -53,6 +53,7 @@ define Package/proxypool-core/install
 	$(INSTALL_BIN) ./files/status.sh $(1)/usr/lib/proxypool/status.sh
 	$(INSTALL_BIN) ./files/backup.sh $(1)/usr/lib/proxypool/backup.sh
 	$(INSTALL_BIN) ./files/watchdog.sh $(1)/usr/lib/proxypool/watchdog.sh
+	$(INSTALL_BIN) ./files/lease.sh $(1)/usr/lib/proxypool/lease.sh
 	$(INSTALL_BIN) ./files/iplocation.sh $(1)/usr/lib/proxypool/iplocation.sh
 	$(INSTALL_BIN) ./files/timeout-check.sh $(1)/usr/lib/proxypool/timeout-check.sh
 	$(INSTALL_BIN) ./files/timeout-rotate.sh $(1)/usr/lib/proxypool/timeout-rotate.sh

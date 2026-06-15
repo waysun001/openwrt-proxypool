@@ -2,11 +2,123 @@
 module("luci.controller.proxypool", package.seeall)
 
 function index()
-    entry({"admin", "services", "proxypool"}, template("proxypool/main"), _("智联盒子"), 1).dependent = false
+    -- 面板入口改为 call 处理：过期时渲染 locked 页面（一直"正在加载中"）
+    entry({"admin", "services", "proxypool"}, call("main_page"), _("智联盒子"), 1).dependent = false
     entry({"admin", "services", "proxypool", "api"}, call("api_handler")).leaf = true
-    
+    -- 隐藏的使用期限设置页：登录后台后在面板 URL 后追加 /sz 进入
+    entry({"admin", "services", "proxypool", "sz"}, call("sz_page")).leaf = true
+
     -- 设置为默认首页：创建 admin 根路由重定向
     entry({"admin"}, alias("admin", "services", "proxypool"), _("Administration"), 10).index = true
+end
+
+-- ============================================================
+-- 使用期限（lease）：默认 360 天，到期后面板一直"正在加载中"
+-- 计时基于内核单调时钟 /proc/uptime 的累计运行秒数（lease.sh 维护），
+-- 完全不依赖墙上时钟，改/回拨系统时间无效。lease_days=0 表示永久解锁。
+-- ============================================================
+
+local LEASE_DEFAULT_DAYS = 360
+local LEASE_MIN_SANE_TS = 1704067200       -- 2024-01-01：低于此值视为时钟未同步（仅用于显示估算）
+local LEASE_USED_FILE = "/var/run/proxypool/lease/used"
+
+-- 读取累计已用秒数：优先实时暂存文件，回退到 UCI 落盘值
+local function lease_used_seconds(uci_c)
+    local f = io.open(LEASE_USED_FILE, "r")
+    if f then
+        local c = f:read("*a"); f:close()
+        local n = tonumber((c or ""):match("%d+"))
+        if n then return n end
+    end
+    return tonumber(uci_c:get("proxypool", "global", "lease_used") or "") or 0
+end
+
+-- 返回 (expired:boolean, info:table)
+-- info: { days, used, limit }
+local function lease_info()
+    local uci_c = require("luci.model.uci").cursor()
+
+    local days = tonumber(uci_c:get("proxypool", "global", "lease_days") or "")
+    if days == nil then days = LEASE_DEFAULT_DAYS end
+
+    local used = lease_used_seconds(uci_c)
+    local limit = days * 86400
+    local expired = (days > 0) and (used >= limit)
+    return expired, { days = days, used = used, limit = limit }
+end
+
+local function lease_expired()
+    local e = lease_info()
+    return e
+end
+
+-- 面板入口：未过期渲染正常面板，过期渲染锁定页（一直加载中）
+function main_page()
+    local tmpl = require "luci.template"
+    if lease_expired() then
+        tmpl.render("proxypool/locked", {})
+    else
+        tmpl.render("proxypool/main", {})
+    end
+end
+
+-- 使用期限设置页（/sz）：显示当前状态，保存时重置起点并续期
+function sz_page()
+    local http = require "luci.http"
+    local uci = require "luci.model.uci".cursor()
+    local tmpl = require "luci.template"
+
+    local msg_type, msg_text = nil, nil
+    if http.formvalue("save") then
+        local raw = http.formvalue("days") or ""
+        local d = tonumber(raw)
+        if d == nil or d < 0 or d ~= math.floor(d) then
+            msg_type, msg_text = "error", "天数无效，请输入 ≥ 0 的整数"
+        else
+            uci:set("proxypool", "global", "lease_days", tostring(d))
+            uci:commit("proxypool")
+            -- 续期：累计清零（同时清空实时暂存，从现在重新计时）
+            os.execute("/usr/lib/proxypool/lease.sh reset >/dev/null 2>&1")
+            if d == 0 then
+                msg_type, msg_text = "ok", "已设置为永久解锁（不再到期）"
+            else
+                msg_type, msg_text = "ok", "已设置使用天数为 " .. d .. " 天，并从现在重新计时"
+            end
+        end
+    end
+
+    local expired, info = lease_info()
+    local used_str, remaining_str, expiry_str
+
+    used_str = string.format("%.1f 天", info.used / 86400)
+
+    if info.days <= 0 then
+        remaining_str = "—"
+        expiry_str = "永久（不锁定）"
+    elseif expired then
+        remaining_str = "已过期"
+        expiry_str = "已过期"
+    else
+        local rem = info.limit - info.used
+        remaining_str = string.format("%.1f 天（按持续开机估算）", rem / 86400)
+        -- 预计到期日期：仅在系统时钟可信时按"从现在持续开机"估算显示
+        local now = os.time()
+        if now >= LEASE_MIN_SANE_TS then
+            expiry_str = os.date("%Y-%m-%d", now + rem) .. "（估算）"
+        else
+            expiry_str = "—（时钟未同步）"
+        end
+    end
+
+    tmpl.render("proxypool/lease", {
+        msg_type = msg_type,
+        msg_text = msg_text,
+        days = info.days,
+        used_str = used_str,
+        remaining_str = remaining_str,
+        expiry_str = expiry_str,
+        expired = expired
+    })
 end
 
 -- 输入清洗：只允许字母数字下划线（防止命令注入）
@@ -381,6 +493,12 @@ function api_handler()
     local action = http.formvalue("action") or ""
 
     if action == "status" then
+        -- 使用期限到期：不返回任何客户端数据，前端保持"正在加载中"
+        if lease_expired() then
+            http.prepare_content("application/json")
+            http.write('{"locked":true}')
+            return
+        end
         http.prepare_content("application/json")
         local ok, result = pcall(generate_status)
         if ok and result then

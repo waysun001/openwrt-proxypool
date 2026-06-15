@@ -3,6 +3,8 @@ config global 'global'
     option max_clients '60'
     option log_level 'info'
     option status_interval '30'
+    # 使用期限：默认 360 天，0 表示永久解锁。按累计开机运行时长计时（抗改系统时间），lease_used 由 lease.sh 维护
+    option lease_days '360'
 
 # 示例客户端 (取消注释并修改后使用)
 #config client 'client_01'
