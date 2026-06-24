@@ -75,6 +75,12 @@ sed -i '/<\/head>/i\
 #proxypool-global-menu .menu-stats strong { font-weight: 600; }\
 #proxypool-global-menu .menu-stats .stat-connected { color: #28a745; }\
 #proxypool-global-menu .menu-stats .stat-disconnected { color: #dc3545; }\
+#proxypool-global-menu .menu-stats .stat-wan { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 12px; background: #fff; border: 1px solid #ddd; }\
+#proxypool-global-menu .menu-stats .stat-wan::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: #999; flex: 0 0 auto; }\
+#proxypool-global-menu .menu-stats .stat-wan.wan-online { color: #28a745; }\
+#proxypool-global-menu .menu-stats .stat-wan.wan-online::before { background: #28a745; }\
+#proxypool-global-menu .menu-stats .stat-wan.wan-offline { color: #dc3545; }\
+#proxypool-global-menu .menu-stats .stat-wan.wan-offline::before { background: #dc3545; }\
 </style>\
 <script>\
 function ppSafeJson(r) { if(!r.ok) return Promise.reject(); return r.text().then(function(t){ if(!t||!t.trim()) return Promise.reject(); return JSON.parse(t); }); }\
@@ -86,6 +92,21 @@ function updateProxyPoolStats() {\
                 document.getElementById("pp-stat-total").textContent = data.summary.total;\
                 document.getElementById("pp-stat-connected").textContent = data.summary.connected;\
                 document.getElementById("pp-stat-disconnected").textContent = data.summary.disconnected;\
+            }\
+            if (data) {\
+                var wanEl = document.getElementById("pp-stat-wan");\
+                var wanWrap = document.getElementById("pp-wan-wrap");\
+                if (wanEl) {\
+                    var net = data.network;\
+                    if (!net) { wanEl.textContent = "检测中"; }\
+                    else {\
+                        var on = !!net.online;\
+                        var ws = net.wans || [];\
+                        var detail = ws.map(function(w){ return w.name + (w.up ? "✓" : "✗"); }).join(" ");\
+                        wanEl.textContent = (on ? "有网" : "无网") + (detail ? " " + detail : "");\
+                        if (wanWrap) { wanWrap.className = "stat-wan " + (on ? "wan-online" : "wan-offline"); }\
+                    }\
+                }\
             }\
         })\
         .catch(() => {});\
@@ -110,6 +131,7 @@ sed -i '/<body[^>]*>/a\
         <a href="/cgi-bin/luci/admin/system/reboot">重启</a>\
     </div>\
     <div class="menu-stats">\
+        <span class="stat-wan" id="pp-wan-wrap"><strong id="pp-stat-wan">检测中</strong></span>\
         <span>总 <strong id="pp-stat-total">-</strong></span>\
         <span class="stat-connected">已连接 <strong id="pp-stat-connected">-</strong></span>\
         <span class="stat-disconnected">未连接 <strong id="pp-stat-disconnected">-</strong></span>\
