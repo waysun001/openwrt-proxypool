@@ -26,7 +26,11 @@
       "Bash(ls -la \"C:\\\\Users\\\\Administrator\\\\IdeaProjects\\\\openwrt-proxypool\"\" && echo \"---\" && ls -la \"C:UsersAdministratorIdeaProjectsopenwrt-proxypoolluci-app-proxypool \")",
       "Bash(git diff:*)",
       "Bash(findstr:*)",
-      "Bash(wc:*)"
+      "Bash(wc:*)",
+      "Bash(command -v luac)",
+      "Bash(luac -p luci-app-proxypool/luasrc/controller/proxypool.lua)",
+      "Bash(command -v node)",
+      "Bash(node --check luci-app-proxypool/htdocs/luci-static/resources/proxypool-global.js)"
     ]
   }
 }

@@ -1033,24 +1033,45 @@ function saveClient(e) {
     var bindIps = document.getElementById('form-bindip').value.split('\n').filter(function(ip) { return ip.trim(); });
     var type = document.getElementById('form-type').value;
 
+    // 去除连接字段首尾空格（防止复制粘贴带入空格导致连接失败）
+    var server = document.getElementById('form-server').value.trim();
+    var port = document.getElementById('form-port').value.trim();
+    var username = document.getElementById('form-username').value.trim();
+    var password = document.getElementById('form-password').value.trim();
+
+    // 重复校验：同一条线路(服务器)+同端口 不允许重复添加；同线路不同端口可以添加
+    if (server) {
+        var isDup = clientData.some(function(c) {
+            return c.id !== id
+                && (c.server || '').trim() === server
+                && String(c.port || '').trim() === port;
+        });
+        if (isDup) {
+            alert('该线路 ' + server + ' 的端口 ' + port + ' 已存在，不能重复添加。\n（同线路不同端口可以添加）');
+            saveBtn.disabled = false;
+            saveBtn.textContent = '保存';
+            return;
+        }
+    }
+
     var data = {
         enabled: document.getElementById('form-enabled').checked ? '1' : '0',
-        name: document.getElementById('form-name').value,
+        name: document.getElementById('form-name').value.trim(),
         type: type,
-        server: document.getElementById('form-server').value,
-        port: document.getElementById('form-port').value,
-        username: document.getElementById('form-username').value,
-        password: document.getElementById('form-password').value,
+        server: server,
+        port: port,
+        username: username,
+        password: password,
         expiry: document.getElementById('form-expiry').value.trim(),
         bind_ip: bindIps
     };
     
     // SLP 专用字段
     if (type === 'slp') {
-        data.slp_token = document.getElementById('form-slp-token').value;
+        data.slp_token = document.getElementById('form-slp-token').value.trim();
         data.slp_transport = document.getElementById('form-slp-transport').value;
         data.slp_obfs = document.getElementById('form-slp-obfs').checked ? '1' : '0';
-        data.slp_obfs_key = document.getElementById('form-slp-obfs-key').value;
+        data.slp_obfs_key = document.getElementById('form-slp-obfs-key').value.trim();
         data.slp_insecure = document.getElementById('form-slp-insecure').checked ? '1' : '0';
     }
 
@@ -1323,6 +1344,11 @@ function refreshStatusFull() {
 
             if (data && data.summary) {
                 updateTopMenuStats(data.summary);
+            }
+
+            // 顶部 WAN 联网状态（复用 proxypool-global.js 的渲染逻辑）
+            if (data && typeof window.ppUpdateWanStatus === 'function') {
+                window.ppUpdateWanStatus(data.network);
             }
 
             if (data && data.devices) {

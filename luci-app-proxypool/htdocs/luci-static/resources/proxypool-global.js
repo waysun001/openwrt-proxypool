@@ -52,6 +52,7 @@
         var statsDiv = document.createElement('div');
         statsDiv.className = 'menu-stats';
         statsDiv.innerHTML =
+            '<span class="stat-wan" id="pp-wan-wrap"><strong id="pp-stat-wan">\u68C0\u6D4B\u4E2D</strong></span>' +
             '<span>\u603B <strong id="pp-stat-total">-</strong></span>' +
             '<span class="stat-connected">\u5DF2\u8FDE\u63A5 <strong id="pp-stat-connected">-</strong></span>' +
             '<span class="stat-disconnected">\u672A\u8FDE\u63A5 <strong id="pp-stat-disconnected">-</strong></span>';
@@ -104,7 +105,14 @@
             '#proxypool-global-menu .menu-stats .stat-connected{color:#66bb6a}' +
             '#proxypool-global-menu .menu-stats .stat-connected strong{color:#66bb6a}' +
             '#proxypool-global-menu .menu-stats .stat-disconnected{color:#ef5350}' +
-            '#proxypool-global-menu .menu-stats .stat-disconnected strong{color:#ef5350}';
+            '#proxypool-global-menu .menu-stats .stat-disconnected strong{color:#ef5350}' +
+            '#proxypool-global-menu .menu-stats .stat-wan{display:inline-flex;align-items:center;gap:6px;padding:3px 12px;border-radius:12px;background:rgba(255,255,255,0.08)}' +
+            '#proxypool-global-menu .menu-stats .stat-wan::before{content:"";width:8px;height:8px;border-radius:50%;background:#9e9e9e;flex:0 0 auto}' +
+            '#proxypool-global-menu .menu-stats .stat-wan strong{color:rgba(255,255,255,0.85)}' +
+            '#proxypool-global-menu .menu-stats .stat-wan.wan-online::before{background:#66bb6a;box-shadow:0 0 6px #66bb6a}' +
+            '#proxypool-global-menu .menu-stats .stat-wan.wan-online strong{color:#66bb6a}' +
+            '#proxypool-global-menu .menu-stats .stat-wan.wan-offline::before{background:#ef5350;box-shadow:0 0 6px #ef5350}' +
+            '#proxypool-global-menu .menu-stats .stat-wan.wan-offline strong{color:#ef5350}';
         document.head.appendChild(style);
     }
 
@@ -129,7 +137,29 @@
                     el = document.getElementById('pp-stat-disconnected');
                     if (el) el.textContent = data.summary.disconnected;
                 }
+                if (data) renderWan(data.network);
             })
             .catch(function() {});
     }
+
+    // 渲染顶部 WAN 联网状态。主页轮询走 main.htm，通过 window.ppUpdateWanStatus 复用此函数。
+    function renderWan(network) {
+        var el = document.getElementById('pp-stat-wan');
+        var wrap = document.getElementById('pp-wan-wrap');
+        if (!el) return;
+        if (!network) { el.textContent = '检测中'; return; }
+
+        var online = !!network.online;
+        var wans = network.wans || [];
+        var detail = wans.map(function(w) {
+            return w.name + (w.up ? '✓' : '✗');
+        }).join(' ');
+
+        el.textContent = (online ? '有网' : '无网') + (detail ? ' ' + detail : '');
+        if (wrap) {
+            wrap.classList.remove('wan-online', 'wan-offline');
+            wrap.classList.add(online ? 'wan-online' : 'wan-offline');
+        }
+    }
+    window.ppUpdateWanStatus = renderWan;
 })();

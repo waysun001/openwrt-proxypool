@@ -218,6 +218,55 @@ local function _parse_neigh(output)
 end
 
 -- 生成完整状态 JSON
+-- 检测 WAN 口联网状态（WAN1/WAN2...）
+-- 通过 ubus 读取所有网络接口，筛选 IPv4 WAN 口（名字以 wan 开头、排除 wan6），
+-- 按接口名排序后依次映射为 WAN1/WAN2…；任一 WAN 已拨号且有 IPv4 地址即视为"有网"。
+local function get_wan_status()
+    local jsonc = require("luci.jsonc")
+    local wans = {}
+    local online = false
+
+    local raw = _read_cmd("ubus call network.interface dump 2>/dev/null")
+    if raw and raw ~= "" then
+        local ok, d = pcall(jsonc.parse, raw)
+        if ok and d and d.interface then
+            local list = {}
+            for _, ifc in ipairs(d.interface) do
+                local nm = ifc.interface or ""
+                -- 仅 IPv4 WAN 口：名字以 wan 开头且不以 6 结尾（排除 wan6/ipv6）
+                if nm:match("^wan") and not nm:match("6$") then
+                    local has_ip = ifc["ipv4-address"] and #ifc["ipv4-address"] > 0
+                    list[#list + 1] = {
+                        iface = nm,
+                        up = (ifc.up == true) and has_ip and true or false,
+                        ipaddr = (has_ip and ifc["ipv4-address"][1].address) or ""
+                    }
+                end
+            end
+            table.sort(list, function(a, b) return a.iface < b.iface end)
+            for i, w in ipairs(list) do
+                if w.up then online = true end
+                wans[#wans + 1] = {
+                    name = "WAN" .. i,
+                    iface = w.iface,
+                    up = w.up,
+                    ipaddr = w.ipaddr
+                }
+            end
+        end
+    end
+
+    -- 兜底：未能从 ubus 识别 WAN 口时，用默认路由判断是否有网
+    if #wans == 0 then
+        local route = _read_cmd("ip -4 route show default 2>/dev/null")
+        local up = (route and route:match("default")) and true or false
+        if up then online = true end
+        wans[1] = { name = "WAN", iface = "", up = up, ipaddr = "" }
+    end
+
+    return { online = online, wans = wans }
+end
+
 local function generate_status()
     local uci_c = require("luci.model.uci").cursor()
     local jsonc = require("luci.jsonc")
@@ -479,6 +528,7 @@ local function generate_status()
             connected = connected_count,
             disconnected = disconnected
         },
+        network = get_wan_status(),
         clients = as_array(clients),
         devices = as_array(devices_list)
     })
@@ -552,6 +602,15 @@ function api_handler()
         if client and data then
             local d = json.parse(data)
             if d then
+                -- 去除连接字段首尾空格（防止复制粘贴带入空格导致连接失败）
+                local function trim(s)
+                    if type(s) ~= "string" then return s end
+                    return (s:gsub("^%s+", ""):gsub("%s+$", ""))
+                end
+                d.server = trim(d.server)
+                d.port = trim(d.port)
+                d.username = trim(d.username)
+                d.password = trim(d.password)
                 uci:set("proxypool", client, "client")
                 uci:set("proxypool", client, "enabled", d.enabled or "0")
                 uci:set("proxypool", client, "name", d.name or "")
