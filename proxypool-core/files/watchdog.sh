@@ -1,12 +1,12 @@
 #!/bin/sh
 # 智联盒子 - Watchdog 健康检查脚本
-# 由 cron 每5分钟调用一次，检测并自动恢复异常客户端
+# 由 cron 每分钟调用一次，检测并自动恢复异常客户端
 # 兼容 busybox ash 环境
 
 LOG_FILE="/var/log/proxypool.log"
 RUN_DIR="/var/run/proxypool"
 WD_DIR="$RUN_DIR/watchdog"
-COOLDOWN=300  # 每个客户端最少间隔5分钟才能再次重启
+COOLDOWN=60  # 每个客户端最少间隔60秒才能再次重启（配合 cron 每分钟运行）
 
 log_info() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [watchdog] $*" >> "$LOG_FILE"

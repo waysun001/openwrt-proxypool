@@ -35,7 +35,7 @@ start() {
     # 注册 cron（幂等：先删旧条目再添加）
     sed -i '\|/usr/lib/proxypool/watchdog.sh|d' /etc/crontabs/root 2>/dev/null
     sed -i '\|/usr/lib/proxypool/lease.sh|d' /etc/crontabs/root 2>/dev/null
-    echo "*/5 * * * * /usr/lib/proxypool/watchdog.sh run" >> /etc/crontabs/root
+    echo "* * * * * /usr/lib/proxypool/watchdog.sh run" >> /etc/crontabs/root
     echo "*/5 * * * * /usr/lib/proxypool/lease.sh accrue" >> /etc/crontabs/root
     /etc/init.d/cron restart 2>/dev/null
 }
