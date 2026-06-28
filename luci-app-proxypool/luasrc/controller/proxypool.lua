@@ -796,6 +796,22 @@ function api_handler()
         http.prepare_content("application/json")
         http.write('{"success": true}')
 
+    elseif action == "syslog" then
+        -- 系统日志（logread）：含 xl2tpd/pppd 拨号细节，用于排查 L2TP 连不上。
+        -- filter 用固定白名单匹配（不接受用户输入拼接命令，避免注入）。
+        local lines = tonumber(http.formvalue("lines")) or 200
+        if lines > 1000 then lines = 1000 end
+        local filter = http.formvalue("filter") or "all"
+        local cmd
+        if filter == "l2tp" then
+            cmd = "logread 2>/dev/null | grep -iE 'l2tp|pppd|ppp[0-9]|chap| pap|lcp|ipcp|xl2tpd|peer' | tail -n " .. lines
+        else
+            cmd = "logread 2>/dev/null | tail -n " .. lines
+        end
+        local result = sys.exec(cmd)
+        http.prepare_content("text/plain; charset=utf-8")
+        http.write((result and result ~= "") and result or "暂无系统日志")
+
     elseif action == "batch_import" then
         -- 批量导入：接收 JSON 数组，逐条写入 UCI，单次 commit
         -- 导入后自动逐个启动已启用的客户端（后台，与手动点"连接"体验一致）

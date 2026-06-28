@@ -88,7 +88,7 @@ max redials = 3
 require chap = yes
 require pap = no
 require authentication = no
-ppp debug = no
+ppp debug = yes
 name = ${username}
 autodial = no
 length bit = yes
@@ -118,6 +118,7 @@ name ${username}
 ifname ppp-${client}
 unit ${unit_num}
 
+debug
 noauth
 refuse-eap
 nodeflate

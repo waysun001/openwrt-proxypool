@@ -242,6 +242,11 @@
     <div id="panel-log" class="pp-panel">
         <div class="pp-toolbar" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
             <button class="pp-btn pp-btn-secondary" onclick="switchTab('clients')">返回客户端</button>
+            <select id="log-source" onchange="refreshLog()">
+                <option value="app">应用日志</option>
+                <option value="sys_l2tp">系统日志·L2TP</option>
+                <option value="sys_all">系统日志·全部</option>
+            </select>
             <select id="log-lines" onchange="refreshLog()">
                 <option value="50">50行</option>
                 <option value="100">100行</option>
@@ -1274,7 +1279,16 @@ function reloadConfig() {
 var _logRawText = '';
 function refreshLog() {
     var lines = document.getElementById('log-lines').value;
-    fetch(apiUrl + '?action=log&lines=' + lines)
+    var source = document.getElementById('log-source') ? document.getElementById('log-source').value : 'app';
+    var url;
+    if (source === 'sys_l2tp') {
+        url = apiUrl + '?action=syslog&filter=l2tp&lines=' + lines;
+    } else if (source === 'sys_all') {
+        url = apiUrl + '?action=syslog&filter=all&lines=' + lines;
+    } else {
+        url = apiUrl + '?action=log&lines=' + lines;
+    }
+    fetch(url)
         .then(function(r) { return r.text(); })
         .then(function(text) {
             _logRawText = text || '';
