@@ -116,6 +116,9 @@ _stop_client_nofirewall() {
 # ============================================================
 
 # 探测单个客户端连通性（curl 实际请求百度，准确判断是否可上网）
+# 注意：L2TP 不在此即时探测。L2TP 拨通需数秒，连接瞬间探测必失败会把缓存写成
+# fail，导致状态误判"未连接"（需手动再点连接）。L2TP 已连接判定改为看 PPP 是否
+# 拿到 IP，隧道连通性由后台 watchdog.sh 定期 ping 网关检测并自动重连。
 _probe_client() {
     local client="$1"
     local type=$(get_config "$client" "type" "")
@@ -125,9 +128,6 @@ _probe_client() {
             ;;
         slp)
             "$SCRIPT_DIR/slp-manager.sh" probe "$client"
-            ;;
-        l2tp)
-            "$SCRIPT_DIR/l2tp-manager.sh" probe "$client"
             ;;
     esac
 }
@@ -142,7 +142,7 @@ start_client() {
     [ "$type" = "slp" ] && "$SCRIPT_DIR/dns-manager.sh" configure
     # 操作完成，清除 pending 状态文件
     rm -f "$RUN_DIR/pending/$client"
-    # 同步探测：API 返回时状态已准确
+    # 探测连通性（socks5/slp 用于状态显示；L2TP 已在 _probe_client 内跳过）
     _probe_client "$client"
 }
 

@@ -381,11 +381,11 @@ local function generate_status()
                     local ip_out = _read_cmd("ip -4 addr show " .. ppp_iface .. " 2>/dev/null")
                     ip_addr = ip_out and ip_out:match("inet (%d+%.%d+%.%d+%.%d+)") or ""
                     if ip_addr ~= "" then
-                        -- PPP 接口存活且有 IP，读探测缓存判断实际连通性
-                        local probe = _read_file(STATUS_RUN_DIR .. "/probe/" .. cid)
-                        if probe == "ok" then status = "connected"
-                        elseif probe then status = "disconnected"
-                        else status = "disconnected" end  -- 无缓存，保守显示 disconnected
+                        -- PPP 接口拿到 IP 即视为已连接（对齐 netifd ifstatus .up）。
+                        -- 不再要求即时 curl 探测 ok：L2TP 拨通需数秒，连接瞬间探测必失败
+                        -- 会把缓存写成 fail 导致误判"未连接"。隧道连通性由后台 watchdog
+                        -- 定期 ping 网关检测并自动重连。
+                        status = "connected"
                     else
                         status = "connecting"  -- 接口存在但无 IP（PPP 协商中）
                     end
@@ -645,11 +645,13 @@ function api_handler()
                     uci:delete("proxypool", client, "slp_insecure")
                 end
                 uci:commit("proxypool")
-                -- 保存后同步应用（所有类型统一走 shell 脚本，单一权威实现）
+                -- 保存后异步应用：立即返回，后台重启/停止（L2TP 拨号不阻塞请求）。
                 if d.enabled == "1" then
-                    os.execute("/usr/lib/proxypool/proxypool.sh save_restart_client " .. client .. " >/dev/null 2>&1")
+                    set_pending_op(client, "starting")
+                    os.execute("setsid /usr/lib/proxypool/proxypool.sh save_restart_client " .. client .. " >/dev/null 2>&1 &")
                 else
-                    os.execute("/usr/lib/proxypool/proxypool.sh stop_client " .. client .. " >/dev/null 2>&1")
+                    set_pending_op(client, "stopping")
+                    os.execute("setsid /usr/lib/proxypool/proxypool.sh stop_client " .. client .. " >/dev/null 2>&1 &")
                 end
                 http.prepare_content("application/json")
                 http.write('{"success": true}')
@@ -682,8 +684,9 @@ function api_handler()
         if client and enabled then
             uci:set("proxypool", client, "enabled", enabled == "1" and "1" or "0")
             uci:commit("proxypool")
-            -- 同步切换（所有类型统一，shell 脚本处理 start/stop + 增量防火墙）
-            os.execute("/usr/lib/proxypool/proxypool.sh toggle_client " .. client .. " >/dev/null 2>&1")
+            -- 异步切换：立即返回，后台 start/stop（不阻塞请求）。
+            set_pending_op(client, enabled == "1" and "starting" or "stopping")
+            os.execute("setsid /usr/lib/proxypool/proxypool.sh toggle_client " .. client .. " >/dev/null 2>&1 &")
             http.prepare_content("application/json")
             http.write('{"success": true}')
         else
@@ -694,8 +697,10 @@ function api_handler()
     elseif action == "start_client" then
         local client = sanitize_client(http.formvalue("client"))
         if client then
-            -- 同步启动（shell 脚本处理进程启动 + 增量防火墙 add_client）
-            os.execute("/usr/lib/proxypool/proxypool.sh start_client " .. client .. " >/dev/null 2>&1")
+            -- 异步启动：立即返回，后台拨号（L2TP 拨通需数秒，不再阻塞请求）。
+            -- 写 starting 标记，status API 在拨通前返回 connecting 过渡态。
+            set_pending_op(client, "starting")
+            os.execute("setsid /usr/lib/proxypool/proxypool.sh start_client " .. client .. " >/dev/null 2>&1 &")
             http.prepare_content("application/json")
             http.write('{"success": true}')
         else
@@ -706,8 +711,10 @@ function api_handler()
     elseif action == "stop_client" then
         local client = sanitize_client(http.formvalue("client"))
         if client then
-            -- 同步停止（shell 脚本处理 mark_stopping + 移除防火墙 + kill 进程）
-            os.execute("/usr/lib/proxypool/proxypool.sh stop_client " .. client .. " >/dev/null 2>&1")
+            -- 异步停止：立即返回，后台断开（不再阻塞请求）。
+            -- 写 stopping 标记，status API 在断开完成前返回 disconnecting 过渡态。
+            set_pending_op(client, "stopping")
+            os.execute("setsid /usr/lib/proxypool/proxypool.sh stop_client " .. client .. " >/dev/null 2>&1 &")
             http.prepare_content("application/json")
             http.write('{"success": true}')
         else
@@ -735,8 +742,9 @@ function api_handler()
     elseif action == "restart_client" then
         local client = sanitize_client(http.formvalue("client"))
         if client then
-            -- 同步重启（shell 脚本处理 stop + start + 增量防火墙）
-            os.execute("/usr/lib/proxypool/proxypool.sh restart_client " .. client .. " >/dev/null 2>&1")
+            -- 异步重启：立即返回，后台 stop + start（不阻塞请求）。
+            set_pending_op(client, "starting")
+            os.execute("setsid /usr/lib/proxypool/proxypool.sh restart_client " .. client .. " >/dev/null 2>&1 &")
             http.prepare_content("application/json")
             http.write('{"success": true}')
         else
@@ -840,8 +848,9 @@ function api_handler()
 
     elseif action == "batch_action" then
         -- 批量操作：enable/disable/delete/connect/disconnect
-        -- 启用/连接：后台逐个启动（和手动点"连接"一致，每个都有同步探测）
-        -- 停用/断开/删除：同步执行（停止操作速度快，无需后台）
+        -- 启用/连接：前端逐个调用 start_client（已改异步，秒回）
+        -- 停用/断开：异步执行 + 写 stopping 标记（避免串行 stop 阻塞 10+ 秒）
+        -- 删除：同步执行（需停完再删 UCI，避免竞态）
         local batch_action = http.formvalue("batch_action") or ""
         local raw_clients = http.formvalue("clients")
         if raw_clients then
@@ -867,9 +876,10 @@ function api_handler()
                 elseif batch_action == "disable" then
                     for _, clean in ipairs(clean_ids) do
                         uci:set("proxypool", clean, "enabled", "0")
+                        set_pending_op(clean, "stopping")
                     end
                     uci:commit("proxypool")
-                    os.execute("/usr/lib/proxypool/proxypool.sh batch_disable " .. id_str .. " >/dev/null 2>&1")
+                    os.execute("setsid /usr/lib/proxypool/proxypool.sh batch_disable " .. id_str .. " >/dev/null 2>&1 &")
                 elseif batch_action == "delete" then
                     for _, clean in ipairs(clean_ids) do
                         uci:delete("proxypool", clean)
@@ -879,7 +889,10 @@ function api_handler()
                 elseif batch_action == "connect" then
                     -- 前端逐个调用 start_client 启动（同步路径，此处无需操作）
                 elseif batch_action == "disconnect" then
-                    os.execute("/usr/lib/proxypool/proxypool.sh batch_disconnect " .. id_str .. " >/dev/null 2>&1")
+                    for _, clean in ipairs(clean_ids) do
+                        set_pending_op(clean, "stopping")
+                    end
+                    os.execute("setsid /usr/lib/proxypool/proxypool.sh batch_disconnect " .. id_str .. " >/dev/null 2>&1 &")
                 end
                 http.prepare_content("application/json")
                 http.write('{"success": true, "processed": ' .. processed .. '}')
