@@ -21,3 +21,6 @@ Thumbs.db
 # Backup files
 *.tar.gz
 *.backup
+
+# 参考资料（其他 openwrt 项目固件解包，仅本地参考，不纳入版本管理）
+docs/GL- AX1800 - v2/
