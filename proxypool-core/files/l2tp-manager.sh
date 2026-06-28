@@ -123,6 +123,7 @@ ifname ppp-${client}
 unit ${unit_num}
 
 debug
+logfile /var/log/proxypool.log
 noauth
 nodeflate
 nobsdcomp
