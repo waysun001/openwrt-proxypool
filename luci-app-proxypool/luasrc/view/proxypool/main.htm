@@ -1141,19 +1141,15 @@ function startClient(id) {
         });
 }
 
-/* 逐个连接：前端驱动，每个客户端走同步 start_client（与手动点连接完全一致）
-   action 可选 'restart_client'：先停后启（stop→sleep→start），用于批量导入。
-   L2TP 新建线路若仅 start 而不先清理，隧道会建立失败，需 stop+start 才能连上，
-   与单条添加走 save_restart_client 的行为保持一致。*/
+/* 逐个连接：前端驱动，每个客户端走同步 start_client（与手动点连接完全一致）*/
 var _seqConnecting = false;
 var _seqConnectAbort = false;
-function sequentialConnect(ids, doneCallback, action) {
+function sequentialConnect(ids, doneCallback) {
     if (_seqConnecting) return;
     if (!ids || ids.length === 0) {
         if (doneCallback) doneCallback();
         return;
     }
-    action = action || 'start_client';
     _seqConnecting = true;
     _seqConnectAbort = false;
     var total = ids.length;
@@ -1170,7 +1166,7 @@ function sequentialConnect(ids, doneCallback, action) {
         setPendingState(id, 'connect', '连接中 (' + idx + '/' + total + ')');
         renderClients();
 
-        fetch(apiUrl + '?action=' + action + '&client=' + id)
+        fetch(apiUrl + '?action=start_client&client=' + id)
             .then(function() {
                 clearPendingState(id);
                 refreshStatusFull();
@@ -1690,9 +1686,9 @@ function batchConfirmImport() {
         if (result.success) {
             closeBatchModal();
             refreshStatusFull();
-            // 逐个启动已启用的客户端：用 restart_client（先停后启）确保 L2TP 新建线路能连上
+            // 逐个启动已启用的客户端（与手动点连接一致的同步路径）
             if (result.auto_start_ids && result.auto_start_ids.length > 0) {
-                sequentialConnect(result.auto_start_ids, null, 'restart_client');
+                sequentialConnect(result.auto_start_ids);
             }
         } else {
             alert('导入失败: ' + (result.error || '未知错误'));
