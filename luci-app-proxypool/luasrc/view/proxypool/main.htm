@@ -157,6 +157,7 @@
                 <button class="pp-btn pp-btn-success" onclick="reloadConfig()">应用配置</button>
                 <button class="pp-btn pp-btn-secondary" onclick="refreshStatus()">刷新状态</button>
                 <button class="pp-btn pp-btn-secondary" onclick="showExportModal(getSelectedIds())">导出</button>
+                <button class="pp-btn pp-btn-secondary" onclick="switchTab('log')">日志</button>
                 <label style="display:flex;align-items:center;gap:5px;font-size:13px;">
                     <span>内网租约:</span>
                     <select id="dhcp-lease-select" onchange="saveDhcpLease()" style="padding:4px 8px;border:1px solid #ddd;border-radius:4px;font-size:13px;">
@@ -239,13 +240,16 @@
     </div>
 
     <div id="panel-log" class="pp-panel">
-        <div class="pp-toolbar">
+        <div class="pp-toolbar" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <button class="pp-btn pp-btn-secondary" onclick="switchTab('clients')">返回客户端</button>
             <select id="log-lines" onchange="refreshLog()">
                 <option value="50">50行</option>
-                <option value="100" selected>100行</option>
+                <option value="100">100行</option>
                 <option value="200">200行</option>
-                <option value="500">500行</option>
+                <option value="500" selected>500行</option>
             </select>
+            <input type="text" id="log-filter" placeholder="关键词过滤（如 ERROR、l2tp、s1、forcing）" oninput="applyLogFilter()"
+                   style="flex:1;min-width:200px;padding:5px 8px;border:1px solid #dadce0;border-radius:4px;font-size:13px;">
             <button class="pp-btn pp-btn-secondary" onclick="refreshLog()">刷新</button>
             <button class="pp-btn pp-btn-danger" onclick="clearLog()">清空日志</button>
         </div>
@@ -1267,15 +1271,32 @@ function reloadConfig() {
         .catch(function(e) { console.error('Reload error:', e); });
 }
 
+var _logRawText = '';
 function refreshLog() {
     var lines = document.getElementById('log-lines').value;
     fetch(apiUrl + '?action=log&lines=' + lines)
         .then(function(r) { return r.text(); })
         .then(function(text) {
-            document.getElementById('log-content').textContent = text || '暂无日志';
-            document.getElementById('log-content').scrollTop = document.getElementById('log-content').scrollHeight;
+            _logRawText = text || '';
+            applyLogFilter();
         })
         .catch(function(e) { console.error('Log fetch error:', e); });
+}
+
+/* 关键词过滤：仅在缓存的日志文本上做行筛选，不重新请求 */
+function applyLogFilter() {
+    var el = document.getElementById('log-content');
+    var kw = (document.getElementById('log-filter').value || '').trim().toLowerCase();
+    var text = _logRawText;
+    if (!text) { el.textContent = '暂无日志'; return; }
+    if (kw) {
+        text = text.split('\n').filter(function(l) {
+            return l.toLowerCase().indexOf(kw) !== -1;
+        }).join('\n');
+        if (!text) text = '（没有匹配 "' + kw + '" 的日志行）';
+    }
+    el.textContent = text;
+    el.scrollTop = el.scrollHeight;
 }
 
 function clearLog() {
