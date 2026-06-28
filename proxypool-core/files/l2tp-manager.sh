@@ -111,16 +111,19 @@ generate_ppp_config() {
 
     local unit_num=$(get_client_num "$client")
 
+    # 账号用内联 user/password（对齐参考版 netifd l2tp）：密码对 PAP 和 CHAP 都
+    # 生效。原来只写 name + chap-secrets，服务器若用 PAP 会查不到密码导致认证失败、
+    # PPP 起不来。去掉 refuse-eap，让 pppd 自动协商认证方式。
     cat > "$ppp_file" << EOF
 # 智联盒子 L2TP Client: $client
-name ${username}
+user "${username}"
+password "${password}"
 
 ifname ppp-${client}
 unit ${unit_num}
 
 debug
 noauth
-refuse-eap
 nodeflate
 nobsdcomp
 nopcomp
