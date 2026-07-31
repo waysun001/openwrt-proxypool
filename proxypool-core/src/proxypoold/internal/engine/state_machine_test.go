@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"proxypoold/internal/model"
+	"proxypoold/internal/platform"
 )
 
 var stateTestEpoch = time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
@@ -53,7 +54,7 @@ func TestMachineLegalTransitionsExerciseEveryState(t *testing.T) {
 		if err != nil {
 			t.Fatalf("step %d (%s): Apply() error = %v", index, step.kind, err)
 		}
-		if step.kind == EventRecover || step.kind == EventManualReconnect || step.kind == EventStop {
+		if step.kind == EventRecover || step.kind == EventRecovered || step.kind == EventManualReconnect || step.kind == EventStop {
 			generation++
 		}
 		if status.State != step.want {
@@ -107,8 +108,22 @@ func TestMachineDropsStaleCompletionWithoutChangingNewGeneration(t *testing.T) {
 	}
 }
 
+func TestMachineAcceptsCurrentOperationCompletionAfterWallClockMovesBackward(t *testing.T) {
+	machine := NewMachine(NewRetryPolicy(rand.NewSource(16)))
+	applyMachineEvent(t, machine, "node-a", 1, EventEnable, nil, stateTestEpoch.Add(time.Hour))
+	applyMachineEvent(t, machine, "node-a", 1, EventStart, nil, stateTestEpoch.Add(time.Hour+time.Second))
+
+	status := applyMachineEvent(t, machine, "node-a", 1, EventStarted, nil, stateTestEpoch.Add(-time.Hour))
+	if status.State != model.StateValidating {
+		t.Fatalf("state = %q, want %q despite wall-clock correction", status.State, model.StateValidating)
+	}
+	if !status.UpdatedAt.Equal(stateTestEpoch.Add(-time.Hour)) {
+		t.Fatalf("UpdatedAt = %v, want observation timestamp retained for display", status.UpdatedAt)
+	}
+}
+
 func TestMachinePermanentFailureEntersFailedWithoutRetry(t *testing.T) {
-	for _, code := range []string{ErrorCodeAuthentication, ErrorCodeInvalidConfig, ErrorCodeUnsupportedOption} {
+	for _, code := range []string{ErrorCodeAuthentication, ErrorCodeInvalidConfig, ErrorCodeUnsupported} {
 		t.Run(code, func(t *testing.T) {
 			machine := NewMachine(NewRetryPolicy(rand.NewSource(3)))
 			applyMachineEvent(t, machine, "node-a", 1, EventEnable, nil, stateTestEpoch)
@@ -129,17 +144,18 @@ func TestMachinePermanentFailureEntersFailedWithoutRetry(t *testing.T) {
 }
 
 func TestMachineTimeoutEntersBackoff(t *testing.T) {
-	machine := NewMachine(NewRetryPolicy(zeroSource{}))
+	timedOutAt := stateTestEpoch.Add(2 * time.Second)
+	clock := &manualClock{wall: timedOutAt}
+	machine := NewMachine(NewRetryPolicy(zeroSource{}), WithClock(clock))
 	applyMachineEvent(t, machine, "node-a", 1, EventEnable, nil, stateTestEpoch)
 	applyMachineEvent(t, machine, "node-a", 1, EventStart, nil, stateTestEpoch.Add(time.Second))
-	timedOutAt := stateTestEpoch.Add(2 * time.Second)
 
 	status := applyMachineEvent(t, machine, "node-a", 1, EventTimeout, nil, timedOutAt)
 	if status.State != model.StateBackoff {
 		t.Fatalf("state = %q, want %q", status.State, model.StateBackoff)
 	}
-	if status.LastError == nil || status.LastError.Code != ErrorCodeTimeout {
-		t.Fatalf("LastError = %#v, want timeout", status.LastError)
+	if status.LastError == nil || status.LastError.Code != ErrorCodeConnectTimeout {
+		t.Fatalf("LastError = %#v, want connect_timeout", status.LastError)
 	}
 	if want := timedOutAt.Add(4 * time.Second); !status.RetryAt.Equal(want) {
 		t.Fatalf("RetryAt = %v, want %v", status.RetryAt, want)
@@ -172,6 +188,27 @@ func TestMachineWANDownWaitsForWANEvent(t *testing.T) {
 	}
 }
 
+func TestMachineRetryDueUsesMonotonicClockInsteadOfEventTimestamp(t *testing.T) {
+	clock := &manualClock{wall: stateTestEpoch}
+	machine := NewMachine(NewRetryPolicy(zeroSource{}), WithClock(clock))
+	applyMachineEvent(t, machine, "node-a", 1, EventEnable, nil, stateTestEpoch)
+	applyMachineEvent(t, machine, "node-a", 1, EventStart, nil, stateTestEpoch.Add(time.Second))
+	before := applyMachineEvent(t, machine, "node-a", 1, EventTimeout, nil, stateTestEpoch.Add(2*time.Second))
+
+	_, err := machine.Apply(Event{NodeID: "node-a", JobID: "job-a", Generation: 1, Kind: EventRetryDue, At: stateTestEpoch.Add(24 * time.Hour)})
+	assertInternalError(t, err)
+	afterEarly, _ := machine.Status("node-a")
+	if !reflect.DeepEqual(afterEarly, before) {
+		t.Fatal("forward wall-clock jump released retry before monotonic delay")
+	}
+
+	clock.advance(4 * time.Second)
+	status := applyMachineEvent(t, machine, "node-a", 1, EventRetryDue, nil, stateTestEpoch.Add(-24*time.Hour))
+	if status.State != model.StateQueued || status.Generation != 2 {
+		t.Fatalf("status = %#v, want queued generation 2 after monotonic delay", status)
+	}
+}
+
 func TestMachineManualReconnectCreatesNewGeneration(t *testing.T) {
 	machine := NewMachine(NewRetryPolicy(rand.NewSource(5)))
 	applyMachineEvent(t, machine, "node-a", 41, EventEnable, nil, stateTestEpoch)
@@ -200,10 +237,12 @@ func TestMachineManualReconnectRejectsGenerationOverflowWithoutMutation(t *testi
 }
 
 func TestMachineStableOnlineResetsConsecutiveAttempts(t *testing.T) {
-	machine := NewMachine(NewRetryPolicy(zeroSource{}), WithStableOnlineWindow(30*time.Second))
+	clock := &manualClock{wall: stateTestEpoch}
+	machine := NewMachine(NewRetryPolicy(zeroSource{}), WithClock(clock), WithStableOnlineWindow(30*time.Second))
 	applyMachineEvent(t, machine, "node-a", 1, EventEnable, nil, stateTestEpoch)
 	applyMachineEvent(t, machine, "node-a", 1, EventStart, nil, stateTestEpoch.Add(time.Second))
 	backoff := applyMachineEvent(t, machine, "node-a", 1, EventTimeout, nil, stateTestEpoch.Add(2*time.Second))
+	clock.advance(4 * time.Second)
 	retry := applyMachineEvent(t, machine, "node-a", 1, EventRetryDue, nil, backoff.RetryAt)
 	if retry.Generation != 2 {
 		t.Fatalf("automatic retry generation = %d, want 2", retry.Generation)
@@ -216,6 +255,7 @@ func TestMachineStableOnlineResetsConsecutiveAttempts(t *testing.T) {
 	}
 
 	beforeEarly := online
+	clock.advance(30*time.Second - time.Nanosecond)
 	_, err := machine.Apply(Event{NodeID: "node-a", JobID: "job-a", Generation: 2, Kind: EventStableOnline, At: backoff.RetryAt.Add(32 * time.Second)})
 	assertInternalError(t, err)
 	afterEarly, _ := machine.Status("node-a")
@@ -223,6 +263,7 @@ func TestMachineStableOnlineResetsConsecutiveAttempts(t *testing.T) {
 		t.Fatalf("premature stable event changed status:\n got: %#v\nwant: %#v", afterEarly, beforeEarly)
 	}
 
+	clock.advance(time.Nanosecond)
 	stable := applyMachineEvent(t, machine, "node-a", 2, EventStableOnline, nil, backoff.RetryAt.Add(33*time.Second))
 	if stable.Attempts != 0 {
 		t.Fatalf("Attempts after stable online = %d, want 0", stable.Attempts)
@@ -244,17 +285,188 @@ func TestMachineIllegalTransitionReturnsInternalAndDoesNotMutate(t *testing.T) {
 	}
 }
 
-func TestMachineStopTimeoutDoesNotScheduleReconnect(t *testing.T) {
+func TestMachineStopTimeoutEntersCleanupBarrierBeforeDisabled(t *testing.T) {
 	machine := NewMachine(NewRetryPolicy(zeroSource{}))
 	applyMachineEvent(t, machine, "node-a", 1, EventEnable, nil, stateTestEpoch)
 	applyMachineEvent(t, machine, "node-a", 1, EventStart, nil, stateTestEpoch.Add(time.Second))
-	before := applyMachineEvent(t, machine, "node-a", 1, EventStop, nil, stateTestEpoch.Add(2*time.Second))
+	stopping := applyMachineEvent(t, machine, "node-a", 1, EventStop, nil, stateTestEpoch.Add(2*time.Second))
 
-	_, err := machine.Apply(Event{NodeID: "node-a", JobID: "job-a", Generation: before.Generation, Kind: EventTimeout, At: stateTestEpoch.Add(3 * time.Second)})
+	barrier := applyMachineEvent(t, machine, "node-a", stopping.Generation, EventTimeout, nil, stateTestEpoch.Add(3*time.Second))
+	if barrier.State != model.StateRecovering || !barrier.CleanupPending || barrier.ReconnectPending {
+		t.Fatalf("stop timeout status = %#v, want cleanup-pending recovery", barrier)
+	}
+	if barrier.LastError == nil || barrier.LastError.Code != ErrorCodeStopTimeout || !barrier.RetryAt.IsZero() {
+		t.Fatalf("stop timeout error/retry = %#v/%v", barrier.LastError, barrier.RetryAt)
+	}
+	beforeStart := barrier
+	_, err := machine.Apply(Event{NodeID: "node-a", JobID: "job-a", Generation: barrier.Generation, Kind: EventStart, At: stateTestEpoch.Add(4 * time.Second)})
 	assertInternalError(t, err)
-	after, _ := machine.Status("node-a")
-	if !reflect.DeepEqual(after, before) {
-		t.Fatalf("stop timeout scheduled reconnect or changed state:\n got: %#v\nwant: %#v", after, before)
+	afterStart, _ := machine.Status("node-a")
+	if !reflect.DeepEqual(afterStart, beforeStart) {
+		t.Fatal("cleanup-pending barrier changed before acknowledgement")
+	}
+
+	disabled := applyMachineEvent(t, machine, "node-a", barrier.Generation, EventCleanupComplete, nil, stateTestEpoch.Add(5*time.Second))
+	if disabled.State != model.StateDisabled || disabled.CleanupPending || disabled.ReconnectPending {
+		t.Fatalf("cleanup completion status = %#v, want disabled with released barrier", disabled)
+	}
+}
+
+func TestMachineAdapterStopTimeoutCodeEntersCleanupBarrier(t *testing.T) {
+	machine := NewMachine(NewRetryPolicy(zeroSource{}))
+	applyMachineEvent(t, machine, "node-a", 1, EventEnable, nil, stateTestEpoch)
+	stopping := applyMachineEvent(t, machine, "node-a", 1, EventStop, nil, stateTestEpoch.Add(time.Second))
+	status := applyMachineEvent(t, machine, "node-a", stopping.Generation, EventFailure, &model.CodeError{Code: ErrorCodeStopTimeout, Message: "raw stop detail"}, stateTestEpoch.Add(2*time.Second))
+	if status.State != model.StateRecovering || !status.CleanupPending || status.LastError == nil || status.LastError.Code != ErrorCodeStopTimeout {
+		t.Fatalf("status = %#v, want stop-timeout cleanup barrier", status)
+	}
+}
+
+func TestMachineManualReconnectWaitsForActiveOperationCleanup(t *testing.T) {
+	machine := NewMachine(NewRetryPolicy(rand.NewSource(17)))
+	applyMachineEvent(t, machine, "node-a", 1, EventEnable, nil, stateTestEpoch)
+	applyMachineEvent(t, machine, "node-a", 1, EventStart, nil, stateTestEpoch.Add(time.Second))
+
+	stopping, err := machine.Apply(Event{NodeID: "node-a", JobID: "reconnect-job", Generation: 1, Kind: EventManualReconnect, At: stateTestEpoch.Add(2 * time.Second)})
+	if err != nil {
+		t.Fatalf("Apply(manual reconnect) error = %v", err)
+	}
+	if stopping.State != model.StateStopping || !stopping.ReconnectPending || stopping.Generation != 2 {
+		t.Fatalf("manual reconnect status = %#v, want stopping generation 2", stopping)
+	}
+	beforeStart := stopping
+	_, err = machine.Apply(Event{NodeID: "node-a", JobID: "reconnect-job", Generation: 2, Kind: EventStart, At: stateTestEpoch.Add(3 * time.Second)})
+	assertInternalError(t, err)
+	afterStart, _ := machine.Status("node-a")
+	if !reflect.DeepEqual(afterStart, beforeStart) {
+		t.Fatal("new start crossed active-operation cleanup barrier")
+	}
+
+	queued := applyMachineEventForJob(t, machine, "node-a", "reconnect-job", 2, EventStopped, nil, stateTestEpoch.Add(4*time.Second))
+	if queued.State != model.StateQueued || queued.Generation != 3 || queued.ReconnectPending || queued.CleanupPending {
+		t.Fatalf("stopped acknowledgement status = %#v, want queued generation 3", queued)
+	}
+	started := applyMachineEventForJob(t, machine, "node-a", "reconnect-job", 3, EventStart, nil, stateTestEpoch.Add(5*time.Second))
+	if started.State != model.StateStarting {
+		t.Fatalf("state after released barrier = %q, want starting", started.State)
+	}
+}
+
+func TestMachineManualReconnectDefersWhileRecovering(t *testing.T) {
+	machine := NewMachine(NewRetryPolicy(rand.NewSource(18)))
+	applyMachineEvent(t, machine, "node-a", 1, EventEnable, nil, stateTestEpoch)
+	applyMachineEvent(t, machine, "node-a", 1, EventStart, nil, stateTestEpoch.Add(time.Second))
+	applyMachineEvent(t, machine, "node-a", 1, EventStarted, nil, stateTestEpoch.Add(2*time.Second))
+	applyMachineEvent(t, machine, "node-a", 1, EventValidated, nil, stateTestEpoch.Add(3*time.Second))
+	recovering := applyMachineEvent(t, machine, "node-a", 1, EventRecover, nil, stateTestEpoch.Add(4*time.Second))
+
+	pending, err := machine.Apply(Event{NodeID: "node-a", JobID: "reconnect-job", Generation: recovering.Generation, Kind: EventManualReconnect, At: stateTestEpoch.Add(5 * time.Second)})
+	if err != nil {
+		t.Fatalf("Apply(manual reconnect during recovery) error = %v", err)
+	}
+	if pending.State != model.StateRecovering || !pending.ReconnectPending || pending.Generation != recovering.Generation {
+		t.Fatalf("pending status = %#v, want unchanged recovery generation with reconnect pending", pending)
+	}
+	_, err = machine.Apply(Event{NodeID: "node-a", JobID: "reconnect-job", Generation: pending.Generation, Kind: EventStart, At: stateTestEpoch.Add(6 * time.Second)})
+	assertInternalError(t, err)
+
+	queued := applyMachineEvent(t, machine, "node-a", recovering.Generation, EventRecovered, nil, stateTestEpoch.Add(7*time.Second))
+	if queued.State != model.StateQueued || queued.Generation != recovering.Generation+1 || queued.JobID != "reconnect-job" || queued.ReconnectPending {
+		t.Fatalf("recovery acknowledgement status = %#v, want deferred reconnect queued", queued)
+	}
+}
+
+func TestMachineManualReconnectDuringStopTimeoutWaitsForCleanupComplete(t *testing.T) {
+	machine := NewMachine(NewRetryPolicy(rand.NewSource(19)))
+	applyMachineEvent(t, machine, "node-a", 1, EventEnable, nil, stateTestEpoch)
+	applyMachineEvent(t, machine, "node-a", 1, EventStart, nil, stateTestEpoch.Add(time.Second))
+	stopping := applyMachineEvent(t, machine, "node-a", 1, EventStop, nil, stateTestEpoch.Add(2*time.Second))
+	barrier := applyMachineEvent(t, machine, "node-a", stopping.Generation, EventTimeout, nil, stateTestEpoch.Add(3*time.Second))
+
+	pending, err := machine.Apply(Event{NodeID: "node-a", JobID: "reconnect-job", Generation: barrier.Generation, Kind: EventManualReconnect, At: stateTestEpoch.Add(4 * time.Second)})
+	if err != nil {
+		t.Fatalf("Apply(manual reconnect during cleanup) error = %v", err)
+	}
+	if pending.State != model.StateRecovering || !pending.CleanupPending || !pending.ReconnectPending {
+		t.Fatalf("pending status = %#v, want cleanup and reconnect pending", pending)
+	}
+	queued := applyMachineEvent(t, machine, "node-a", barrier.Generation, EventCleanupComplete, nil, stateTestEpoch.Add(5*time.Second))
+	if queued.State != model.StateQueued || queued.Generation != barrier.Generation+1 || queued.JobID != "reconnect-job" || queued.CleanupPending || queued.ReconnectPending {
+		t.Fatalf("cleanup acknowledgement status = %#v, want deferred reconnect queued", queued)
+	}
+}
+
+func TestMachineStopDefersBehindEveryRecoveryBarrierSubstate(t *testing.T) {
+	tests := []struct {
+		name             string
+		cleanupPending   bool
+		reconnectPending bool
+	}{
+		{name: "ordinary recovery"},
+		{name: "ordinary recovery with reconnect", reconnectPending: true},
+		{name: "cleanup pending", cleanupPending: true},
+		{name: "cleanup and reconnect pending", cleanupPending: true, reconnectPending: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			machine := NewMachine(NewRetryPolicy(zeroSource{}))
+			var lastError *PublicError
+			if test.cleanupPending {
+				lastError = &PublicError{Code: ErrorCodeStopTimeout, Message: "stop timed out"}
+			}
+			pendingJobID := ""
+			if test.reconnectPending {
+				pendingJobID = "reconnect-job"
+			}
+			record := nodeRecord{
+				status: NodeStatus{
+					NodeID:           "node-a",
+					JobID:            "recovery-job",
+					Generation:       7,
+					State:            model.StateRecovering,
+					LastError:        lastError,
+					UpdatedAt:        stateTestEpoch,
+					CleanupPending:   test.cleanupPending,
+					ReconnectPending: test.reconnectPending,
+				},
+				pendingJobID:        pendingJobID,
+				resumeAfterRecovery: !test.cleanupPending,
+			}
+			machine.nodes["node-a"] = record
+
+			pendingStop, err := machine.Apply(Event{
+				NodeID: "node-a", JobID: "stop-job", Generation: 7,
+				Kind: EventStop, At: stateTestEpoch.Add(time.Second),
+			})
+			if err != nil {
+				t.Fatalf("Apply(stop during recovery) error = %v", err)
+			}
+			if pendingStop.State != model.StateRecovering || pendingStop.Generation != 7 ||
+				pendingStop.CleanupPending != test.cleanupPending || pendingStop.ReconnectPending {
+				t.Fatalf("pending stop status = %#v, want unchanged recovery ownership and reconnect cancelled", pendingStop)
+			}
+			stored := machine.nodes["node-a"]
+			if stored.pendingJobID != "stop-job" || stored.resumeAfterRecovery {
+				t.Fatalf("pending stop record = %#v, want stop intent behind recovery barrier", stored)
+			}
+
+			_, err = machine.Apply(Event{
+				NodeID: "node-a", JobID: "stop-job", Generation: 7,
+				Kind: EventStart, At: stateTestEpoch.Add(2 * time.Second),
+			})
+			assertInternalError(t, err)
+
+			releaseKind := EventRecovered
+			if test.cleanupPending {
+				releaseKind = EventCleanupComplete
+			}
+			disabled := applyMachineEventForJob(t, machine, "node-a", "recovery-job", 7, releaseKind, nil, stateTestEpoch.Add(3*time.Second))
+			if disabled.State != model.StateDisabled || disabled.Generation != 7 || disabled.JobID != "stop-job" ||
+				disabled.CleanupPending || disabled.ReconnectPending {
+				t.Fatalf("released stop status = %#v, want disabled without starting overlapping work", disabled)
+			}
+		})
 	}
 }
 
@@ -297,10 +509,10 @@ func TestMachineDoesNotExposeRawAdapterErrorMessage(t *testing.T) {
 		Code:    "dial_failed",
 		Message: "dial command contained password=super-secret and token=hidden",
 	}, stateTestEpoch.Add(2*time.Second))
-	if status.LastError == nil || status.LastError.Code != "dial_failed" {
-		t.Fatalf("LastError = %#v, want dial_failed", status.LastError)
+	if status.LastError == nil || status.LastError.Code != ErrorCodeInternal {
+		t.Fatalf("LastError = %#v, want normalized internal", status.LastError)
 	}
-	if status.LastError.Message != "node operation failed" {
+	if status.LastError.Message != "internal node error" {
 		t.Fatalf("public message = %q, want sanitized generic message", status.LastError.Message)
 	}
 }
@@ -366,30 +578,37 @@ func TestMachineRequiresJobIDWithoutCreatingStatus(t *testing.T) {
 }
 
 func TestMachineDefaultStableOnlineWindowIsFiveMinutes(t *testing.T) {
-	machine := NewMachine(NewRetryPolicy(rand.NewSource(14)))
+	clock := &manualClock{wall: stateTestEpoch}
+	machine := NewMachine(NewRetryPolicy(rand.NewSource(14)), WithClock(clock))
 	applyMachineEvent(t, machine, "node-a", 1, EventEnable, nil, stateTestEpoch)
 	applyMachineEvent(t, machine, "node-a", 1, EventStart, nil, stateTestEpoch.Add(time.Second))
 	applyMachineEvent(t, machine, "node-a", 1, EventStarted, nil, stateTestEpoch.Add(2*time.Second))
 	onlineAt := stateTestEpoch.Add(3 * time.Second)
 	before := applyMachineEvent(t, machine, "node-a", 1, EventValidated, nil, onlineAt)
 
-	_, err := machine.Apply(Event{NodeID: "node-a", JobID: "job-a", Generation: 1, Kind: EventStableOnline, At: onlineAt.Add(5*time.Minute - time.Nanosecond)})
+	clock.advance(5*time.Minute - time.Nanosecond)
+	clock.wall = onlineAt.Add(24 * time.Hour)
+	_, err := machine.Apply(Event{NodeID: "node-a", JobID: "job-a", Generation: 1, Kind: EventStableOnline, At: clock.wall})
 	assertInternalError(t, err)
 	afterEarly, _ := machine.Status("node-a")
 	if !reflect.DeepEqual(afterEarly, before) {
 		t.Fatal("premature default stable event changed status")
 	}
-	status := applyMachineEvent(t, machine, "node-a", 1, EventStableOnline, nil, onlineAt.Add(5*time.Minute))
+	clock.advance(time.Nanosecond)
+	clock.wall = onlineAt.Add(-24 * time.Hour)
+	status := applyMachineEvent(t, machine, "node-a", 1, EventStableOnline, nil, clock.wall)
 	if status.Attempts != 0 {
 		t.Fatalf("Attempts = %d, want reset at default five-minute window", status.Attempts)
 	}
 }
 
 func TestMachineAutomaticRetryRejectsGenerationOverflowWithoutMutation(t *testing.T) {
-	machine := NewMachine(NewRetryPolicy(zeroSource{}))
+	clock := &manualClock{wall: stateTestEpoch}
+	machine := NewMachine(NewRetryPolicy(zeroSource{}), WithClock(clock))
 	applyMachineEvent(t, machine, "node-a", math.MaxUint64, EventEnable, nil, stateTestEpoch)
 	applyMachineEvent(t, machine, "node-a", math.MaxUint64, EventStart, nil, stateTestEpoch.Add(time.Second))
 	before := applyMachineEvent(t, machine, "node-a", math.MaxUint64, EventTimeout, nil, stateTestEpoch.Add(2*time.Second))
+	clock.advance(4 * time.Second)
 
 	_, err := machine.Apply(Event{NodeID: "node-a", JobID: "job-a", Generation: math.MaxUint64, Kind: EventRetryDue, At: before.RetryAt})
 	assertInternalError(t, err)
@@ -415,9 +634,70 @@ func TestMachineAttemptsSaturate(t *testing.T) {
 	}
 }
 
+func TestMachineRejectsEveryUnlistedStateEventPairWithoutMutatingRecord(t *testing.T) {
+	eventKinds := []EventKind{
+		EventEnable, EventStart, EventStarted, EventValidated, EventDegraded, EventHealthy,
+		EventStop, EventStopped, EventFailure, EventTimeout, EventRetryDue, EventWANAvailable,
+		EventRecover, EventRecovered, EventCleanupComplete, EventManualReconnect, EventStableOnline,
+	}
+	allowed := map[model.RuntimeState]map[EventKind]bool{
+		model.StateDisabled:   {},
+		model.StateQueued:     {EventStart: true, EventStop: true, EventManualReconnect: true},
+		model.StateStarting:   {EventStarted: true, EventStop: true, EventFailure: true, EventTimeout: true, EventRecover: true, EventManualReconnect: true},
+		model.StateValidating: {EventValidated: true, EventStop: true, EventFailure: true, EventTimeout: true, EventRecover: true, EventManualReconnect: true},
+		model.StateOnline:     {EventDegraded: true, EventStop: true, EventFailure: true, EventTimeout: true, EventRecover: true, EventManualReconnect: true, EventStableOnline: true},
+		model.StateDegraded:   {EventHealthy: true, EventStop: true, EventFailure: true, EventTimeout: true, EventRecover: true, EventManualReconnect: true},
+		model.StateStopping:   {EventStopped: true, EventFailure: true, EventTimeout: true, EventManualReconnect: true},
+		model.StateFailed:     {EventStop: true, EventRecover: true, EventManualReconnect: true},
+		model.StateBackoff:    {EventStop: true, EventRetryDue: true, EventWANAvailable: true, EventRecover: true, EventManualReconnect: true},
+		model.StateRecovering: {EventStop: true, EventFailure: true, EventTimeout: true, EventRecovered: true, EventCleanupComplete: true, EventManualReconnect: true},
+	}
+
+	for state, allowedEvents := range allowed {
+		state := state
+		for _, kind := range eventKinds {
+			kind := kind
+			if allowedEvents[kind] {
+				continue
+			}
+			t.Run(string(state)+"/"+string(kind), func(t *testing.T) {
+				clock := &manualClock{wall: stateTestEpoch, monotonic: 10 * time.Minute}
+				machine := NewMachine(NewRetryPolicy(zeroSource{}), WithClock(clock))
+				record := nodeRecord{
+					status: NodeStatus{
+						NodeID: "node-a", JobID: "job-a", Generation: 7, State: state, Attempts: 3,
+						LastError: &PublicError{Code: ErrorCodeInternal, Message: "internal node error"},
+						RetryAt:   stateTestEpoch.Add(time.Minute), UpdatedAt: stateTestEpoch,
+					},
+					onlineSinceElapsed:  time.Minute,
+					onlineSinceSet:      state == model.StateOnline,
+					retryReadyElapsed:   2 * time.Minute,
+					retryReadySet:       state == model.StateBackoff,
+					resumeAfterRecovery: state == model.StateRecovering,
+				}
+				machine.nodes["node-a"] = record
+				before := cloneNodeRecord(record)
+				_, err := machine.Apply(Event{
+					NodeID: "node-a", JobID: "job-a", Generation: 7, Kind: kind,
+					Err: &model.CodeError{Code: "temporary", Message: "raw detail"}, At: stateTestEpoch.Add(time.Hour),
+				})
+				assertInternalError(t, err)
+				if after := machine.nodes["node-a"]; !reflect.DeepEqual(after, before) {
+					t.Fatalf("unlisted transition changed complete record:\n got: %#v\nwant: %#v", after, before)
+				}
+			})
+		}
+	}
+}
+
 func applyMachineEvent(t *testing.T, machine *Machine, nodeID string, generation uint64, kind EventKind, codeErr *model.CodeError, at time.Time) NodeStatus {
 	t.Helper()
-	status, err := machine.Apply(Event{NodeID: nodeID, JobID: "job-a", Generation: generation, Kind: kind, Err: codeErr, At: at})
+	return applyMachineEventForJob(t, machine, nodeID, "job-a", generation, kind, codeErr, at)
+}
+
+func applyMachineEventForJob(t *testing.T, machine *Machine, nodeID, jobID string, generation uint64, kind EventKind, codeErr *model.CodeError, at time.Time) NodeStatus {
+	t.Helper()
+	status, err := machine.Apply(Event{NodeID: nodeID, JobID: jobID, Generation: generation, Kind: kind, Err: codeErr, At: at})
 	if err != nil {
 		t.Fatalf("Apply(%s) error = %v", kind, err)
 	}
@@ -434,3 +714,26 @@ func assertInternalError(t *testing.T, err error) {
 		t.Fatalf("error = %#v, want CodeError code %q", err, ErrorCodeInternal)
 	}
 }
+
+type manualClock struct {
+	wall      time.Time
+	monotonic time.Duration
+}
+
+func (clock *manualClock) Now() time.Time { return clock.wall }
+
+func (clock *manualClock) Monotonic() time.Duration { return clock.monotonic }
+
+func (clock *manualClock) NewTimer(time.Duration) platform.Timer {
+	return manualTimer{channel: make(chan time.Time)}
+}
+
+func (clock *manualClock) advance(delta time.Duration) { clock.monotonic += delta }
+
+type manualTimer struct {
+	channel <-chan time.Time
+}
+
+func (timer manualTimer) C() <-chan time.Time { return timer.channel }
+
+func (manualTimer) Stop() bool { return true }

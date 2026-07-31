@@ -1,7 +1,10 @@
 package engine
 
 import (
+	"fmt"
+	"io"
 	"math"
+	"reflect"
 	"sync"
 	"time"
 
@@ -41,6 +44,16 @@ type Job struct {
 	Nodes          []NodeProgress `json:"nodes,omitempty"`
 }
 
+func (job Job) String() string {
+	return fmt.Sprintf("engine.Job{ID:%q Kind:%q State:%q Total:%d Queued:%d Running:%d Succeeded:%d Failed:%d Nodes:<redacted>}", job.ID, job.Kind, job.State, job.Total, job.Queued, job.Running, job.Succeeded, job.Failed)
+}
+
+func (job Job) GoString() string { return job.String() }
+
+func (job Job) Format(state fmt.State, verb rune) {
+	_, _ = io.WriteString(state, job.String())
+}
+
 type NodeProgress struct {
 	NodeID   string             `json:"node_id"`
 	Step     string             `json:"step"`
@@ -48,6 +61,16 @@ type NodeProgress struct {
 	Attempt  uint64             `json:"attempt"`
 	Deadline time.Time          `json:"deadline,omitempty"`
 	Error    *PublicError       `json:"error,omitempty"`
+}
+
+func (progress NodeProgress) String() string {
+	return fmt.Sprintf("engine.NodeProgress{NodeID:%q State:%q Attempt:%d Error:%s}", progress.NodeID, progress.State, progress.Attempt, publicErrorString(progress.Error))
+}
+
+func (progress NodeProgress) GoString() string { return progress.String() }
+
+func (progress NodeProgress) Format(state fmt.State, verb rune) {
+	_, _ = io.WriteString(state, progress.String())
 }
 
 type NodeEvent struct {
@@ -59,6 +82,16 @@ type NodeEvent struct {
 	Attempt    uint64             `json:"attempt"`
 	At         time.Time          `json:"at"`
 	Error      *PublicError       `json:"error,omitempty"`
+}
+
+func (event NodeEvent) String() string {
+	return fmt.Sprintf("engine.NodeEvent{Sequence:%d JobID:%q NodeID:%q Generation:%d State:%q Attempt:%d Error:%s At:%q}", event.Sequence, event.JobID, event.NodeID, event.Generation, event.State, event.Attempt, publicErrorString(event.Error), event.At.Format(time.RFC3339Nano))
+}
+
+func (event NodeEvent) GoString() string { return event.String() }
+
+func (event NodeEvent) Format(state fmt.State, verb rune) {
+	_, _ = io.WriteString(state, event.String())
 }
 
 type JobStore struct {
@@ -73,12 +106,13 @@ func NewJobStore() *JobStore {
 	return &JobStore{jobs: make(map[string]Job)}
 }
 
-// Put inserts or replaces a job. Updating an existing job does not change its
-// creation order. When full, only the oldest terminal job may be evicted;
-// active work is never silently discarded.
+// Put inserts a job or advances an existing job through a legal monotonic
+// update. Updating an existing job does not change its creation order. When
+// full, only the oldest terminal job may be evicted; active work is never
+// silently discarded.
 func (s *JobStore) Put(job Job) error {
 	if !validJob(job) {
-		return codeError(ErrorCodeInvalidJob, "job is invalid")
+		return codeError(ErrorCodeInvalidConfig, "job is invalid")
 	}
 	job = cloneJob(job)
 
@@ -87,7 +121,13 @@ func (s *JobStore) Put(job Job) error {
 	if s.jobs == nil {
 		s.jobs = make(map[string]Job)
 	}
-	if _, exists := s.jobs[job.ID]; exists {
+	if current, exists := s.jobs[job.ID]; exists {
+		if !sameJobIdentity(current, job) {
+			return codeError(ErrorCodeDuplicate, "job ID is already used by different work")
+		}
+		if !legalJobUpdate(current, job) {
+			return codeError(ErrorCodeRevisionConflict, "job update conflicts with retained progress")
+		}
 		s.jobs[job.ID] = job
 		return nil
 	}
@@ -134,7 +174,7 @@ func (s *JobStore) List() []Job {
 
 func (s *JobStore) AppendEvent(event NodeEvent) (NodeEvent, error) {
 	if event.JobID == "" || event.NodeID == "" || event.Generation == 0 || event.At.IsZero() || !validRuntimeState(event.State) {
-		return NodeEvent{}, codeError(ErrorCodeInvalidJob, "node event is invalid")
+		return NodeEvent{}, codeError(ErrorCodeInvalidConfig, "node event is invalid")
 	}
 	event = cloneNodeEvent(event)
 
@@ -172,12 +212,188 @@ func validJob(job Job) bool {
 	if job.Total < 0 || job.Queued < 0 || job.Running < 0 || job.Succeeded < 0 || job.Failed < 0 {
 		return false
 	}
+	if job.Queued > job.Total || job.Running > job.Total || job.Succeeded > job.Total || job.Failed > job.Total {
+		return false
+	}
+	if job.Queued+job.Running+job.Succeeded+job.Failed != job.Total || len(job.Nodes) != job.Total {
+		return false
+	}
+	derivedQueued, derivedRunning, derivedSucceeded, derivedFailed := 0, 0, 0, 0
+	seenNodes := make(map[string]struct{}, len(job.Nodes))
+	for _, node := range job.Nodes {
+		if node.NodeID == "" || node.Step == "" || !validRuntimeState(node.State) {
+			return false
+		}
+		if _, exists := seenNodes[node.NodeID]; exists {
+			return false
+		}
+		seenNodes[node.NodeID] = struct{}{}
+		switch nodeJobBucket(node.State) {
+		case jobBucketQueued:
+			derivedQueued++
+		case jobBucketRunning:
+			derivedRunning++
+		case jobBucketSucceeded:
+			derivedSucceeded++
+		case jobBucketFailed:
+			if node.Error == nil {
+				return false
+			}
+			derivedFailed++
+		default:
+			return false
+		}
+	}
+	if job.Queued != derivedQueued || job.Running != derivedRunning || job.Succeeded != derivedSucceeded || job.Failed != derivedFailed {
+		return false
+	}
 	switch job.State {
-	case JobQueued, JobRunning, JobSucceeded, JobFailed, JobCancelled, JobReplaced:
-		return true
+	case JobQueued:
+		return job.Total > 0 && job.Queued == job.Total && !job.Cancelled && job.ReplacedBy == ""
+	case JobRunning:
+		return job.Queued+job.Running > 0 && !job.Cancelled && job.ReplacedBy == ""
+	case JobSucceeded:
+		return job.Succeeded == job.Total && job.Queued == 0 && job.Running == 0 && job.Failed == 0 && !job.Cancelled && job.ReplacedBy == ""
+	case JobFailed:
+		return job.Total > 0 && job.Failed > 0 && job.Queued == 0 && job.Running == 0 && job.Succeeded+job.Failed == job.Total && !job.Cancelled && job.ReplacedBy == ""
+	case JobCancelled:
+		return job.Cancelled && job.ReplacedBy == "" && job.Queued == 0 && job.Running == 0
+	case JobReplaced:
+		return job.Cancelled && job.ReplacedBy != "" && job.ReplacedBy != job.ID && job.Queued == 0 && job.Running == 0
 	default:
 		return false
 	}
+}
+
+type jobBucket uint8
+
+const (
+	jobBucketInvalid jobBucket = iota
+	jobBucketQueued
+	jobBucketRunning
+	jobBucketSucceeded
+	jobBucketFailed
+)
+
+func nodeJobBucket(state model.RuntimeState) jobBucket {
+	switch state {
+	case model.StateQueued, model.StateBackoff:
+		return jobBucketQueued
+	case model.StateStarting, model.StateValidating, model.StateStopping, model.StateRecovering:
+		return jobBucketRunning
+	case model.StateOnline, model.StateDisabled:
+		return jobBucketSucceeded
+	case model.StateDegraded, model.StateFailed:
+		return jobBucketFailed
+	default:
+		return jobBucketInvalid
+	}
+}
+
+func sameJobIdentity(current, candidate Job) bool {
+	if current.ID != candidate.ID || current.Kind != candidate.Kind || current.Creator != candidate.Creator ||
+		!current.CreatedAt.Equal(candidate.CreatedAt) || current.ConfigRevision != candidate.ConfigRevision ||
+		current.Total != candidate.Total || len(current.Nodes) != len(candidate.Nodes) {
+		return false
+	}
+	for index := range current.Nodes {
+		if current.Nodes[index].NodeID != candidate.Nodes[index].NodeID {
+			return false
+		}
+	}
+	return true
+}
+
+func legalJobUpdate(current, candidate Job) bool {
+	if isTerminalJob(current.State) {
+		return reflect.DeepEqual(current, candidate)
+	}
+	if candidate.Succeeded < current.Succeeded || candidate.Failed < current.Failed || !legalJobStateTransition(current.State, candidate.State) {
+		return false
+	}
+	for index := range current.Nodes {
+		oldNode := current.Nodes[index]
+		newNode := candidate.Nodes[index]
+		if !legalNodeProgressUpdate(oldNode, newNode) {
+			return false
+		}
+	}
+	return true
+}
+
+func legalNodeProgressUpdate(current, candidate NodeProgress) bool {
+	if current.NodeID != candidate.NodeID || candidate.Attempt < current.Attempt {
+		return false
+	}
+	currentBucket := nodeJobBucket(current.State)
+	if currentBucket == jobBucketSucceeded || currentBucket == jobBucketFailed {
+		// Once this job has recorded a node outcome, the complete evidence for
+		// that outcome is immutable, not merely its runtime-state label.
+		return reflect.DeepEqual(current, candidate)
+	}
+	if candidate.Attempt > current.Attempt {
+		// A higher attempt begins a new per-node lifecycle. validJob has already
+		// checked the candidate state and its aggregate bucket.
+		return true
+	}
+	return legalSameAttemptNodeTransition(current.State, candidate.State)
+}
+
+func legalSameAttemptNodeTransition(current, candidate model.RuntimeState) bool {
+	if current == candidate {
+		return true
+	}
+	switch current {
+	case model.StateQueued:
+		// A store update may coalesce intermediate states after initial queueing.
+		return validRuntimeState(candidate)
+	case model.StateBackoff:
+		switch candidate {
+		case model.StateQueued, model.StateStarting, model.StateValidating, model.StateOnline,
+			model.StateDegraded, model.StateStopping, model.StateFailed, model.StateRecovering,
+			model.StateDisabled:
+			return true
+		}
+	case model.StateStarting:
+		switch candidate {
+		case model.StateValidating, model.StateOnline, model.StateDegraded, model.StateStopping,
+			model.StateFailed, model.StateBackoff, model.StateRecovering, model.StateDisabled:
+			return true
+		}
+	case model.StateValidating:
+		switch candidate {
+		case model.StateOnline, model.StateDegraded, model.StateStopping, model.StateFailed,
+			model.StateBackoff, model.StateRecovering, model.StateDisabled:
+			return true
+		}
+	case model.StateStopping:
+		switch candidate {
+		case model.StateDisabled, model.StateRecovering, model.StateQueued:
+			return true
+		}
+	case model.StateRecovering:
+		switch candidate {
+		case model.StateQueued, model.StateDisabled, model.StateBackoff, model.StateFailed:
+			return true
+		}
+	}
+	return false
+}
+
+func legalJobStateTransition(current, candidate JobState) bool {
+	switch current {
+	case JobQueued:
+		switch candidate {
+		case JobQueued, JobRunning, JobSucceeded, JobFailed, JobCancelled, JobReplaced:
+			return true
+		}
+	case JobRunning:
+		switch candidate {
+		case JobRunning, JobSucceeded, JobFailed, JobCancelled, JobReplaced:
+			return true
+		}
+	}
+	return false
 }
 
 func isTerminalJob(state JobState) bool {

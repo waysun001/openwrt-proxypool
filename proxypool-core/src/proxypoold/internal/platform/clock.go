@@ -6,6 +6,7 @@ import "time"
 // test-only lifecycle methods into production components.
 type Clock interface {
 	Now() time.Time
+	Monotonic() time.Duration
 	NewTimer(time.Duration) Timer
 }
 
@@ -16,8 +17,16 @@ type Timer interface {
 
 type RealClock struct{}
 
+var realClockEpoch = time.Now()
+
 func (RealClock) Now() time.Time {
 	return time.Now()
+}
+
+// Monotonic returns process-local elapsed time. realClockEpoch contains Go's
+// monotonic component, so wall-clock corrections cannot move this value.
+func (RealClock) Monotonic() time.Duration {
+	return time.Since(realClockEpoch)
 }
 
 func (RealClock) NewTimer(delay time.Duration) Timer {

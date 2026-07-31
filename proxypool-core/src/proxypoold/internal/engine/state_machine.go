@@ -1,22 +1,34 @@
 package engine
 
 import (
+	"encoding/json"
+	"fmt"
+	"io"
 	"math"
 	"sync"
 	"time"
 
 	"proxypoold/internal/model"
+	"proxypoold/internal/platform"
 )
 
 const (
-	ErrorCodeInternal          = "internal"
-	ErrorCodeAuthentication    = "auth_failed"
-	ErrorCodeInvalidConfig     = "invalid_config"
-	ErrorCodeUnsupportedOption = "unsupported_option"
-	ErrorCodeWANDown           = "wan_down"
-	ErrorCodeTimeout           = "timeout"
-	ErrorCodeCapacityExceeded  = "capacity_exceeded"
-	ErrorCodeInvalidJob        = "invalid_job"
+	ErrorCodeInvalidRequest   = "invalid_request"
+	ErrorCodeInternal         = "internal"
+	ErrorCodeAuthentication   = "auth_failed"
+	ErrorCodeInvalidConfig    = "invalid_config"
+	ErrorCodeUnsupported      = "unsupported"
+	ErrorCodeWANDown          = "wan_down"
+	ErrorCodeConnectTimeout   = "connect_timeout"
+	ErrorCodeStopTimeout      = "stop_timeout"
+	ErrorCodeCapacityExceeded = "capacity_exceeded"
+	ErrorCodeRevisionConflict = "revision_conflict"
+	ErrorCodeDuplicate        = "duplicate"
+	ErrorCodeNotFound         = "not_found"
+	ErrorCodeResolveFailed    = "resolve_failed"
+	ErrorCodeProbeFailed      = "probe_failed"
+	ErrorCodeDataplaneFailed  = "dataplane_failed"
+	ErrorCodeDNSFailed        = "dns_failed"
 
 	DefaultStableOnlineWindow = 5 * time.Minute
 )
@@ -38,6 +50,7 @@ const (
 	EventWANAvailable    EventKind = "wan_available"
 	EventRecover         EventKind = "recover"
 	EventRecovered       EventKind = "recovered"
+	EventCleanupComplete EventKind = "cleanup_complete"
 	EventManualReconnect EventKind = "manual_reconnect"
 	EventStableOnline    EventKind = "stable_online"
 )
@@ -51,9 +64,57 @@ type Event struct {
 	At         time.Time
 }
 
+func (event Event) MarshalJSON() ([]byte, error) {
+	type wire struct {
+		NodeID     string       `json:"node_id"`
+		JobID      string       `json:"job_id"`
+		Generation uint64       `json:"generation"`
+		Kind       EventKind    `json:"kind"`
+		Error      *PublicError `json:"error,omitempty"`
+		At         time.Time    `json:"at"`
+	}
+	return json.Marshal(wire{
+		NodeID:     event.NodeID,
+		JobID:      event.JobID,
+		Generation: event.Generation,
+		Kind:       event.Kind,
+		Error:      publicErrorFromCode(event.Err),
+		At:         event.At,
+	})
+}
+
+func (event Event) String() string {
+	return fmt.Sprintf("engine.Event{NodeID:%q JobID:%q Generation:%d Kind:%q Error:%s At:%q}", event.NodeID, event.JobID, event.Generation, event.Kind, publicErrorString(publicErrorFromCode(event.Err)), event.At.Format(time.RFC3339Nano))
+}
+
+func (event Event) GoString() string { return event.String() }
+
+func (event Event) Format(state fmt.State, verb rune) {
+	_, _ = io.WriteString(state, event.String())
+}
+
 type PublicError struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+}
+
+func (publicError PublicError) MarshalJSON() ([]byte, error) {
+	safe := normalizePublicError(&publicError)
+	type wire struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	return json.Marshal(wire{Code: safe.Code, Message: safe.Message})
+}
+
+func (publicError PublicError) String() string {
+	return publicErrorString(normalizePublicError(&publicError))
+}
+
+func (publicError PublicError) GoString() string { return publicError.String() }
+
+func (publicError PublicError) Format(state fmt.State, verb rune) {
+	_, _ = io.WriteString(state, publicError.String())
 }
 
 type NodeStatus struct {
@@ -65,6 +126,19 @@ type NodeStatus struct {
 	LastError  *PublicError       `json:"last_error,omitempty"`
 	RetryAt    time.Time          `json:"retry_at,omitempty"`
 	UpdatedAt  time.Time          `json:"updated_at"`
+
+	CleanupPending   bool `json:"cleanup_pending"`
+	ReconnectPending bool `json:"reconnect_pending"`
+}
+
+func (status NodeStatus) String() string {
+	return fmt.Sprintf("engine.NodeStatus{NodeID:%q JobID:%q Generation:%d State:%q Attempts:%d Error:%s CleanupPending:%t ReconnectPending:%t}", status.NodeID, status.JobID, status.Generation, status.State, status.Attempts, publicErrorString(status.LastError), status.CleanupPending, status.ReconnectPending)
+}
+
+func (status NodeStatus) GoString() string { return status.String() }
+
+func (status NodeStatus) Format(state fmt.State, verb rune) {
+	_, _ = io.WriteString(state, status.String())
 }
 
 type MachineOption func(*Machine)
@@ -77,15 +151,29 @@ func WithStableOnlineWindow(window time.Duration) MachineOption {
 	}
 }
 
+func WithClock(clock platform.Clock) MachineOption {
+	return func(machine *Machine) {
+		if clock != nil {
+			machine.clock = clock
+		}
+	}
+}
+
 type nodeRecord struct {
-	status      NodeStatus
-	onlineSince time.Time
+	status              NodeStatus
+	onlineSinceElapsed  time.Duration
+	onlineSinceSet      bool
+	retryReadyElapsed   time.Duration
+	retryReadySet       bool
+	pendingJobID        string
+	resumeAfterRecovery bool
 }
 
 type Machine struct {
 	mu                 sync.RWMutex
 	nodes              map[string]nodeRecord
 	retry              *RetryPolicy
+	clock              platform.Clock
 	stableOnlineWindow time.Duration
 }
 
@@ -96,6 +184,7 @@ func NewMachine(retry *RetryPolicy, options ...MachineOption) *Machine {
 	machine := &Machine{
 		nodes:              make(map[string]nodeRecord),
 		retry:              retry,
+		clock:              platform.RealClock{},
 		stableOnlineWindow: DefaultStableOnlineWindow,
 	}
 	for _, option := range options {
@@ -107,8 +196,8 @@ func NewMachine(retry *RetryPolicy, options ...MachineOption) *Machine {
 }
 
 // Apply serializes one state transition. Invalid transitions are atomic: the
-// stored status is not changed. Completion events from an older generation,
-// superseded job, or older timestamp are intentionally dropped.
+// stored status is not changed. Completion events from an older generation or
+// superseded job are intentionally dropped. At is observation metadata only.
 func (m *Machine) Apply(event Event) (NodeStatus, error) {
 	if event.NodeID == "" || event.JobID == "" || event.Generation == 0 || event.At.IsZero() || !validEventKind(event.Kind) {
 		return NodeStatus{}, internalTransitionError()
@@ -152,12 +241,6 @@ func (m *Machine) Apply(event Event) (NodeStatus, error) {
 		}
 		return NodeStatus{}, internalTransitionError()
 	}
-	if event.At.Before(record.status.UpdatedAt) {
-		if isCompletionEvent(event.Kind) {
-			return cloneNodeStatus(record.status), nil
-		}
-		return NodeStatus{}, internalTransitionError()
-	}
 	if event.JobID != record.status.JobID && isCompletionEvent(event.Kind) {
 		return cloneNodeStatus(record.status), nil
 	}
@@ -194,6 +277,7 @@ func (m *Machine) transition(record *nodeRecord, event Event) error {
 		}
 		record.status.State = model.StateStarting
 		record.status.RetryAt = time.Time{}
+		record.retryReadySet = false
 	case EventStarted:
 		if record.status.State != model.StateStarting {
 			return internalTransitionError()
@@ -206,16 +290,18 @@ func (m *Machine) transition(record *nodeRecord, event Event) error {
 		record.status.State = model.StateOnline
 		record.status.LastError = nil
 		record.status.RetryAt = time.Time{}
-		record.onlineSince = event.At
+		record.retryReadySet = false
+		record.onlineSinceElapsed = m.clock.Monotonic()
+		record.onlineSinceSet = true
 	case EventDegraded:
 		if record.status.State != model.StateOnline {
 			return internalTransitionError()
 		}
 		record.status.State = model.StateDegraded
-		record.onlineSince = time.Time{}
+		record.onlineSinceSet = false
 		failure := event.Err
 		if failure == nil {
-			failure = &model.CodeError{Code: "health_check_failed", Message: "health check failed"}
+			failure = &model.CodeError{Code: ErrorCodeProbeFailed, Message: "health check failed"}
 		}
 		record.status.LastError = publicErrorFromCode(failure)
 	case EventHealthy:
@@ -225,39 +311,79 @@ func (m *Machine) transition(record *nodeRecord, event Event) error {
 		record.status.State = model.StateOnline
 		record.status.LastError = nil
 		record.status.RetryAt = time.Time{}
-		record.onlineSince = event.At
+		record.retryReadySet = false
+		record.onlineSinceElapsed = m.clock.Monotonic()
+		record.onlineSinceSet = true
 	case EventStop:
 		if !canStop(record.status.State) {
 			return internalTransitionError()
+		}
+		if record.status.State == model.StateRecovering {
+			// Recovery owns the node until its matching completion releases it.
+			// A stop request only changes the desired post-barrier outcome; it
+			// must not invalidate or overlap the cleanup already in flight.
+			record.status.ReconnectPending = false
+			record.pendingJobID = event.JobID
+			record.resumeAfterRecovery = false
+			return nil
 		}
 		if err := bumpGeneration(&record.status); err != nil {
 			return err
 		}
 		record.status.JobID = event.JobID
 		record.status.State = model.StateStopping
+		record.status.CleanupPending = false
+		record.status.ReconnectPending = false
+		record.pendingJobID = ""
+		record.resumeAfterRecovery = false
 		record.status.RetryAt = time.Time{}
-		record.onlineSince = time.Time{}
+		record.retryReadySet = false
+		record.onlineSinceSet = false
 	case EventStopped:
 		if record.status.State != model.StateStopping {
 			return internalTransitionError()
 		}
-		record.status.State = model.StateDisabled
-		record.status.Attempts = 0
-		record.status.LastError = nil
-		record.status.RetryAt = time.Time{}
-		record.onlineSince = time.Time{}
+		if record.status.ReconnectPending {
+			return m.releaseBarrierToQueue(record)
+		}
+		m.releaseBarrierToDisabled(record)
 	case EventFailure:
-		if !canFail(record.status.State) || event.Err == nil || event.Err.Code == "" {
+		if event.Err == nil || event.Err.Code == "" {
 			return internalTransitionError()
 		}
-		m.applyFailure(record, event.Err, event.At)
+		if record.status.State == model.StateStopping {
+			if event.Err.Code != ErrorCodeStopTimeout {
+				return internalTransitionError()
+			}
+			m.enterCleanupBarrier(record)
+			return nil
+		}
+		if record.status.State == model.StateRecovering && record.status.CleanupPending {
+			if event.Err.Code != ErrorCodeStopTimeout {
+				return internalTransitionError()
+			}
+			m.enterCleanupBarrier(record)
+			return nil
+		}
+		if !canFail(record.status.State) {
+			return internalTransitionError()
+		}
+		m.applyFailure(record, event.Err)
 	case EventTimeout:
+		if record.status.State == model.StateStopping {
+			m.enterCleanupBarrier(record)
+			return nil
+		}
+		if record.status.State == model.StateRecovering && record.status.CleanupPending {
+			m.enterCleanupBarrier(record)
+			return nil
+		}
 		if !canTimeout(record.status.State) {
 			return internalTransitionError()
 		}
-		m.applyFailure(record, &model.CodeError{Code: ErrorCodeTimeout, Message: "operation timed out"}, event.At)
+		m.applyFailure(record, &model.CodeError{Code: ErrorCodeConnectTimeout, Message: "connection timed out"})
 	case EventRetryDue:
-		if record.status.State != model.StateBackoff || record.status.RetryAt.IsZero() || event.At.Before(record.status.RetryAt) {
+		if record.status.State != model.StateBackoff || !record.retryReadySet || m.clock.Monotonic() < record.retryReadyElapsed {
 			return internalTransitionError()
 		}
 		if err := bumpGeneration(&record.status); err != nil {
@@ -266,9 +392,10 @@ func (m *Machine) transition(record *nodeRecord, event Event) error {
 		record.status.JobID = event.JobID
 		record.status.State = model.StateQueued
 		record.status.RetryAt = time.Time{}
-		record.onlineSince = time.Time{}
+		record.retryReadySet = false
+		record.onlineSinceSet = false
 	case EventWANAvailable:
-		if record.status.State != model.StateBackoff || !record.status.RetryAt.IsZero() || record.status.LastError == nil || record.status.LastError.Code != ErrorCodeWANDown {
+		if record.status.State != model.StateBackoff || record.retryReadySet || record.status.LastError == nil || record.status.LastError.Code != ErrorCodeWANDown {
 			return internalTransitionError()
 		}
 		if err := bumpGeneration(&record.status); err != nil {
@@ -276,7 +403,7 @@ func (m *Machine) transition(record *nodeRecord, event Event) error {
 		}
 		record.status.JobID = event.JobID
 		record.status.State = model.StateQueued
-		record.onlineSince = time.Time{}
+		record.onlineSinceSet = false
 	case EventRecover:
 		if !canRecover(record.status.State) {
 			return internalTransitionError()
@@ -286,20 +413,58 @@ func (m *Machine) transition(record *nodeRecord, event Event) error {
 		}
 		record.status.JobID = event.JobID
 		record.status.State = model.StateRecovering
+		record.status.CleanupPending = false
+		record.status.ReconnectPending = false
+		record.pendingJobID = ""
+		record.resumeAfterRecovery = true
 		record.status.RetryAt = time.Time{}
-		record.onlineSince = time.Time{}
+		record.retryReadySet = false
+		record.onlineSinceSet = false
 		if event.Err != nil {
 			record.status.LastError = publicErrorFromCode(event.Err)
 		}
 	case EventRecovered:
-		if record.status.State != model.StateRecovering {
+		if record.status.State != model.StateRecovering || record.status.CleanupPending {
 			return internalTransitionError()
 		}
-		record.status.State = model.StateQueued
-		record.status.RetryAt = time.Time{}
+		if record.resumeAfterRecovery || record.status.ReconnectPending {
+			return m.releaseBarrierToQueue(record)
+		}
+		if record.pendingJobID == "" {
+			return internalTransitionError()
+		}
+		m.releaseBarrierToDisabled(record)
+	case EventCleanupComplete:
+		if record.status.State != model.StateRecovering || !record.status.CleanupPending {
+			return internalTransitionError()
+		}
+		if record.status.ReconnectPending {
+			return m.releaseBarrierToQueue(record)
+		}
+		m.releaseBarrierToDisabled(record)
 	case EventManualReconnect:
 		if !canManuallyReconnect(record.status.State) {
 			return internalTransitionError()
+		}
+		if record.status.State == model.StateStopping || record.status.State == model.StateRecovering {
+			record.status.ReconnectPending = true
+			record.pendingJobID = event.JobID
+			return nil
+		}
+		if hasActiveIO(record.status.State) {
+			if err := bumpGeneration(&record.status); err != nil {
+				return err
+			}
+			record.status.JobID = event.JobID
+			record.status.State = model.StateStopping
+			record.status.CleanupPending = false
+			record.status.ReconnectPending = true
+			record.pendingJobID = event.JobID
+			record.resumeAfterRecovery = false
+			record.status.RetryAt = time.Time{}
+			record.retryReadySet = false
+			record.onlineSinceSet = false
+			return nil
 		}
 		if err := bumpGeneration(&record.status); err != nil {
 			return err
@@ -309,37 +474,102 @@ func (m *Machine) transition(record *nodeRecord, event Event) error {
 		record.status.Attempts = 0
 		record.status.LastError = nil
 		record.status.RetryAt = time.Time{}
-		record.onlineSince = time.Time{}
+		record.status.CleanupPending = false
+		record.status.ReconnectPending = false
+		record.pendingJobID = ""
+		record.resumeAfterRecovery = false
+		record.retryReadySet = false
+		record.onlineSinceSet = false
 	case EventStableOnline:
-		if record.status.State != model.StateOnline || record.onlineSince.IsZero() || event.At.Sub(record.onlineSince) < m.stableOnlineWindow {
+		elapsed := m.clock.Monotonic()
+		if record.status.State != model.StateOnline || !record.onlineSinceSet || elapsed < record.onlineSinceElapsed || elapsed-record.onlineSinceElapsed < m.stableOnlineWindow {
 			return internalTransitionError()
 		}
 		record.status.Attempts = 0
 		record.status.LastError = nil
 		record.status.RetryAt = time.Time{}
+		record.retryReadySet = false
 	default:
 		return internalTransitionError()
 	}
 	return nil
 }
 
-func (m *Machine) applyFailure(record *nodeRecord, failure *model.CodeError, at time.Time) {
+func (m *Machine) applyFailure(record *nodeRecord, failure *model.CodeError) {
 	decision := m.retry.Next(record.status.Attempts, failure)
 	if record.status.Attempts < math.MaxUint64 {
 		record.status.Attempts++
 	}
 	record.status.LastError = publicErrorFromCode(failure)
 	record.status.RetryAt = time.Time{}
-	record.onlineSince = time.Time{}
+	record.retryReadySet = false
+	record.onlineSinceSet = false
 	switch decision.Mode {
 	case RetryAfter:
 		record.status.State = model.StateBackoff
-		record.status.RetryAt = at.Add(decision.Delay)
+		record.status.RetryAt = m.clock.Now().Add(decision.Delay)
+		record.retryReadyElapsed = saturatingDurationAdd(m.clock.Monotonic(), decision.Delay)
+		record.retryReadySet = true
 	case RetryOnWANEvent:
 		record.status.State = model.StateBackoff
 	default:
 		record.status.State = model.StateFailed
 	}
+}
+
+func (m *Machine) enterCleanupBarrier(record *nodeRecord) {
+	record.status.State = model.StateRecovering
+	record.status.CleanupPending = true
+	record.resumeAfterRecovery = false
+	record.status.LastError = publicErrorFromCode(&model.CodeError{Code: ErrorCodeStopTimeout})
+	record.status.RetryAt = time.Time{}
+	record.retryReadySet = false
+	record.onlineSinceSet = false
+}
+
+func (m *Machine) releaseBarrierToQueue(record *nodeRecord) error {
+	if err := bumpGeneration(&record.status); err != nil {
+		return err
+	}
+	if record.pendingJobID != "" {
+		record.status.JobID = record.pendingJobID
+	}
+	if record.status.ReconnectPending {
+		record.status.Attempts = 0
+		record.status.LastError = nil
+	}
+	record.status.State = model.StateQueued
+	record.status.CleanupPending = false
+	record.status.ReconnectPending = false
+	record.status.RetryAt = time.Time{}
+	record.pendingJobID = ""
+	record.resumeAfterRecovery = false
+	record.retryReadySet = false
+	record.onlineSinceSet = false
+	return nil
+}
+
+func (m *Machine) releaseBarrierToDisabled(record *nodeRecord) {
+	if record.pendingJobID != "" {
+		record.status.JobID = record.pendingJobID
+	}
+	record.status.State = model.StateDisabled
+	record.status.Attempts = 0
+	record.status.LastError = nil
+	record.status.RetryAt = time.Time{}
+	record.status.CleanupPending = false
+	record.status.ReconnectPending = false
+	record.pendingJobID = ""
+	record.resumeAfterRecovery = false
+	record.retryReadySet = false
+	record.onlineSinceSet = false
+}
+
+func saturatingDurationAdd(base, delta time.Duration) time.Duration {
+	if delta > 0 && base > time.Duration(math.MaxInt64)-delta {
+		return time.Duration(math.MaxInt64)
+	}
+	return base + delta
 }
 
 func startsNewOperation(kind EventKind) bool {
@@ -354,7 +584,7 @@ func startsNewOperation(kind EventKind) bool {
 func isCompletionEvent(kind EventKind) bool {
 	switch kind {
 	case EventStarted, EventValidated, EventDegraded, EventHealthy, EventStopped,
-		EventFailure, EventTimeout, EventRecovered, EventStableOnline:
+		EventFailure, EventTimeout, EventRecovered, EventCleanupComplete, EventStableOnline:
 		return true
 	default:
 		return false
@@ -365,7 +595,7 @@ func validEventKind(kind EventKind) bool {
 	switch kind {
 	case EventEnable, EventStart, EventStarted, EventValidated, EventDegraded,
 		EventHealthy, EventStop, EventStopped, EventFailure, EventTimeout,
-		EventRetryDue, EventWANAvailable, EventRecover, EventRecovered,
+		EventRetryDue, EventWANAvailable, EventRecover, EventRecovered, EventCleanupComplete,
 		EventManualReconnect, EventStableOnline:
 		return true
 	default:
@@ -409,7 +639,16 @@ func canRecover(state model.RuntimeState) bool {
 func canManuallyReconnect(state model.RuntimeState) bool {
 	switch state {
 	case model.StateQueued, model.StateStarting, model.StateValidating, model.StateOnline,
-		model.StateDegraded, model.StateFailed, model.StateBackoff, model.StateRecovering:
+		model.StateDegraded, model.StateStopping, model.StateFailed, model.StateBackoff, model.StateRecovering:
+		return true
+	default:
+		return false
+	}
+}
+
+func hasActiveIO(state model.RuntimeState) bool {
+	switch state {
+	case model.StateStarting, model.StateValidating, model.StateOnline, model.StateDegraded:
 		return true
 	default:
 		return false
@@ -428,30 +667,68 @@ func publicErrorFromCode(source *model.CodeError) *PublicError {
 	if source == nil {
 		return nil
 	}
-	message := "node operation failed"
-	switch source.Code {
-	case ErrorCodeAuthentication:
-		message = "authentication failed"
-	case ErrorCodeInvalidConfig:
-		message = "configuration is invalid"
-	case ErrorCodeUnsupportedOption:
-		message = "protocol option is unsupported"
-	case ErrorCodeWANDown:
-		message = "WAN is unavailable"
-	case ErrorCodeTimeout:
-		message = "operation timed out"
-	case "health_check_failed":
-		message = "health check failed"
-	}
-	return &PublicError{Code: source.Code, Message: message}
+	return publicErrorForCode(source.Code)
 }
 
 func clonePublicError(source *PublicError) *PublicError {
+	return normalizePublicError(source)
+}
+
+func normalizePublicError(source *PublicError) *PublicError {
 	if source == nil {
 		return nil
 	}
-	copy := *source
-	return &copy
+	return publicErrorForCode(source.Code)
+}
+
+func publicErrorForCode(code string) *PublicError {
+	message := ""
+	switch code {
+	case ErrorCodeInvalidRequest:
+		message = "invalid request"
+	case ErrorCodeInvalidConfig:
+		message = "configuration is invalid"
+	case ErrorCodeRevisionConflict:
+		message = "configuration revision conflicts"
+	case ErrorCodeCapacityExceeded:
+		message = "capacity is exhausted"
+	case ErrorCodeDuplicate:
+		message = "object already exists"
+	case ErrorCodeNotFound:
+		message = "object was not found"
+	case ErrorCodeAuthentication:
+		message = "authentication failed"
+	case ErrorCodeResolveFailed:
+		message = "endpoint resolution failed"
+	case ErrorCodeConnectTimeout:
+		message = "connection timed out"
+	case ErrorCodeStopTimeout:
+		message = "stop timed out"
+	case ErrorCodeProbeFailed:
+		message = "connection probe failed"
+	case ErrorCodeWANDown:
+		message = "WAN is unavailable"
+	case ErrorCodeDataplaneFailed:
+		message = "dataplane update failed"
+	case ErrorCodeDNSFailed:
+		message = "DNS validation failed"
+	case ErrorCodeUnsupported:
+		message = "protocol option is unsupported"
+	case ErrorCodeInternal:
+		message = "internal node error"
+	default:
+		code = ErrorCodeInternal
+		message = "internal node error"
+	}
+	return &PublicError{Code: code, Message: message}
+}
+
+func publicErrorString(publicError *PublicError) string {
+	if publicError == nil {
+		return "<nil>"
+	}
+	safe := normalizePublicError(publicError)
+	return fmt.Sprintf("engine.PublicError{Code:%q Message:%q}", safe.Code, safe.Message)
 }
 
 func cloneNodeStatus(status NodeStatus) NodeStatus {

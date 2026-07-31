@@ -85,10 +85,28 @@ func TestRetryPolicyInjectedSourceIsDeterministic(t *testing.T) {
 
 func TestRetryPolicyPermanentFailuresNeverUseAutomaticRetry(t *testing.T) {
 	policy := NewRetryPolicy(rand.NewSource(11))
-	for _, code := range []string{ErrorCodeAuthentication, ErrorCodeInvalidConfig, ErrorCodeUnsupportedOption} {
+	for _, code := range []string{ErrorCodeAuthentication, ErrorCodeInvalidConfig, ErrorCodeUnsupported} {
 		decision := policy.Next(0, &model.CodeError{Code: code, Message: "permanent failure"})
 		if decision != (RetryDecision{Mode: RetryNone}) {
 			t.Fatalf("code %q: decision = %#v, want no retry", code, decision)
+		}
+	}
+}
+
+func TestRetryPolicyUsesRoadmapErrorClassifications(t *testing.T) {
+	policy := NewRetryPolicy(zeroSource{})
+	tests := []struct {
+		code string
+		mode RetryMode
+	}{
+		{ErrorCodeUnsupported, RetryNone},
+		{ErrorCodeConnectTimeout, RetryAfter},
+		{ErrorCodeStopTimeout, RetryNone},
+	}
+	for _, test := range tests {
+		decision := policy.Next(0, &model.CodeError{Code: test.code, Message: "raw adapter detail"})
+		if decision.Mode != test.mode {
+			t.Errorf("code %q: mode = %q, want %q", test.code, decision.Mode, test.mode)
 		}
 	}
 }

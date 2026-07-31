@@ -41,7 +41,7 @@ func (p *RetryPolicy) Next(attempt uint64, failure *model.CodeError) RetryDecisi
 		return RetryDecision{Mode: RetryNone}
 	}
 	switch failure.Code {
-	case ErrorCodeAuthentication, ErrorCodeInvalidConfig, ErrorCodeUnsupportedOption:
+	case ErrorCodeAuthentication, ErrorCodeInvalidConfig, ErrorCodeUnsupported, ErrorCodeStopTimeout:
 		return RetryDecision{Mode: RetryNone}
 	case ErrorCodeWANDown:
 		return RetryDecision{Mode: RetryOnWANEvent}
