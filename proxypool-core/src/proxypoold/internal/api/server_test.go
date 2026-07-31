@@ -294,7 +294,7 @@ func TestServerPreservesNonSocketPathsAndCleansOwnSocket(t *testing.T) {
 		h := &recordingHandler{}
 		path, _ := startServer(t, h, nil)
 		err := (&api.Server{Path: path, Handler: &recordingHandler{}}).Serve(context.Background())
-		if err == nil || !strings.Contains(err.Error(), "active") {
+		if err == nil || (!strings.Contains(err.Error(), "active") && !strings.Contains(err.Error(), "owned")) {
 			t.Fatalf("second Serve error = %v", err)
 		}
 		response := exchange(t, path, []byte(`{"version":1,"id":"still","method":"status.get","params":{}}`+"\n"))
@@ -401,7 +401,12 @@ func fileExists(path string) bool { _, err := os.Lstat(path); return err == nil 
 func TestClientValidatesResponseAndNeverFormatsRequestParams(t *testing.T) {
 	secret := json.RawMessage(`{"password":"super-secret"}`)
 	req := api.Request{Version: 1, ID: "client", Method: "status.get", Params: secret}
-	if strings.Contains(req.String(), "super-secret") || strings.Contains(fmt.Sprintf("%#v", req), "super-secret") || strings.Contains(fmt.Sprintf("%+v", req), "super-secret") {
+	for _, formatted := range []string{req.String(), fmt.Sprintf("%#v", req), fmt.Sprintf("%+v", req), fmt.Sprintf("%d", req), fmt.Sprintf("%+d", req), fmt.Sprintf("%#d", req), fmt.Sprintf("%x", req), fmt.Sprintf("%.3s", req), fmt.Sprintf("%v", map[string]api.Request{"x": req}), fmt.Sprintf("%v", struct{ R api.Request }{req})} {
+		if strings.Contains(formatted, "super-secret") {
+			t.Fatal("request formatter exposed secret")
+		}
+	}
+	if strings.Contains(req.String(), "super-secret") {
 		t.Fatal("request formatter exposed secret")
 	}
 

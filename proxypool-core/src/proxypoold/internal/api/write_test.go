@@ -35,3 +35,17 @@ func TestWriteAllRejectsZeroProgress(t *testing.T) {
 		t.Fatalf("error=%v", err)
 	}
 }
+
+func TestNormalizeResponseRejectsInvalidPresenceCombinations(t *testing.T) {
+	cases := []Response{
+		{Result: []byte(`{}`), Error: &Error{}},
+		{Result: []byte(`{}`), Error: &Error{Code: "x"}},
+		{Result: []byte(`{`), Error: &Error{Code: "x", Message: "x"}},
+		{},
+	}
+	for _, input := range cases {
+		if got := normalizeResponse(input, "id"); got.Error == nil || got.Error.Code != "internal_error" || got.Result != nil {
+			t.Fatal("invalid response was accepted")
+		}
+	}
+}

@@ -28,6 +28,9 @@ func (r Request) String() string {
 	return fmt.Sprintf("api.Request{Version:%d ID:%q Method:%q Params:<redacted>}", r.Version, r.ID, r.Method)
 }
 func (r Request) GoString() string { return r.String() }
+func (r Request) Format(state fmt.State, verb rune) {
+	_, _ = io.WriteString(state, "api.Request{Params:<redacted>}")
+}
 
 // Response is always emitted as one JSON line by Server and proxypoolctl.
 type Response struct {

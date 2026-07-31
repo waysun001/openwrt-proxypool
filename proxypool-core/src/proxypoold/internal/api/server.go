@@ -49,10 +49,15 @@ func (s *Server) Serve(ctx context.Context) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create socket directory: %w", err)
 	}
+	lock, err := acquireEndpointLock(path + ".lock")
+	if err != nil {
+		return errors.New("control socket is already owned")
+	}
+	defer lock.Close()
 	if err := removeStaleSocket(path); err != nil {
 		return err
 	}
-	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	listener, err := listenUnixPrivate(path)
 	if err != nil {
 		return fmt.Errorf("listen control socket: %w", err)
 	}
@@ -340,9 +345,8 @@ func writeAll(w io.Writer, data []byte) error {
 
 func normalizeResponse(response Response, id string) Response {
 	response.Version, response.ID = ProtocolVersion, id
-	validResult := response.Result != nil && json.Valid(response.Result)
-	validError := response.Error != nil && response.Error.Code != "" && response.Error.Message != ""
-	if validResult == validError {
+	hasResult, hasError := response.Result != nil, response.Error != nil
+	if hasResult == hasError || (hasResult && !json.Valid(response.Result)) || (hasError && (response.Error.Code == "" || response.Error.Message == "")) {
 		return errorResponse(id, "internal_error", messageFor("internal_error"))
 	}
 	encoded, err := json.Marshal(response)
