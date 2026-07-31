@@ -2,17 +2,75 @@ package model
 
 import (
 	"net"
+	"sort"
 	"strings"
 )
 
 const maxNodes = 60
 
 func Validate(cfg DesiredConfig) error {
+	if cfg.SchemaVersion != 2 {
+		return invalid("invalid_config", "schema version must be 2")
+	}
 	if len(cfg.Nodes) > maxNodes {
 		return invalid("capacity_exceeded", "node capacity exceeds 60")
 	}
 
-	for _, node := range cfg.Nodes {
+	nodeKeys := sortedKeys(cfg.Nodes)
+	if err := validateNodeIdentity(cfg.Nodes, nodeKeys); err != nil {
+		return err
+	}
+	if err := validateNodeProtocol(cfg.Nodes, nodeKeys); err != nil {
+		return err
+	}
+
+	deviceKeys := sortedKeys(cfg.Devices)
+	if err := validateDeviceIdentity(cfg.Devices, deviceKeys); err != nil {
+		return err
+	}
+	if err := validateDeviceMACs(cfg.Devices, deviceKeys); err != nil {
+		return err
+	}
+	if err := validateDeviceAddresses(cfg.Devices, deviceKeys); err != nil {
+		return err
+	}
+	if err := validateDeviceReferences(cfg.Nodes, cfg.Devices, deviceKeys); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func validateNodeIdentity(nodes map[string]Node, nodeKeys []string) error {
+	names := make(map[string]struct{}, len(nodes))
+	policyIDs := make(map[uint16]struct{}, len(nodes))
+	for _, key := range nodeKeys {
+		node := nodes[key]
+		if key == "" || node.ID != key {
+			return invalid("invalid_config", "node identity is invalid")
+		}
+		name := strings.ToLower(strings.TrimSpace(node.Name))
+		if name == "" {
+			return invalid("invalid_config", "node name is required")
+		}
+		if _, exists := names[name]; exists {
+			return invalid("duplicate", "node name is duplicated")
+		}
+		names[name] = struct{}{}
+		if node.PolicyID == 0 || node.PolicyID > maxNodes {
+			return invalid("invalid_config", "node policy ID is invalid")
+		}
+		if _, exists := policyIDs[node.PolicyID]; exists {
+			return invalid("duplicate", "node policy ID is duplicated")
+		}
+		policyIDs[node.PolicyID] = struct{}{}
+	}
+	return nil
+}
+
+func validateNodeProtocol(nodes map[string]Node, nodeKeys []string) error {
+	for _, key := range nodeKeys {
+		node := nodes[key]
 		if !validProtocol(node.Protocol) {
 			return invalid("invalid_config", "node protocol is invalid")
 		}
@@ -22,15 +80,43 @@ func Validate(cfg DesiredConfig) error {
 		if !validServer(node.Server) {
 			return invalid("invalid_config", "node server is invalid")
 		}
-		if node.Protocol == ProtocolL2TP && (node.Username == "" || node.Password == "") {
-			return invalid("invalid_config", "L2TP credentials are required")
+		switch node.Protocol {
+		case ProtocolL2TP:
+			if node.Username == "" || node.Password == "" {
+				return invalid("invalid_config", "L2TP credentials are required")
+			}
+		case ProtocolSOCKS5:
+			if (node.Username == "") != (node.Password == "") {
+				return invalid("invalid_config", "SOCKS5 credentials must be paired")
+			}
+		case ProtocolSLP:
+			if node.SLPToken == "" {
+				return invalid("invalid_config", "SLP token is required")
+			}
+			if node.SLPTransport != "quic" {
+				return invalid("invalid_config", "SLP transport is unsupported")
+			}
+			if node.SLPObfs && node.SLPObfsKey == "" {
+				return invalid("invalid_config", "SLP obfuscation key is required")
+			}
 		}
 	}
+	return nil
+}
 
-	macs := make(map[string]struct{}, len(cfg.Devices))
-	addresses := make(map[string]struct{}, len(cfg.Devices))
-	for _, device := range cfg.Devices {
-		mac, err := net.ParseMAC(device.MAC)
+func validateDeviceIdentity(devices map[string]Device, deviceKeys []string) error {
+	for _, key := range deviceKeys {
+		if key == "" || devices[key].ID != key {
+			return invalid("invalid_config", "device identity is invalid")
+		}
+	}
+	return nil
+}
+
+func validateDeviceMACs(devices map[string]Device, deviceKeys []string) error {
+	macs := make(map[string]struct{}, len(devices))
+	for _, key := range deviceKeys {
+		mac, err := net.ParseMAC(devices[key].MAC)
 		if err != nil {
 			return invalid("invalid_config", "device MAC is invalid")
 		}
@@ -39,23 +125,46 @@ func Validate(cfg DesiredConfig) error {
 			return invalid("duplicate", "device MAC is duplicated")
 		}
 		macs[macKey] = struct{}{}
+	}
+	return nil
+}
 
-		ipv4 := net.ParseIP(device.FixedIPv4.String()).To4()
-		if ipv4 == nil {
+func validateDeviceAddresses(devices map[string]Device, deviceKeys []string) error {
+	addresses := make(map[string]struct{}, len(devices))
+	for _, key := range deviceKeys {
+		address := devices[key].FixedIPv4
+		if !address.Is4() {
 			return invalid("invalid_config", "device fixed IPv4 is invalid")
 		}
-		addressKey := ipv4.String()
+		addressKey := address.String()
 		if _, exists := addresses[addressKey]; exists {
 			return invalid("duplicate", "device fixed IPv4 is duplicated")
 		}
 		addresses[addressKey] = struct{}{}
+	}
+	return nil
+}
 
-		if _, exists := cfg.Nodes[device.NodeID]; !exists {
+func validateDeviceReferences(nodes map[string]Node, devices map[string]Device, deviceKeys []string) error {
+	for _, key := range deviceKeys {
+		nodeID := devices[key].NodeID
+		if nodeID == "" {
+			continue
+		}
+		if _, exists := nodes[nodeID]; !exists {
 			return invalid("not_found", "device node does not exist")
 		}
 	}
-
 	return nil
+}
+
+func sortedKeys[V any](values map[string]V) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func invalid(code, message string) error {

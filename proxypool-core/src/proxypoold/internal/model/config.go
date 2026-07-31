@@ -1,6 +1,7 @@
 package model
 
 import (
+	"fmt"
 	"net/netip"
 	"time"
 )
@@ -50,6 +51,18 @@ type Node struct {
 	ExpiresAt    *time.Time
 	PolicyID     uint16
 	Revision     uint64
+}
+
+func (n Node) String() string {
+	return fmt.Sprintf("Node{ID:%q Name:%q Protocol:%q Enabled:%t Server:%q Port:%d Username:%q Password:<redacted> SLPToken:<redacted> SLPTransport:%q SLPObfs:%t SLPObfsKey:<redacted> SLPInsecure:%t ExpiresAt:%v PolicyID:%d Revision:%d}", n.ID, n.Name, n.Protocol, n.Enabled, n.Server, n.Port, n.Username, n.SLPTransport, n.SLPObfs, n.SLPInsecure, n.ExpiresAt, n.PolicyID, n.Revision)
+}
+
+func (n Node) GoString() string {
+	return n.String()
+}
+
+func (n Node) Format(state fmt.State, verb rune) {
+	_, _ = state.Write([]byte(n.String()))
 }
 
 type DoHEndpoint struct {
