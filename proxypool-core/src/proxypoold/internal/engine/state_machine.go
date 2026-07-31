@@ -355,15 +355,21 @@ func (m *Machine) transition(record *nodeRecord, event Event) error {
 			if event.Err.Code != ErrorCodeStopTimeout {
 				return internalTransitionError()
 			}
-			m.enterCleanupBarrier(record)
+			m.enterCleanupBarrier(record, event.Err)
 			return nil
 		}
-		if record.status.State == model.StateRecovering && record.status.CleanupPending {
-			if event.Err.Code != ErrorCodeStopTimeout {
-				return internalTransitionError()
+		if record.status.State == model.StateRecovering {
+			if record.pendingJobID != "" {
+				m.enterCleanupBarrier(record, event.Err)
+				return nil
 			}
-			m.enterCleanupBarrier(record)
-			return nil
+			if record.status.CleanupPending {
+				if event.Err.Code != ErrorCodeStopTimeout {
+					return internalTransitionError()
+				}
+				m.enterCleanupBarrier(record, event.Err)
+				return nil
+			}
 		}
 		if !canFail(record.status.State) {
 			return internalTransitionError()
@@ -371,11 +377,11 @@ func (m *Machine) transition(record *nodeRecord, event Event) error {
 		m.applyFailure(record, event.Err)
 	case EventTimeout:
 		if record.status.State == model.StateStopping {
-			m.enterCleanupBarrier(record)
+			m.enterCleanupBarrier(record, nil)
 			return nil
 		}
-		if record.status.State == model.StateRecovering && record.status.CleanupPending {
-			m.enterCleanupBarrier(record)
+		if record.status.State == model.StateRecovering && (record.status.CleanupPending || record.pendingJobID != "") {
+			m.enterCleanupBarrier(record, nil)
 			return nil
 		}
 		if !canTimeout(record.status.State) {
@@ -407,6 +413,9 @@ func (m *Machine) transition(record *nodeRecord, event Event) error {
 	case EventRecover:
 		if !canRecover(record.status.State) {
 			return internalTransitionError()
+		}
+		if err := requireGenerationCapacity(record.status, 2); err != nil {
+			return err
 		}
 		if err := bumpGeneration(&record.status); err != nil {
 			return err
@@ -447,11 +456,18 @@ func (m *Machine) transition(record *nodeRecord, event Event) error {
 			return internalTransitionError()
 		}
 		if record.status.State == model.StateStopping || record.status.State == model.StateRecovering {
+			if err := requireGenerationCapacity(record.status, 1); err != nil {
+				return err
+			}
 			record.status.ReconnectPending = true
 			record.pendingJobID = event.JobID
+			record.resumeAfterRecovery = false
 			return nil
 		}
 		if hasActiveIO(record.status.State) {
+			if err := requireGenerationCapacity(record.status, 2); err != nil {
+				return err
+			}
 			if err := bumpGeneration(&record.status); err != nil {
 				return err
 			}
@@ -502,6 +518,10 @@ func (m *Machine) applyFailure(record *nodeRecord, failure *model.CodeError) {
 	}
 	record.status.LastError = publicErrorFromCode(failure)
 	record.status.RetryAt = time.Time{}
+	record.status.CleanupPending = false
+	record.status.ReconnectPending = false
+	record.pendingJobID = ""
+	record.resumeAfterRecovery = false
 	record.retryReadySet = false
 	record.onlineSinceSet = false
 	switch decision.Mode {
@@ -517,11 +537,14 @@ func (m *Machine) applyFailure(record *nodeRecord, failure *model.CodeError) {
 	}
 }
 
-func (m *Machine) enterCleanupBarrier(record *nodeRecord) {
+func (m *Machine) enterCleanupBarrier(record *nodeRecord, failure *model.CodeError) {
+	if failure == nil {
+		failure = &model.CodeError{Code: ErrorCodeStopTimeout}
+	}
 	record.status.State = model.StateRecovering
 	record.status.CleanupPending = true
 	record.resumeAfterRecovery = false
-	record.status.LastError = publicErrorFromCode(&model.CodeError{Code: ErrorCodeStopTimeout})
+	record.status.LastError = publicErrorFromCode(failure)
 	record.status.RetryAt = time.Time{}
 	record.retryReadySet = false
 	record.onlineSinceSet = false
@@ -656,10 +679,17 @@ func hasActiveIO(state model.RuntimeState) bool {
 }
 
 func bumpGeneration(status *NodeStatus) error {
-	if status.Generation == math.MaxUint64 {
-		return internalTransitionError()
+	if err := requireGenerationCapacity(*status, 1); err != nil {
+		return err
 	}
 	status.Generation++
+	return nil
+}
+
+func requireGenerationCapacity(status NodeStatus, increments uint64) error {
+	if increments > math.MaxUint64-status.Generation {
+		return internalTransitionError()
+	}
 	return nil
 }
 

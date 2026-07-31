@@ -236,6 +236,193 @@ func TestMachineManualReconnectRejectsGenerationOverflowWithoutMutation(t *testi
 	}
 }
 
+func TestMachineActiveReconnectReservesBothGenerationsAtRequest(t *testing.T) {
+	tests := []struct {
+		name       string
+		generation uint64
+		accepted   bool
+	}{
+		{name: "max minus two", generation: math.MaxUint64 - 2, accepted: true},
+		{name: "max minus one", generation: math.MaxUint64 - 1, accepted: false},
+		{name: "max", generation: math.MaxUint64, accepted: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			machine := NewMachine(NewRetryPolicy(zeroSource{}))
+			before := nodeRecord{status: NodeStatus{
+				NodeID: "node-a", JobID: "owner-job", Generation: test.generation,
+				State: model.StateStarting, UpdatedAt: stateTestEpoch,
+			}}
+			machine.nodes["node-a"] = before
+
+			stopping, err := machine.Apply(Event{
+				NodeID: "node-a", JobID: "reconnect-job", Generation: test.generation,
+				Kind: EventManualReconnect, At: stateTestEpoch.Add(time.Second),
+			})
+			if !test.accepted {
+				assertInternalError(t, err)
+				if after := machine.nodes["node-a"]; !reflect.DeepEqual(after, before) {
+					t.Fatalf("rejected active reconnect mutated record:\n got: %#v\nwant: %#v", after, before)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Apply(active reconnect) error = %v", err)
+			}
+			if stopping.State != model.StateStopping || stopping.Generation != math.MaxUint64-1 || !stopping.ReconnectPending {
+				t.Fatalf("stopping status = %#v, want reserved barrier at max-1", stopping)
+			}
+			queued := applyMachineEventForJob(t, machine, "node-a", "reconnect-job", math.MaxUint64-1, EventStopped, nil, stateTestEpoch.Add(2*time.Second))
+			if queued.State != model.StateQueued || queued.Generation != math.MaxUint64 || queued.JobID != "reconnect-job" {
+				t.Fatalf("released status = %#v, want reconnect queued at max", queued)
+			}
+		})
+	}
+}
+
+func TestMachineRecoveryReservesEntryAndReleaseGenerationsAtRequest(t *testing.T) {
+	tests := []struct {
+		name       string
+		generation uint64
+		accepted   bool
+	}{
+		{name: "max minus two", generation: math.MaxUint64 - 2, accepted: true},
+		{name: "max minus one", generation: math.MaxUint64 - 1, accepted: false},
+		{name: "max", generation: math.MaxUint64, accepted: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			machine := NewMachine(NewRetryPolicy(zeroSource{}))
+			before := nodeRecord{
+				status: NodeStatus{
+					NodeID: "node-a", JobID: "owner-job", Generation: test.generation,
+					State: model.StateOnline, UpdatedAt: stateTestEpoch,
+				},
+				onlineSinceElapsed: time.Minute,
+				onlineSinceSet:     true,
+			}
+			machine.nodes["node-a"] = before
+
+			recovering, err := machine.Apply(Event{
+				NodeID: "node-a", JobID: "recovery-job", Generation: test.generation,
+				Kind: EventRecover, At: stateTestEpoch.Add(time.Second),
+			})
+			if !test.accepted {
+				assertInternalError(t, err)
+				if after := machine.nodes["node-a"]; !reflect.DeepEqual(after, before) {
+					t.Fatalf("rejected recovery mutated record:\n got: %#v\nwant: %#v", after, before)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Apply(recover) error = %v", err)
+			}
+			if recovering.State != model.StateRecovering || recovering.Generation != math.MaxUint64-1 {
+				t.Fatalf("recovering status = %#v, want owner at max-1", recovering)
+			}
+			queued := applyMachineEventForJob(t, machine, "node-a", "recovery-job", math.MaxUint64-1, EventRecovered, nil, stateTestEpoch.Add(2*time.Second))
+			if queued.State != model.StateQueued || queued.Generation != math.MaxUint64 || queued.JobID != "recovery-job" {
+				t.Fatalf("released status = %#v, want recovery queued at max", queued)
+			}
+		})
+	}
+}
+
+func TestMachinePendingReconnectReservesReleaseGenerationAtRegistration(t *testing.T) {
+	ownerStates := []struct {
+		name                string
+		state               model.RuntimeState
+		cleanupPending      bool
+		resumeAfterRecovery bool
+		release             EventKind
+	}{
+		{name: "stopping", state: model.StateStopping, release: EventStopped},
+		{name: "ordinary recovery", state: model.StateRecovering, resumeAfterRecovery: true, release: EventRecovered},
+		{name: "cleanup recovery", state: model.StateRecovering, cleanupPending: true, release: EventCleanupComplete},
+	}
+	boundaries := []struct {
+		name       string
+		generation uint64
+		accepted   bool
+	}{
+		{name: "max minus two", generation: math.MaxUint64 - 2, accepted: true},
+		{name: "max minus one", generation: math.MaxUint64 - 1, accepted: true},
+		{name: "max", generation: math.MaxUint64, accepted: false},
+	}
+
+	for _, owner := range ownerStates {
+		for _, boundary := range boundaries {
+			t.Run(owner.name+"/"+boundary.name, func(t *testing.T) {
+				machine := NewMachine(NewRetryPolicy(zeroSource{}))
+				before := nodeRecord{
+					status: NodeStatus{
+						NodeID: "node-a", JobID: "owner-job", Generation: boundary.generation,
+						State: owner.state, UpdatedAt: stateTestEpoch, CleanupPending: owner.cleanupPending,
+					},
+					resumeAfterRecovery: owner.resumeAfterRecovery,
+				}
+				machine.nodes["node-a"] = before
+
+				pending, err := machine.Apply(Event{
+					NodeID: "node-a", JobID: "reconnect-job", Generation: boundary.generation,
+					Kind: EventManualReconnect, At: stateTestEpoch.Add(time.Second),
+				})
+				if !boundary.accepted {
+					assertInternalError(t, err)
+					if after := machine.nodes["node-a"]; !reflect.DeepEqual(after, before) {
+						t.Fatalf("rejected pending reconnect mutated record:\n got: %#v\nwant: %#v", after, before)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("Apply(pending reconnect) error = %v", err)
+				}
+				if pending.Generation != boundary.generation || !pending.ReconnectPending || pending.State != owner.state {
+					t.Fatalf("pending status = %#v, want owner token retained", pending)
+				}
+				storedPending := machine.nodes["node-a"]
+				if storedPending.pendingJobID != "reconnect-job" || storedPending.resumeAfterRecovery {
+					t.Fatalf("pending record = %#v, want exclusive reconnect intent", storedPending)
+				}
+				queued := applyMachineEventForJob(t, machine, "node-a", "owner-job", boundary.generation, owner.release, nil, stateTestEpoch.Add(2*time.Second))
+				if queued.State != model.StateQueued || queued.Generation != boundary.generation+1 || queued.JobID != "reconnect-job" {
+					t.Fatalf("released status = %#v, want reserved reconnect generation", queued)
+				}
+			})
+		}
+	}
+}
+
+func TestMachineOverflowingReconnectPreservesExistingStopIntent(t *testing.T) {
+	for _, cleanupPending := range []bool{false, true} {
+		name := "ordinary recovery"
+		if cleanupPending {
+			name = "cleanup recovery"
+		}
+		t.Run(name, func(t *testing.T) {
+			machine := NewMachine(NewRetryPolicy(zeroSource{}))
+			before := nodeRecord{
+				status: NodeStatus{
+					NodeID: "node-a", JobID: "owner-job", Generation: math.MaxUint64,
+					State: model.StateRecovering, UpdatedAt: stateTestEpoch, CleanupPending: cleanupPending,
+				},
+				pendingJobID: "stop-job",
+			}
+			machine.nodes["node-a"] = before
+			_, err := machine.Apply(Event{
+				NodeID: "node-a", JobID: "reconnect-job", Generation: math.MaxUint64,
+				Kind: EventManualReconnect, At: stateTestEpoch.Add(time.Second),
+			})
+			assertInternalError(t, err)
+			if after := machine.nodes["node-a"]; !reflect.DeepEqual(after, before) {
+				t.Fatalf("overflowing reconnect replaced pending stop:\n got: %#v\nwant: %#v", after, before)
+			}
+		})
+	}
+}
+
 func TestMachineStableOnlineResetsConsecutiveAttempts(t *testing.T) {
 	clock := &manualClock{wall: stateTestEpoch}
 	machine := NewMachine(NewRetryPolicy(zeroSource{}), WithClock(clock), WithStableOnlineWindow(30*time.Second))
@@ -465,6 +652,179 @@ func TestMachineStopDefersBehindEveryRecoveryBarrierSubstate(t *testing.T) {
 			if disabled.State != model.StateDisabled || disabled.Generation != 7 || disabled.JobID != "stop-job" ||
 				disabled.CleanupPending || disabled.ReconnectPending {
 				t.Fatalf("released stop status = %#v, want disabled without starting overlapping work", disabled)
+			}
+		})
+	}
+}
+
+func TestMachinePendingRecoveryIntentFailureAndTimeoutStayBehindCleanupBarrier(t *testing.T) {
+	owners := []struct {
+		name           string
+		cleanupPending bool
+	}{
+		{name: "ordinary recovery"},
+		{name: "cleanup recovery", cleanupPending: true},
+	}
+	intents := []struct {
+		name             string
+		jobID            string
+		reconnectPending bool
+	}{
+		{name: "stop intent", jobID: "stop-job"},
+		{name: "reconnect intent", jobID: "reconnect-job", reconnectPending: true},
+	}
+	completions := []struct {
+		name        string
+		kind        EventKind
+		err         *model.CodeError
+		wantCode    string
+		wantMessage string
+	}{
+		{
+			name: "failure", kind: EventFailure,
+			err:         &model.CodeError{Code: ErrorCodeProbeFailed, Message: "raw owner failure"},
+			wantCode:    ErrorCodeProbeFailed,
+			wantMessage: "connection probe failed",
+		},
+		{
+			name:        "timeout",
+			kind:        EventTimeout,
+			wantCode:    ErrorCodeStopTimeout,
+			wantMessage: "stop timed out",
+		},
+	}
+
+	for _, owner := range owners {
+		for _, intent := range intents {
+			for _, completion := range completions {
+				t.Run(owner.name+"/"+intent.name+"/"+completion.name, func(t *testing.T) {
+					machine := NewMachine(NewRetryPolicy(zeroSource{}))
+					var initialError *PublicError
+					if owner.cleanupPending {
+						initialError = &PublicError{Code: ErrorCodeStopTimeout, Message: "stop timed out"}
+					}
+					before := nodeRecord{
+						status: NodeStatus{
+							NodeID: "node-a", JobID: "owner-job", Generation: 7,
+							State: model.StateRecovering, Attempts: 3, LastError: initialError,
+							UpdatedAt: stateTestEpoch, CleanupPending: owner.cleanupPending,
+							ReconnectPending: intent.reconnectPending,
+						},
+						onlineSinceElapsed:  time.Minute,
+						retryReadyElapsed:   2 * time.Minute,
+						pendingJobID:        intent.jobID,
+						resumeAfterRecovery: !owner.cleanupPending && intent.reconnectPending,
+					}
+					machine.nodes["node-a"] = before
+					completionAt := stateTestEpoch.Add(time.Second)
+
+					status, err := machine.Apply(Event{
+						NodeID: "node-a", JobID: "owner-job", Generation: 7,
+						Kind: completion.kind, Err: completion.err, At: completionAt,
+					})
+					if err != nil {
+						t.Fatalf("Apply(owner %s) error = %v", completion.kind, err)
+					}
+					if status.State != model.StateRecovering || !status.CleanupPending ||
+						status.ReconnectPending != intent.reconnectPending || status.Generation != 7 || status.JobID != "owner-job" ||
+						status.Attempts != 3 || !status.RetryAt.IsZero() || status.LastError == nil ||
+						status.LastError.Code != completion.wantCode || status.LastError.Message != completion.wantMessage {
+						t.Fatalf("barrier status = %#v, want preserved intent behind cleanup", status)
+					}
+					barrier := machine.nodes["node-a"]
+					if barrier.pendingJobID != intent.jobID || barrier.resumeAfterRecovery || barrier.retryReadySet || barrier.onlineSinceSet ||
+						barrier.retryReadyElapsed != 2*time.Minute || barrier.onlineSinceElapsed != time.Minute {
+						t.Fatalf("barrier private record = %#v, want pending intent and inert retry/online metadata", barrier)
+					}
+
+					for _, blocked := range []EventKind{EventStart, EventRetryDue, EventRecovered} {
+						beforeBlocked := cloneNodeRecord(machine.nodes["node-a"])
+						_, blockedErr := machine.Apply(Event{
+							NodeID: "node-a", JobID: "owner-job", Generation: 7,
+							Kind: blocked, At: completionAt.Add(time.Second),
+						})
+						assertInternalError(t, blockedErr)
+						if after := machine.nodes["node-a"]; !reflect.DeepEqual(after, beforeBlocked) {
+							t.Fatalf("blocked %s changed barrier:\n got: %#v\nwant: %#v", blocked, after, beforeBlocked)
+						}
+					}
+
+					for name, stale := range map[string]Event{
+						"wrong job": {
+							NodeID: "node-a", JobID: "other-job", Generation: 7,
+							Kind: EventCleanupComplete, At: completionAt.Add(2 * time.Second),
+						},
+						"old generation": {
+							NodeID: "node-a", JobID: "owner-job", Generation: 6,
+							Kind: EventCleanupComplete, At: completionAt.Add(2 * time.Second),
+						},
+					} {
+						beforeStale := cloneNodeRecord(machine.nodes["node-a"])
+						if _, staleErr := machine.Apply(stale); staleErr != nil {
+							t.Fatalf("Apply(%s cleanup acknowledgement) error = %v", name, staleErr)
+						}
+						if after := machine.nodes["node-a"]; !reflect.DeepEqual(after, beforeStale) {
+							t.Fatalf("%s cleanup acknowledgement changed barrier", name)
+						}
+					}
+
+					released := applyMachineEventForJob(t, machine, "node-a", "owner-job", 7, EventCleanupComplete, nil, completionAt.Add(3*time.Second))
+					if intent.reconnectPending {
+						if released.State != model.StateQueued || released.Generation != 8 || released.JobID != intent.jobID {
+							t.Fatalf("released reconnect = %#v, want queued generation 8", released)
+						}
+					} else if released.State != model.StateDisabled || released.Generation != 7 || released.JobID != intent.jobID {
+						t.Fatalf("released stop = %#v, want disabled generation 7", released)
+					}
+					afterRelease := cloneNodeRecord(machine.nodes["node-a"])
+					if _, lateErr := machine.Apply(Event{
+						NodeID: "node-a", JobID: "owner-job", Generation: 7,
+						Kind: EventFailure, Err: &model.CodeError{Code: ErrorCodeProbeFailed}, At: completionAt.Add(4 * time.Second),
+					}); lateErr != nil {
+						t.Fatalf("Apply(late owner completion) error = %v", lateErr)
+					}
+					if after := machine.nodes["node-a"]; !reflect.DeepEqual(after, afterRelease) {
+						t.Fatalf("late owner completion changed released record:\n got: %#v\nwant: %#v", after, afterRelease)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestMachineRecoveryFailureWithoutPendingIntentClearsBarrierMetadata(t *testing.T) {
+	tests := []struct {
+		name string
+		kind EventKind
+		err  *model.CodeError
+	}{
+		{name: "failure", kind: EventFailure, err: &model.CodeError{Code: ErrorCodeProbeFailed}},
+		{name: "timeout", kind: EventTimeout},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			machine := NewMachine(NewRetryPolicy(zeroSource{}))
+			machine.nodes["node-a"] = nodeRecord{
+				status: NodeStatus{
+					NodeID: "node-a", JobID: "owner-job", Generation: 7,
+					State: model.StateRecovering, UpdatedAt: stateTestEpoch,
+				},
+				resumeAfterRecovery: true,
+			}
+
+			status, err := machine.Apply(Event{
+				NodeID: "node-a", JobID: "owner-job", Generation: 7,
+				Kind: test.kind, Err: test.err, At: stateTestEpoch.Add(time.Second),
+			})
+			if err != nil {
+				t.Fatalf("Apply(%s) error = %v", test.kind, err)
+			}
+			if status.State != model.StateBackoff {
+				t.Fatalf("state = %q, want ordinary retry backoff", status.State)
+			}
+			stored := machine.nodes["node-a"]
+			if stored.resumeAfterRecovery || stored.pendingJobID != "" || stored.status.CleanupPending || stored.status.ReconnectPending {
+				t.Fatalf("completed recovery retained barrier metadata: %#v", stored)
 			}
 		})
 	}

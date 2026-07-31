@@ -39,13 +39,14 @@ type Job struct {
 	Running        int            `json:"running"`
 	Succeeded      int            `json:"succeeded"`
 	Failed         int            `json:"failed"`
+	CancelledNodes int            `json:"cancelled_nodes"`
 	Cancelled      bool           `json:"cancelled"`
 	ReplacedBy     string         `json:"replaced_by,omitempty"`
 	Nodes          []NodeProgress `json:"nodes,omitempty"`
 }
 
 func (job Job) String() string {
-	return fmt.Sprintf("engine.Job{ID:%q Kind:%q State:%q Total:%d Queued:%d Running:%d Succeeded:%d Failed:%d Nodes:<redacted>}", job.ID, job.Kind, job.State, job.Total, job.Queued, job.Running, job.Succeeded, job.Failed)
+	return fmt.Sprintf("engine.Job{ID:%q Kind:%q State:%q Total:%d Queued:%d Running:%d Succeeded:%d Failed:%d CancelledNodes:%d Nodes:<redacted>}", job.ID, job.Kind, job.State, job.Total, job.Queued, job.Running, job.Succeeded, job.Failed, job.CancelledNodes)
 }
 
 func (job Job) GoString() string { return job.String() }
@@ -55,16 +56,17 @@ func (job Job) Format(state fmt.State, verb rune) {
 }
 
 type NodeProgress struct {
-	NodeID   string             `json:"node_id"`
-	Step     string             `json:"step"`
-	State    model.RuntimeState `json:"state"`
-	Attempt  uint64             `json:"attempt"`
-	Deadline time.Time          `json:"deadline,omitempty"`
-	Error    *PublicError       `json:"error,omitempty"`
+	NodeID    string             `json:"node_id"`
+	Step      string             `json:"step"`
+	State     model.RuntimeState `json:"state"`
+	Attempt   uint64             `json:"attempt"`
+	Deadline  time.Time          `json:"deadline,omitempty"`
+	Error     *PublicError       `json:"error,omitempty"`
+	Cancelled bool               `json:"cancelled"`
 }
 
 func (progress NodeProgress) String() string {
-	return fmt.Sprintf("engine.NodeProgress{NodeID:%q State:%q Attempt:%d Error:%s}", progress.NodeID, progress.State, progress.Attempt, publicErrorString(progress.Error))
+	return fmt.Sprintf("engine.NodeProgress{NodeID:%q State:%q Attempt:%d Cancelled:%t Error:%s}", progress.NodeID, progress.State, progress.Attempt, progress.Cancelled, publicErrorString(progress.Error))
 }
 
 func (progress NodeProgress) GoString() string { return progress.String() }
@@ -209,16 +211,16 @@ func validJob(job Job) bool {
 	if job.ID == "" || job.Kind == "" || job.Creator == "" || job.CreatedAt.IsZero() {
 		return false
 	}
-	if job.Total < 0 || job.Queued < 0 || job.Running < 0 || job.Succeeded < 0 || job.Failed < 0 {
+	if job.Total < 0 || job.Queued < 0 || job.Running < 0 || job.Succeeded < 0 || job.Failed < 0 || job.CancelledNodes < 0 {
 		return false
 	}
-	if job.Queued > job.Total || job.Running > job.Total || job.Succeeded > job.Total || job.Failed > job.Total {
+	if job.Queued > job.Total || job.Running > job.Total || job.Succeeded > job.Total || job.Failed > job.Total || job.CancelledNodes > job.Total {
 		return false
 	}
-	if job.Queued+job.Running+job.Succeeded+job.Failed != job.Total || len(job.Nodes) != job.Total {
+	if job.Queued+job.Running+job.Succeeded+job.Failed+job.CancelledNodes != job.Total || len(job.Nodes) != job.Total {
 		return false
 	}
-	derivedQueued, derivedRunning, derivedSucceeded, derivedFailed := 0, 0, 0, 0
+	derivedQueued, derivedRunning, derivedSucceeded, derivedFailed, derivedCancelled := 0, 0, 0, 0, 0
 	seenNodes := make(map[string]struct{}, len(job.Nodes))
 	for _, node := range job.Nodes {
 		if node.NodeID == "" || node.Step == "" || !validRuntimeState(node.State) {
@@ -228,7 +230,7 @@ func validJob(job Job) bool {
 			return false
 		}
 		seenNodes[node.NodeID] = struct{}{}
-		switch nodeJobBucket(node.State) {
+		switch nodeProgressBucket(node) {
 		case jobBucketQueued:
 			derivedQueued++
 		case jobBucketRunning:
@@ -240,26 +242,31 @@ func validJob(job Job) bool {
 				return false
 			}
 			derivedFailed++
+		case jobBucketCancelled:
+			if node.Error != nil {
+				return false
+			}
+			derivedCancelled++
 		default:
 			return false
 		}
 	}
-	if job.Queued != derivedQueued || job.Running != derivedRunning || job.Succeeded != derivedSucceeded || job.Failed != derivedFailed {
+	if job.Queued != derivedQueued || job.Running != derivedRunning || job.Succeeded != derivedSucceeded || job.Failed != derivedFailed || job.CancelledNodes != derivedCancelled {
 		return false
 	}
 	switch job.State {
 	case JobQueued:
-		return job.Total > 0 && job.Queued == job.Total && !job.Cancelled && job.ReplacedBy == ""
+		return job.Total > 0 && job.Queued == job.Total && job.CancelledNodes == 0 && !job.Cancelled && job.ReplacedBy == ""
 	case JobRunning:
 		return job.Queued+job.Running > 0 && !job.Cancelled && job.ReplacedBy == ""
 	case JobSucceeded:
-		return job.Succeeded == job.Total && job.Queued == 0 && job.Running == 0 && job.Failed == 0 && !job.Cancelled && job.ReplacedBy == ""
+		return job.Succeeded == job.Total && job.Queued == 0 && job.Running == 0 && job.Failed == 0 && job.CancelledNodes == 0 && !job.Cancelled && job.ReplacedBy == ""
 	case JobFailed:
-		return job.Total > 0 && job.Failed > 0 && job.Queued == 0 && job.Running == 0 && job.Succeeded+job.Failed == job.Total && !job.Cancelled && job.ReplacedBy == ""
+		return job.Total > 0 && job.Failed > 0 && job.Queued == 0 && job.Running == 0 && job.CancelledNodes == 0 && job.Succeeded+job.Failed == job.Total && !job.Cancelled && job.ReplacedBy == ""
 	case JobCancelled:
-		return job.Cancelled && job.ReplacedBy == "" && job.Queued == 0 && job.Running == 0
+		return job.Cancelled && job.CancelledNodes > 0 && job.ReplacedBy == "" && job.Queued == 0 && job.Running == 0
 	case JobReplaced:
-		return job.Cancelled && job.ReplacedBy != "" && job.ReplacedBy != job.ID && job.Queued == 0 && job.Running == 0
+		return job.Cancelled && job.CancelledNodes > 0 && job.ReplacedBy != "" && job.ReplacedBy != job.ID && job.Queued == 0 && job.Running == 0
 	default:
 		return false
 	}
@@ -273,7 +280,15 @@ const (
 	jobBucketRunning
 	jobBucketSucceeded
 	jobBucketFailed
+	jobBucketCancelled
 )
+
+func nodeProgressBucket(progress NodeProgress) jobBucket {
+	if progress.Cancelled {
+		return jobBucketCancelled
+	}
+	return nodeJobBucket(progress.State)
+}
 
 func nodeJobBucket(state model.RuntimeState) jobBucket {
 	switch state {
@@ -308,7 +323,8 @@ func legalJobUpdate(current, candidate Job) bool {
 	if isTerminalJob(current.State) {
 		return reflect.DeepEqual(current, candidate)
 	}
-	if candidate.Succeeded < current.Succeeded || candidate.Failed < current.Failed || !legalJobStateTransition(current.State, candidate.State) {
+	if candidate.Succeeded < current.Succeeded || candidate.Failed < current.Failed || candidate.CancelledNodes < current.CancelledNodes ||
+		!legalJobStateTransition(current.State, candidate.State) {
 		return false
 	}
 	for index := range current.Nodes {
@@ -325,11 +341,19 @@ func legalNodeProgressUpdate(current, candidate NodeProgress) bool {
 	if current.NodeID != candidate.NodeID || candidate.Attempt < current.Attempt {
 		return false
 	}
+	if current.Cancelled {
+		return reflect.DeepEqual(current, candidate)
+	}
 	currentBucket := nodeJobBucket(current.State)
 	if currentBucket == jobBucketSucceeded || currentBucket == jobBucketFailed {
 		// Once this job has recorded a node outcome, the complete evidence for
 		// that outcome is immutable, not merely its runtime-state label.
 		return reflect.DeepEqual(current, candidate)
+	}
+	if candidate.Cancelled {
+		// Cancellation is an outcome for the current observation, not a new
+		// attempt or a license to fabricate another runtime state.
+		return candidate.State == current.State && candidate.Attempt == current.Attempt
 	}
 	if candidate.Attempt > current.Attempt {
 		// A higher attempt begins a new per-node lifecycle. validJob has already

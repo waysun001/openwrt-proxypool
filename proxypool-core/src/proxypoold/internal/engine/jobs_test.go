@@ -108,6 +108,42 @@ func TestJobStoreEvictsOldestTerminalJobAroundActiveJobs(t *testing.T) {
 	}
 }
 
+func TestJobStoreEvictsOldestCancelledOrReplacedJob(t *testing.T) {
+	for _, terminalState := range []JobState{JobCancelled, JobReplaced} {
+		t.Run(string(terminalState), func(t *testing.T) {
+			store := NewJobStore()
+			for index := 0; index < MaxRetainedJobs; index++ {
+				if err := store.Put(runningJob(testJob(index))); err != nil {
+					t.Fatal(err)
+				}
+			}
+			terminal := runningJob(testJob(0))
+			terminal.State = terminalState
+			terminal.Running = 0
+			terminal.CancelledNodes = 1
+			terminal.Cancelled = true
+			terminal.Nodes[0].Step = "cancelled"
+			terminal.Nodes[0].Cancelled = true
+			if terminalState == JobReplaced {
+				terminal.ReplacedBy = "job-replacement"
+			}
+			if err := store.Put(terminal); err != nil {
+				t.Fatalf("Put(%s update) error = %v", terminalState, err)
+			}
+			if err := store.Put(runningJob(testJob(MaxRetainedJobs))); err != nil {
+				t.Fatal(err)
+			}
+			if _, exists := store.Get(terminal.ID); exists {
+				t.Fatalf("oldest %s job was not evicted", terminalState)
+			}
+			jobs := store.List()
+			if jobs[0].ID != "job-001" || jobs[len(jobs)-1].ID != "job-256" {
+				t.Fatalf("retained range = %q..%q, want job-001..job-256", jobs[0].ID, jobs[len(jobs)-1].ID)
+			}
+		})
+	}
+}
+
 func TestJobStoreRetainsNewest2048EventsWithMonotonicSequence(t *testing.T) {
 	store := NewJobStore()
 	for index := 0; index < 2100; index++ {
@@ -259,6 +295,20 @@ func TestJobStoreRejectsImpossibleSnapshotsAtomically(t *testing.T) {
 	twoNodes.Total = 2
 	twoNodes.Queued = 2
 	twoNodes.Nodes = append(twoNodes.Nodes, NodeProgress{NodeID: "node-extra", Step: "queued", State: model.StateQueued})
+	cancelledWithError := testJob(112)
+	cancelledWithError.State = JobCancelled
+	cancelledWithError.Queued = 0
+	cancelledWithError.CancelledNodes = 1
+	cancelledWithError.Cancelled = true
+	cancelledWithError.Nodes[0].Cancelled = true
+	cancelledWithError.Nodes[0].Error = &PublicError{Code: ErrorCodeInternal, Message: "internal node error"}
+	zeroCancelled := succeededJob(testJob(113))
+	zeroCancelled.State = JobCancelled
+	zeroCancelled.Cancelled = true
+	zeroReplaced := succeededJob(testJob(114))
+	zeroReplaced.State = JobReplaced
+	zeroReplaced.Cancelled = true
+	zeroReplaced.ReplacedBy = "job-next"
 	tests := []struct {
 		name string
 		job  Job
@@ -274,6 +324,9 @@ func TestJobStoreRejectsImpossibleSnapshotsAtomically(t *testing.T) {
 		{"node identities duplicate", func() Job { job := twoNodes; job.ID = "job-109"; job.Nodes[1].NodeID = job.Nodes[0].NodeID; return job }()},
 		{"node runtime state invalid", func() Job { job := testJob(110); job.Nodes[0].State = model.RuntimeState("unknown"); return job }()},
 		{"node state disagrees with aggregate", func() Job { job := testJob(111); job.Nodes[0].State = model.StateStarting; return job }()},
+		{"cancelled outcome carries failure", cancelledWithError},
+		{"cancelled job has no cancelled outcome", zeroCancelled},
+		{"replaced job has no cancelled outcome", zeroReplaced},
 	}
 
 	for _, test := range tests {
@@ -294,18 +347,182 @@ func TestJobStoreRejectsImpossibleSnapshotsAtomically(t *testing.T) {
 
 func TestJobStoreAcceptsConsistentCancellationAndReplacementSnapshots(t *testing.T) {
 	store := NewJobStore()
-	cancelled := failedJob(testJob(120))
+	cancelled := testJob(120)
 	cancelled.State = JobCancelled
+	cancelled.Queued = 0
+	cancelled.CancelledNodes = 1
 	cancelled.Cancelled = true
+	cancelled.Nodes[0].Step = "cancelled"
+	cancelled.Nodes[0].Cancelled = true
 	if err := store.Put(cancelled); err != nil {
 		t.Fatalf("Put(cancelled) error = %v", err)
 	}
-	replaced := failedJob(testJob(121))
+	replaced := testJob(121)
 	replaced.State = JobReplaced
+	replaced.Queued = 0
+	replaced.CancelledNodes = 1
 	replaced.Cancelled = true
 	replaced.ReplacedBy = "job-122"
+	replaced.Nodes[0].Step = "replaced"
+	replaced.Nodes[0].Cancelled = true
 	if err := store.Put(replaced); err != nil {
 		t.Fatalf("Put(replaced) error = %v", err)
+	}
+}
+
+func TestJobStoreRepresentsCancelledAndReplacedNodesTruthfully(t *testing.T) {
+	const secret = "cancel-outcome-secret"
+	tests := []struct {
+		name string
+		job  Job
+	}{
+		{
+			name: "cancelled",
+			job: Job{
+				ID: "job-cancelled", Kind: "reconcile", Creator: "operator", CreatedAt: stateTestEpoch,
+				ConfigRevision: 1, State: JobCancelled, Total: 3, Succeeded: 1, CancelledNodes: 2, Cancelled: true,
+				Nodes: []NodeProgress{
+					{NodeID: "node-complete", Step: "done", State: model.StateOnline, Attempt: 1},
+					{NodeID: "node-not-started", Step: "cancelled", State: model.StateQueued, Cancelled: true},
+					{NodeID: "node-interrupted", Step: "cancelled", State: model.StateStarting, Attempt: 1, Cancelled: true},
+				},
+			},
+		},
+		{
+			name: "replaced",
+			job: Job{
+				ID: "job-replaced", Kind: "import", Creator: "operator", CreatedAt: stateTestEpoch.Add(time.Second),
+				ConfigRevision: 2, State: JobReplaced, Total: 3, Failed: 1, CancelledNodes: 2,
+				Cancelled: true, ReplacedBy: "job-replacement",
+				Nodes: []NodeProgress{
+					{
+						NodeID: "node-failed", Step: "failed", State: model.StateFailed, Attempt: 1,
+						Error: &PublicError{Code: ErrorCodeProbeFailed, Message: secret},
+					},
+					{NodeID: "node-not-started", Step: "replaced", State: model.StateOnline, Cancelled: true},
+					{NodeID: "node-interrupted", Step: "replaced", State: model.StateDisabled, Attempt: 1, Cancelled: true},
+				},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := NewJobStore()
+			if err := store.Put(test.job); err != nil {
+				t.Fatalf("Put(%s) error = %v", test.name, err)
+			}
+			stored, _ := store.Get(test.job.ID)
+			if stored.CancelledNodes != 2 || stored.Succeeded+stored.Failed+stored.CancelledNodes != stored.Total {
+				t.Fatalf("stored aggregates = %#v, want two truthful cancelled outcomes", stored)
+			}
+			if !stored.Nodes[1].Cancelled || !stored.Nodes[2].Cancelled {
+				t.Fatalf("stored nodes = %#v, want explicit cancelled outcomes", stored.Nodes)
+			}
+			if test.name == "replaced" && (stored.Nodes[0].Error == nil || stored.Nodes[0].Error.Message != "connection probe failed") {
+				t.Fatalf("stored failed outcome error = %#v, want sanitized public error", stored.Nodes[0].Error)
+			}
+
+			encoded, err := json.Marshal(test.job)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var wire struct {
+				CancelledNodes int `json:"cancelled_nodes"`
+				Nodes          []struct {
+					Cancelled bool `json:"cancelled"`
+				} `json:"nodes"`
+			}
+			if err := json.Unmarshal(encoded, &wire); err != nil {
+				t.Fatal(err)
+			}
+			if wire.CancelledNodes != 2 || !wire.Nodes[1].Cancelled || !wire.Nodes[2].Cancelled {
+				t.Fatalf("JSON = %s, want cancelled count and per-node flags", encoded)
+			}
+			for _, formatted := range []string{
+				fmt.Sprintf("%#v", test.job),
+				fmt.Sprintf("%#v", test.job.Nodes[0]),
+				fmt.Sprintf("%#v", test.job.Nodes[1]),
+			} {
+				if strings.Contains(formatted, secret) {
+					t.Fatalf("formatted cancelled outcome leaked secret: %s", formatted)
+				}
+			}
+		})
+	}
+}
+
+func TestJobStoreAcceptsTruthfulCancellationAndReplacementUpdates(t *testing.T) {
+	terminalStates := []struct {
+		state      JobState
+		replacedBy string
+	}{
+		{state: JobCancelled},
+		{state: JobReplaced, replacedBy: "job-next"},
+	}
+
+	for _, terminal := range terminalStates {
+		t.Run(string(terminal.state)+" from queued", func(t *testing.T) {
+			store := NewJobStore()
+			current := testJob(123)
+			if err := store.Put(current); err != nil {
+				t.Fatal(err)
+			}
+			candidate := cloneJob(current)
+			candidate.State = terminal.state
+			candidate.Queued = 0
+			candidate.CancelledNodes = 1
+			candidate.Cancelled = true
+			candidate.ReplacedBy = terminal.replacedBy
+			candidate.Nodes[0].Step = "cancelled"
+			candidate.Nodes[0].Cancelled = true
+			if err := store.Put(candidate); err != nil {
+				t.Fatalf("Put(%s update) error = %v", terminal.state, err)
+			}
+			if err := store.Put(candidate); err != nil {
+				t.Fatalf("Put(idempotent %s update) error = %v", terminal.state, err)
+			}
+			stored, _ := store.Get(current.ID)
+			if !reflect.DeepEqual(stored, candidate) {
+				t.Fatalf("stored %s job = %#v, want %#v", terminal.state, stored, candidate)
+			}
+		})
+
+		t.Run(string(terminal.state)+" from mixed running", func(t *testing.T) {
+			store := NewJobStore()
+			current := Job{
+				ID: "job-mixed-" + string(terminal.state), Kind: "reconcile", Creator: "system",
+				CreatedAt: stateTestEpoch, ConfigRevision: 7, State: JobRunning,
+				Total: 4, Queued: 1, Running: 1, Succeeded: 1, Failed: 1,
+				Nodes: []NodeProgress{
+					{NodeID: "node-success", Step: "done", State: model.StateOnline, Attempt: 1},
+					{NodeID: "node-failed", Step: "failed", State: model.StateFailed, Attempt: 1, Error: &PublicError{Code: ErrorCodeProbeFailed, Message: "connection probe failed"}},
+					{NodeID: "node-queued", Step: "queued", State: model.StateQueued},
+					{NodeID: "node-running", Step: "start", State: model.StateStarting, Attempt: 1},
+				},
+			}
+			if err := store.Put(current); err != nil {
+				t.Fatal(err)
+			}
+			candidate := cloneJob(current)
+			candidate.State = terminal.state
+			candidate.Queued = 0
+			candidate.Running = 0
+			candidate.CancelledNodes = 2
+			candidate.Cancelled = true
+			candidate.ReplacedBy = terminal.replacedBy
+			for index := 2; index < len(candidate.Nodes); index++ {
+				candidate.Nodes[index].Step = "cancelled"
+				candidate.Nodes[index].Cancelled = true
+			}
+			if err := store.Put(candidate); err != nil {
+				t.Fatalf("Put(mixed %s update) error = %v", terminal.state, err)
+			}
+			stored, _ := store.Get(current.ID)
+			if !reflect.DeepEqual(stored, candidate) {
+				t.Fatalf("stored mixed %s job = %#v, want %#v", terminal.state, stored, candidate)
+			}
+		})
 	}
 }
 
@@ -401,6 +618,146 @@ func TestJobStoreRejectsTerminalResurrectionAndProgressRegression(t *testing.T) 
 			t.Fatal("progress regression changed stored job")
 		}
 	})
+}
+
+func TestJobStoreCancellationCannotRewriteResidualProgress(t *testing.T) {
+	mutations := []struct {
+		name   string
+		mutate func(*NodeProgress)
+	}{
+		{name: "runtime state", mutate: func(node *NodeProgress) { node.State = model.StateOnline }},
+		{name: "attempt", mutate: func(node *NodeProgress) { node.Attempt++ }},
+	}
+
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			store := NewJobStore()
+			current := testJob(154)
+			if err := store.Put(current); err != nil {
+				t.Fatal(err)
+			}
+			candidate := cloneJob(current)
+			candidate.State = JobCancelled
+			candidate.Queued = 0
+			candidate.CancelledNodes = 1
+			candidate.Cancelled = true
+			candidate.Nodes[0].Step = "cancelled"
+			candidate.Nodes[0].Cancelled = true
+			mutation.mutate(&candidate.Nodes[0])
+
+			assertJobCode(t, store.Put(candidate), ErrorCodeRevisionConflict)
+			stored, _ := store.Get(current.ID)
+			if !reflect.DeepEqual(stored, current) {
+				t.Fatal("illegal cancellation rewrite changed stored job")
+			}
+		})
+	}
+}
+
+func TestJobStoreActiveCancelledNodeOutcomeIsIrreversible(t *testing.T) {
+	active := Job{
+		ID: "job-active-cancel", Kind: "reconcile", Creator: "system", CreatedAt: stateTestEpoch,
+		ConfigRevision: 8, State: JobRunning, Total: 2, Running: 1, CancelledNodes: 1,
+		Nodes: []NodeProgress{
+			{NodeID: "node-cancelled", Step: "cancelled", State: model.StateQueued, Cancelled: true},
+			{NodeID: "node-active", Step: "start", State: model.StateStarting, Attempt: 1},
+		},
+	}
+	mutations := []struct {
+		name     string
+		wantCode string
+		mutate   func(*Job)
+	}{
+		{name: "clear cancelled flag", wantCode: ErrorCodeRevisionConflict, mutate: func(job *Job) {
+			job.CancelledNodes = 0
+			job.Queued = 1
+			job.Nodes[0].Cancelled = false
+			job.Nodes[0].Step = "queued"
+		}},
+		{name: "step", wantCode: ErrorCodeRevisionConflict, mutate: func(job *Job) { job.Nodes[0].Step = "rewritten" }},
+		{name: "state", wantCode: ErrorCodeRevisionConflict, mutate: func(job *Job) { job.Nodes[0].State = model.StateOnline }},
+		{name: "attempt", wantCode: ErrorCodeRevisionConflict, mutate: func(job *Job) { job.Nodes[0].Attempt++ }},
+		{name: "deadline", wantCode: ErrorCodeRevisionConflict, mutate: func(job *Job) { job.Nodes[0].Deadline = stateTestEpoch.Add(time.Hour) }},
+		{name: "error", wantCode: ErrorCodeInvalidConfig, mutate: func(job *Job) {
+			job.Nodes[0].Error = &PublicError{Code: ErrorCodeInternal, Message: "internal node error"}
+		}},
+	}
+
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			store := NewJobStore()
+			if err := store.Put(active); err != nil {
+				t.Fatalf("Put(active cancellation) error = %v", err)
+			}
+			candidate := cloneJob(active)
+			mutation.mutate(&candidate)
+			assertJobCode(t, store.Put(candidate), mutation.wantCode)
+			stored, _ := store.Get(active.ID)
+			if !reflect.DeepEqual(stored, active) {
+				t.Fatal("active cancelled outcome mutation changed stored job")
+			}
+		})
+	}
+
+	t.Run("terminalize remaining node", func(t *testing.T) {
+		store := NewJobStore()
+		if err := store.Put(active); err != nil {
+			t.Fatalf("Put(active cancellation) error = %v", err)
+		}
+		terminal := cloneJob(active)
+		terminal.State = JobCancelled
+		terminal.Running = 0
+		terminal.CancelledNodes = 2
+		terminal.Cancelled = true
+		terminal.Nodes[1].Step = "cancelled"
+		terminal.Nodes[1].Cancelled = true
+		if err := store.Put(terminal); err != nil {
+			t.Fatalf("Put(terminal cancellation) error = %v", err)
+		}
+		stored, _ := store.Get(active.ID)
+		if !reflect.DeepEqual(stored, terminal) {
+			t.Fatalf("stored terminal cancellation = %#v, want %#v", stored, terminal)
+		}
+	})
+}
+
+func TestJobStoreCancelledTerminalNodeOutcomeIsFullyImmutable(t *testing.T) {
+	mutations := []struct {
+		name     string
+		wantCode string
+		mutate   func(*Job)
+	}{
+		{name: "step", wantCode: ErrorCodeRevisionConflict, mutate: func(job *Job) { job.Nodes[0].Step = "rewritten" }},
+		{name: "state", wantCode: ErrorCodeRevisionConflict, mutate: func(job *Job) { job.Nodes[0].State = model.StateStarting }},
+		{name: "attempt", wantCode: ErrorCodeRevisionConflict, mutate: func(job *Job) { job.Nodes[0].Attempt++ }},
+		{name: "deadline", wantCode: ErrorCodeRevisionConflict, mutate: func(job *Job) { job.Nodes[0].Deadline = stateTestEpoch.Add(time.Hour) }},
+		{name: "error", wantCode: ErrorCodeInvalidConfig, mutate: func(job *Job) {
+			job.Nodes[0].Error = &PublicError{Code: ErrorCodeInternal, Message: "internal node error"}
+		}},
+	}
+
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			store := NewJobStore()
+			terminal := testJob(155)
+			terminal.State = JobCancelled
+			terminal.Queued = 0
+			terminal.CancelledNodes = 1
+			terminal.Cancelled = true
+			terminal.Nodes[0].Step = "cancelled"
+			terminal.Nodes[0].Cancelled = true
+			if err := store.Put(terminal); err != nil {
+				t.Fatal(err)
+			}
+			candidate := cloneJob(terminal)
+			mutation.mutate(&candidate)
+			assertJobCode(t, store.Put(candidate), mutation.wantCode)
+			stored, _ := store.Get(terminal.ID)
+			if !reflect.DeepEqual(stored, terminal) {
+				t.Fatal("terminal cancelled outcome mutation changed stored job")
+			}
+		})
+	}
 }
 
 func TestJobStoreRejectsPerNodeStateRegressionAtomically(t *testing.T) {
