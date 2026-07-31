@@ -2,6 +2,7 @@ package config
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"io"
 	"net/netip"
@@ -9,13 +10,18 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"proxypoold/internal/model"
 )
 
 // Decode reads the strict, named-section UCI subset used by ProxyPool V2.
 func Decode(r io.Reader) (model.DesiredConfig, error) {
-	sections, err := parseUCI(r)
+	contents, err := io.ReadAll(r)
+	if err != nil || !utf8.Valid(contents) {
+		return model.DesiredConfig{}, invalidConfig()
+	}
+	sections, err := parseUCI(bytes.NewReader(contents))
 	if err != nil {
 		return model.DesiredConfig{}, invalidConfig()
 	}
@@ -202,6 +208,15 @@ func uciTokens(line string) ([]string, error) {
 	escaped := false
 	flush := func() { fields = append(fields, token.String()); token.Reset(); inToken = false }
 	for _, character := range line {
+		if quote == '\'' {
+			if character == '\'' {
+				quote = 0
+			} else {
+				token.WriteRune(character)
+			}
+			inToken = true
+			continue
+		}
 		if escaped {
 			token.WriteRune(character)
 			inToken = true
@@ -213,8 +228,10 @@ func uciTokens(line string) ([]string, error) {
 			inToken = true
 			continue
 		}
-		if quote != 0 {
-			if character == quote {
+		if quote == '"' {
+			if character == '\\' {
+				escaped = true
+			} else if character == '"' {
 				quote = 0
 			} else {
 				token.WriteRune(character)
@@ -246,6 +263,11 @@ func uciTokens(line string) ([]string, error) {
 	}
 	if inToken {
 		flush()
+	}
+	for _, field := range fields {
+		if !safeUCIString(field) {
+			return nil, errors.New("unsafe uci value")
+		}
 	}
 	return fields, nil
 }
@@ -422,7 +444,7 @@ func validateCodecConfig(cfg model.DesiredConfig) error {
 	if global.RuntimeBackend != "v1" && global.RuntimeBackend != "v2_shadow" {
 		return invalidConfig()
 	}
-	if global.MaxNodes < 1 || global.MaxNodes > 60 || global.LANDevice == "" || global.L2TPConcurrency < 1 || global.ProxyConcurrency < 1 || global.ConnectTimeout <= 0 || global.StopTimeout <= 0 {
+	if global.MaxNodes < 1 || global.MaxNodes > 60 || len(cfg.Nodes) > global.MaxNodes || global.LANDevice == "" || global.L2TPConcurrency < 1 || global.ProxyConcurrency < 1 || global.ConnectTimeout <= 0 || global.StopTimeout <= 0 || len(global.ManagementPorts) == 0 || len(global.DoHEndpoints) == 0 {
 		return invalidConfig()
 	}
 	ports := make(map[uint16]struct{}, len(global.ManagementPorts))
@@ -436,14 +458,39 @@ func validateCodecConfig(cfg model.DesiredConfig) error {
 		ports[port] = struct{}{}
 	}
 	for _, endpoint := range global.DoHEndpoints {
-		if endpoint.URL == "" || endpoint.ServerName == "" {
+		if endpoint.URL == "" || endpoint.ServerName == "" || !safeUCIString(endpoint.URL) || !safeUCIString(endpoint.BootstrapIP) || !safeUCIString(endpoint.ServerName) {
 			return invalidConfig()
 		}
 		if _, err := netip.ParseAddr(endpoint.BootstrapIP); err != nil {
 			return invalidConfig()
 		}
 	}
+	if !safeUCIString(global.RuntimeBackend) || !safeUCIString(global.LANDevice) {
+		return invalidConfig()
+	}
+	for id, node := range cfg.Nodes {
+		if !safeUCIString(id) || !safeUCIString(node.ID) || !safeUCIString(node.Name) || !safeUCIString(node.Server) || !safeUCIString(node.Username) || !safeUCIString(node.Password) || !safeUCIString(node.SLPToken) || !safeUCIString(node.SLPTransport) || !safeUCIString(node.SLPObfsKey) {
+			return invalidConfig()
+		}
+	}
+	for id, device := range cfg.Devices {
+		if !safeUCIString(id) || !safeUCIString(device.ID) || !safeUCIString(device.MAC) || !safeUCIString(device.Hostname) || !safeUCIString(device.NodeID) {
+			return invalidConfig()
+		}
+	}
 	return nil
+}
+
+func safeUCIString(value string) bool {
+	if !utf8.ValidString(value) {
+		return false
+	}
+	for _, character := range value {
+		if character <= 0x1f || character == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 func writeSection(out *strings.Builder, kind, name string) {
 	out.WriteString("config ")

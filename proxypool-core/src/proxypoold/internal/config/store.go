@@ -5,10 +5,12 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sync"
+	"time"
 
 	"proxypoold/internal/model"
 )
@@ -78,7 +80,7 @@ func (s *Store) Replace(ctx context.Context, expectedRevision uint64, next model
 	if current.Revision != expectedRevision {
 		return model.DesiredConfig{}, revisionConflict()
 	}
-	if model.Validate(next) != nil {
+	if current.Revision == math.MaxUint64 || validateCodecConfig(next) != nil {
 		return model.DesiredConfig{}, invalidConfig()
 	}
 	for id, oldNode := range current.Nodes {
@@ -86,7 +88,7 @@ func (s *Store) Replace(ctx context.Context, expectedRevision uint64, next model
 			return model.DesiredConfig{}, invalidConfig()
 		}
 	}
-	next = withRevision(next, current.Revision+1)
+	next = withRevision(cloneConfig(next), current.Revision+1)
 	if err := contextError(ctx); err != nil {
 		return model.DesiredConfig{}, err
 	}
@@ -127,7 +129,8 @@ func (s *Store) Replace(ctx context.Context, expectedRevision uint64, next model
 	if err != nil {
 		return model.DesiredConfig{}, errors.New("configuration temporary validation failed")
 	}
-	if _, err := Decode(bytes.NewReader(contents)); err != nil {
+	decoded, err := Decode(bytes.NewReader(contents))
+	if err != nil || !configsEqual(decoded, next) {
 		return model.DesiredConfig{}, invalidConfig()
 	}
 	if err := contextError(ctx); err != nil {
@@ -161,6 +164,61 @@ func withRevision(cfg model.DesiredConfig, revision uint64) model.DesiredConfig 
 		cfg.Nodes[id] = node
 	}
 	return cfg
+}
+
+func cloneConfig(cfg model.DesiredConfig) model.DesiredConfig {
+	clone := cfg
+	clone.Global.ManagementPorts = append([]uint16(nil), cfg.Global.ManagementPorts...)
+	clone.Global.DoHEndpoints = append([]model.DoHEndpoint(nil), cfg.Global.DoHEndpoints...)
+	clone.Nodes = make(map[string]model.Node, len(cfg.Nodes))
+	for id, node := range cfg.Nodes {
+		if node.ExpiresAt != nil {
+			timeCopy := *node.ExpiresAt
+			node.ExpiresAt = &timeCopy
+		}
+		clone.Nodes[id] = node
+	}
+	clone.Devices = make(map[string]model.Device, len(cfg.Devices))
+	for id, device := range cfg.Devices {
+		clone.Devices[id] = device
+	}
+	return clone
+}
+
+func configsEqual(a, b model.DesiredConfig) bool {
+	if a.SchemaVersion != b.SchemaVersion || a.Revision != b.Revision || a.Global.Enabled != b.Global.Enabled || a.Global.RuntimeBackend != b.Global.RuntimeBackend || a.Global.MaxNodes != b.Global.MaxNodes || a.Global.LANDevice != b.Global.LANDevice || a.Global.L2TPConcurrency != b.Global.L2TPConcurrency || a.Global.ProxyConcurrency != b.Global.ProxyConcurrency || a.Global.ConnectTimeout != b.Global.ConnectTimeout || a.Global.StopTimeout != b.Global.StopTimeout || len(a.Global.ManagementPorts) != len(b.Global.ManagementPorts) || len(a.Global.DoHEndpoints) != len(b.Global.DoHEndpoints) || len(a.Nodes) != len(b.Nodes) || len(a.Devices) != len(b.Devices) {
+		return false
+	}
+	for i := range a.Global.ManagementPorts {
+		if a.Global.ManagementPorts[i] != b.Global.ManagementPorts[i] {
+			return false
+		}
+	}
+	for i := range a.Global.DoHEndpoints {
+		if a.Global.DoHEndpoints[i] != b.Global.DoHEndpoints[i] {
+			return false
+		}
+	}
+	for id, nodeA := range a.Nodes {
+		nodeB, ok := b.Nodes[id]
+		if !ok || nodeA.ID != nodeB.ID || nodeA.Name != nodeB.Name || nodeA.Protocol != nodeB.Protocol || nodeA.Enabled != nodeB.Enabled || nodeA.Server != nodeB.Server || nodeA.Port != nodeB.Port || nodeA.Username != nodeB.Username || nodeA.Password != nodeB.Password || nodeA.SLPToken != nodeB.SLPToken || nodeA.SLPTransport != nodeB.SLPTransport || nodeA.SLPObfs != nodeB.SLPObfs || nodeA.SLPObfsKey != nodeB.SLPObfsKey || nodeA.SLPInsecure != nodeB.SLPInsecure || nodeA.PolicyID != nodeB.PolicyID || nodeA.Revision != nodeB.Revision || !equalTime(nodeA.ExpiresAt, nodeB.ExpiresAt) {
+			return false
+		}
+	}
+	for id, deviceA := range a.Devices {
+		deviceB, ok := b.Devices[id]
+		if !ok || deviceA != deviceB {
+			return false
+		}
+	}
+	return true
+}
+
+func equalTime(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.Equal(*b)
 }
 func contextError(ctx context.Context) error {
 	select {

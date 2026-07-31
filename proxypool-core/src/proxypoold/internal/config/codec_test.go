@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/netip"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -39,6 +40,9 @@ func TestDecodeEncodeRoundTripPreservesEveryField(t *testing.T) {
 	}
 	if !sameUint16s(roundTripped.Global.ManagementPorts, cfg.Global.ManagementPorts) || !sameDoH(roundTripped.Global.DoHEndpoints, cfg.Global.DoHEndpoints) {
 		t.Fatalf("round-tripped global lists differ")
+	}
+	if !configsEqual(roundTripped, cfg) {
+		t.Fatal("complete semantic round trip differs")
 	}
 	node, ok := roundTripped.Nodes["node-b"]
 	if !ok || node.Name != "Bob's node" || node.Protocol != model.ProtocolSLP || node.ExpiresAt == nil {
@@ -136,6 +140,189 @@ func TestCodecRejectsInvalidGlobalScalarValues(t *testing.T) {
 	assertCode(t, Encode(&encoded, invalid), "invalid_config")
 }
 
+func TestEncodeDecodeRoundTripSpecialUCIValues(t *testing.T) {
+	for name, value := range map[string]string{
+		"apostrophe":         "apostrophe's value",
+		"backslash":          `backslash\value`,
+		"double quote":       `double " quote`,
+		"comment marker":     "value # is data",
+		"empty string":       "",
+		"adjacent fragments": `left'right\\tail`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := specialValueConfig(value)
+			var encoded bytes.Buffer
+			if err := Encode(&encoded, cfg); err != nil {
+				t.Fatalf("Encode(): %v", err)
+			}
+			decoded, err := Decode(bytes.NewReader(encoded.Bytes()))
+			if err != nil {
+				t.Fatalf("Decode(encoded config): %v", err)
+			}
+			if !safeConfigsEqual(decoded, cfg) {
+				t.Fatal("semantic round trip differs")
+			}
+		})
+	}
+}
+
+func TestDecodeSupportsQuotedFragmentsAndTrailingComment(t *testing.T) {
+	input, err := os.ReadFile("testdata/v2-valid.uci")
+	if err != nil {
+		t.Fatalf("read valid fixture: %v", err)
+	}
+	input = bytes.Replace(input, []byte("option runtime_backend 'v2_shadow'"), []byte("option runtime_backend 'v2_'\"shadow\" # trailing comment"), 1)
+	input = bytes.Replace(input, []byte("option password 'fixture-password-not-real'"), []byte("option password 'left'\\''right\\tail' # trailing comment"), 1)
+	decoded, err := Decode(bytes.NewReader(input))
+	if err != nil {
+		t.Fatalf("Decode(): %v", err)
+	}
+	if decoded.Global.RuntimeBackend != "v2_shadow" || decoded.Nodes["node-a"].Password != "left'right\\tail" {
+		t.Fatal("quoted fragments or comment were not parsed correctly")
+	}
+}
+
+func TestCodecRejectsUnsafeStringsWithoutLeakingThem(t *testing.T) {
+	unsafe := []string{"line\nfeed", "carriage\rreturn", "nul\x00byte", "tab\tbyte", string([]byte{0xff})}
+	for _, value := range unsafe {
+		cfg := specialValueConfig(value)
+		var encoded bytes.Buffer
+		err := Encode(&encoded, cfg)
+		assertCode(t, err, "invalid_config")
+		if err != nil && strings.Contains(err.Error(), value) {
+			t.Fatal("encode error leaked unsafe value")
+		}
+	}
+	for _, input := range [][]byte{[]byte("config global 'global'\n\x00"), {0xff}} {
+		_, err := Decode(bytes.NewReader(input))
+		assertCode(t, err, "invalid_config")
+	}
+}
+
+func TestCodecRequiresGlobalCapacityDoHAndManagementPort(t *testing.T) {
+	for name, mutate := range map[string]func(*model.DesiredConfig){
+		"capacity": func(cfg *model.DesiredConfig) { cfg.Global.MaxNodes = 1 },
+		"doh":      func(cfg *model.DesiredConfig) { cfg.Global.DoHEndpoints = nil },
+		"port":     func(cfg *model.DesiredConfig) { cfg.Global.ManagementPorts = nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := validConfig()
+			mutate(&cfg)
+			var encoded bytes.Buffer
+			assertCode(t, Encode(&encoded, cfg), "invalid_config")
+		})
+	}
+}
+
+func TestDecodeRequiresGlobalCapacityDoHAndManagementPort(t *testing.T) {
+	fixture, err := os.ReadFile("testdata/v2-valid.uci")
+	if err != nil {
+		t.Fatalf("read valid fixture: %v", err)
+	}
+	for name, mutate := range map[string]func([]byte) []byte{
+		"capacity": func(input []byte) []byte {
+			return bytes.Replace(input, []byte("option max_nodes '60'"), []byte("option max_nodes '1'"), 1)
+		},
+		"doh": func(input []byte) []byte {
+			input = bytes.Replace(input, []byte("\tlist doh_url 'https://dns.example/dns-query'\n"), nil, 1)
+			input = bytes.Replace(input, []byte("\tlist doh_bootstrap_ip '192.0.2.53'\n"), nil, 1)
+			return bytes.Replace(input, []byte("\tlist doh_server_name 'dns.example'\n"), nil, 1)
+		},
+		"port": func(input []byte) []byte {
+			input = bytes.Replace(input, []byte("\tlist management_port '80'\n"), nil, 1)
+			return bytes.Replace(input, []byte("\tlist management_port '443'\n"), nil, 1)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := Decode(bytes.NewReader(mutate(append([]byte(nil), fixture...))))
+			assertCode(t, err, "invalid_config")
+		})
+	}
+}
+
+func TestEncodeRejectsUnsafeStringInEveryConfigArea(t *testing.T) {
+	unsafe := "unsafe\x00value"
+	for name, mutate := range map[string]func(*model.DesiredConfig){
+		"global LAN":    func(cfg *model.DesiredConfig) { cfg.Global.LANDevice = unsafe },
+		"DoH URL":       func(cfg *model.DesiredConfig) { cfg.Global.DoHEndpoints[0].URL = unsafe },
+		"DoH bootstrap": func(cfg *model.DesiredConfig) { cfg.Global.DoHEndpoints[0].BootstrapIP = unsafe },
+		"DoH server":    func(cfg *model.DesiredConfig) { cfg.Global.DoHEndpoints[0].ServerName = unsafe },
+		"node ID": func(cfg *model.DesiredConfig) {
+			node := cfg.Nodes["node-a"]
+			node.ID = unsafe
+			delete(cfg.Nodes, "node-a")
+			cfg.Nodes[unsafe] = node
+		},
+		"node name": func(cfg *model.DesiredConfig) {
+			node := cfg.Nodes["node-a"]
+			node.Name = unsafe
+			cfg.Nodes["node-a"] = node
+		},
+		"node server": func(cfg *model.DesiredConfig) {
+			node := cfg.Nodes["node-a"]
+			node.Server = unsafe
+			cfg.Nodes["node-a"] = node
+		},
+		"node username": func(cfg *model.DesiredConfig) {
+			node := cfg.Nodes["node-a"]
+			node.Username = unsafe
+			cfg.Nodes["node-a"] = node
+		},
+		"node password": func(cfg *model.DesiredConfig) {
+			node := cfg.Nodes["node-a"]
+			node.Password = unsafe
+			cfg.Nodes["node-a"] = node
+		},
+		"node token": func(cfg *model.DesiredConfig) {
+			node := cfg.Nodes["node-a"]
+			node.Protocol = model.ProtocolSLP
+			node.SLPTransport = "quic"
+			node.SLPToken = unsafe
+			cfg.Nodes["node-a"] = node
+		},
+		"node transport": func(cfg *model.DesiredConfig) {
+			node := cfg.Nodes["node-a"]
+			node.Protocol = model.ProtocolSLP
+			node.SLPToken = "fixture-token"
+			node.SLPTransport = unsafe
+			cfg.Nodes["node-a"] = node
+		},
+		"node obfs key": func(cfg *model.DesiredConfig) {
+			node := cfg.Nodes["node-a"]
+			node.SLPObfsKey = unsafe
+			cfg.Nodes["node-a"] = node
+		},
+		"device ID": func(cfg *model.DesiredConfig) {
+			device := cfg.Devices["device-a"]
+			device.ID = unsafe
+			delete(cfg.Devices, "device-a")
+			cfg.Devices[unsafe] = device
+		},
+		"device MAC": func(cfg *model.DesiredConfig) {
+			device := cfg.Devices["device-a"]
+			device.MAC = unsafe
+			cfg.Devices["device-a"] = device
+		},
+		"device hostname": func(cfg *model.DesiredConfig) {
+			device := cfg.Devices["device-a"]
+			device.Hostname = unsafe
+			cfg.Devices["device-a"] = device
+		},
+		"device node ID": func(cfg *model.DesiredConfig) {
+			device := cfg.Devices["device-a"]
+			device.NodeID = unsafe
+			cfg.Devices["device-a"] = device
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := validConfig()
+			mutate(&cfg)
+			var encoded bytes.Buffer
+			assertCode(t, Encode(&encoded, cfg), "invalid_config")
+		})
+	}
+}
+
 func assertCode(t *testing.T, err error, want string) {
 	t.Helper()
 	var codeErr *model.CodeError
@@ -171,6 +358,10 @@ func sameDoH(a, b []model.DoHEndpoint) bool {
 	return true
 }
 
+func safeConfigsEqual(a, b model.DesiredConfig) bool {
+	return reflect.DeepEqual(a, b)
+}
+
 func validConfig() model.DesiredConfig {
 	return model.DesiredConfig{
 		SchemaVersion: 2,
@@ -197,6 +388,30 @@ func validConfig() model.DesiredConfig {
 			"device-a": {ID: "device-a", MAC: "00:11:22:33:44:55", Hostname: "A", FixedIPv4: mustAddr("192.0.2.10"), NodeID: "node-a", Enabled: true},
 		},
 	}
+}
+
+func specialValueConfig(value string) model.DesiredConfig {
+	cfg := validConfig()
+	node := cfg.Nodes["node-a"]
+	node.Name = "Special node"
+	node.Username = value
+	node.Password = value
+	node.SLPToken = "fixture-token"
+	if value != "" {
+		node.SLPToken = value
+	}
+	node.SLPTransport = "quic"
+	node.SLPObfs = true
+	node.SLPObfsKey = value
+	node.Protocol = model.ProtocolSLP
+	cfg.Nodes["node-a"] = node
+	device := cfg.Devices["device-a"]
+	device.Hostname = value
+	cfg.Devices["device-a"] = device
+	global := cfg.Global
+	global.LANDevice = "br-lan"
+	cfg.Global = global
+	return cfg
 }
 
 func mustAddr(text string) netip.Addr {
