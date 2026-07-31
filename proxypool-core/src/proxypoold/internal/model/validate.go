@@ -96,9 +96,6 @@ func validateNodeProtocol(nodes map[string]Node, nodeKeys []string) error {
 			if node.SLPTransport != "quic" {
 				return invalid("invalid_config", "SLP transport is unsupported")
 			}
-			if node.SLPObfs && node.SLPObfsKey == "" {
-				return invalid("invalid_config", "SLP obfuscation key is required")
-			}
 		}
 	}
 	return nil
@@ -117,7 +114,7 @@ func validateDeviceMACs(devices map[string]Device, deviceKeys []string) error {
 	macs := make(map[string]struct{}, len(devices))
 	for _, key := range deviceKeys {
 		mac, err := net.ParseMAC(devices[key].MAC)
-		if err != nil {
+		if err != nil || len(mac) != 6 {
 			return invalid("invalid_config", "device MAC is invalid")
 		}
 		macKey := mac.String()

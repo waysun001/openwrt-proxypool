@@ -368,6 +368,20 @@ func TestValidateDeviceBindingAndAddressRules(t *testing.T) {
 	})
 }
 
+func TestValidateRejectsNon48BitMACAddresses(t *testing.T) {
+	for _, mac := range []string{
+		"00:11:22:33:44:55:66:77",
+		"00:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff:00:11:22:33",
+	} {
+		t.Run(mac, func(t *testing.T) {
+			cfg := withDevices(validConfig(), map[string]model.Device{
+				"device-01": validDevice("device-01", mac, "192.0.2.10"),
+			})
+			assertCode(t, model.Validate(cfg), "invalid_config")
+		})
+	}
+}
+
 func TestValidateProtocolCredentialRules(t *testing.T) {
 	tests := []struct {
 		name string
@@ -439,7 +453,7 @@ func TestValidateProtocolCredentialRules(t *testing.T) {
 			code: "invalid_config",
 		},
 		{
-			name: "rejects SLP obfuscation without key",
+			name: "allows SLP obfuscation with token fallback",
 			node: model.Node{
 				ID:           "node-01",
 				Name:         "Node 01",
@@ -451,7 +465,6 @@ func TestValidateProtocolCredentialRules(t *testing.T) {
 				SLPObfs:      true,
 				PolicyID:     1,
 			},
-			code: "invalid_config",
 		},
 	}
 
