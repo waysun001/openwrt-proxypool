@@ -318,8 +318,9 @@ func (m *Machine) transition(record *nodeRecord, event Event) error {
 		if !canStop(record.status.State) {
 			return internalTransitionError()
 		}
-		if record.status.State == model.StateRecovering {
-			// Recovery owns the node until its matching completion releases it.
+		if record.status.State == model.StateStopping || record.status.State == model.StateRecovering {
+			// The in-flight stop or recovery operation owns the node until its
+			// matching completion releases it.
 			// A stop request only changes the desired post-barrier outcome; it
 			// must not invalidate or overlap the cleanup already in flight.
 			record.status.ReconnectPending = false
@@ -629,7 +630,7 @@ func validEventKind(kind EventKind) bool {
 func canStop(state model.RuntimeState) bool {
 	switch state {
 	case model.StateQueued, model.StateStarting, model.StateValidating, model.StateOnline,
-		model.StateDegraded, model.StateFailed, model.StateBackoff, model.StateRecovering:
+		model.StateDegraded, model.StateStopping, model.StateFailed, model.StateBackoff, model.StateRecovering:
 		return true
 	default:
 		return false

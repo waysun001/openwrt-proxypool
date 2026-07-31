@@ -539,6 +539,203 @@ func TestMachineManualReconnectWaitsForActiveOperationCleanup(t *testing.T) {
 	}
 }
 
+func TestMachineStopSupersedesReconnectWhileStopping(t *testing.T) {
+	tests := []struct {
+		name         string
+		cleanupEntry EventKind
+		cleanupError *model.CodeError
+	}{
+		{name: "stopped acknowledgement"},
+		{name: "timeout cleanup acknowledgement", cleanupEntry: EventTimeout},
+		{
+			name: "adapter stop timeout cleanup acknowledgement", cleanupEntry: EventFailure,
+			cleanupError: &model.CodeError{Code: ErrorCodeStopTimeout, Message: "raw adapter detail"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			machine := NewMachine(NewRetryPolicy(zeroSource{}))
+			applyMachineEvent(t, machine, "node-a", 1, EventEnable, nil, stateTestEpoch)
+			applyMachineEvent(t, machine, "node-a", 1, EventStart, nil, stateTestEpoch.Add(time.Second))
+			stopping := applyMachineEventForJob(t, machine, "node-a", "reconnect-owner", 1, EventManualReconnect, nil, stateTestEpoch.Add(2*time.Second))
+			if stopping.State != model.StateStopping || stopping.Generation != 2 || stopping.JobID != "reconnect-owner" || !stopping.ReconnectPending {
+				t.Fatalf("reconnect barrier = %#v, want stopping owner generation 2", stopping)
+			}
+
+			beforeStop := cloneNodeRecord(machine.nodes["node-a"])
+			stopAt := stateTestEpoch.Add(3 * time.Second)
+			pendingStop, err := machine.Apply(Event{
+				NodeID: "node-a", JobID: "latest-stop", Generation: stopping.Generation,
+				Kind: EventStop, At: stopAt,
+			})
+			if err != nil {
+				t.Fatalf("Apply(stop superseding reconnect) error = %v", err)
+			}
+			expected := cloneNodeRecord(beforeStop)
+			expected.status.UpdatedAt = stopAt
+			expected.status.ReconnectPending = false
+			expected.pendingJobID = "latest-stop"
+			expected.resumeAfterRecovery = false
+			if got := machine.nodes["node-a"]; !reflect.DeepEqual(got, expected) {
+				t.Fatalf("deferred stop changed cleanup ownership or unrelated state:\n got: %#v\nwant: %#v", got, expected)
+			}
+			if pendingStop.State != model.StateStopping || pendingStop.Generation != 2 || pendingStop.JobID != "reconnect-owner" || pendingStop.ReconnectPending {
+				t.Fatalf("pending stop status = %#v, want stopping owner retained and reconnect cleared", pendingStop)
+			}
+
+			releaseKind := EventStopped
+			if test.cleanupEntry != "" {
+				barrier := applyMachineEventForJob(t, machine, "node-a", "reconnect-owner", 2, test.cleanupEntry, test.cleanupError, stateTestEpoch.Add(4*time.Second))
+				if barrier.State != model.StateRecovering || !barrier.CleanupPending || barrier.ReconnectPending || barrier.JobID != "reconnect-owner" || barrier.Generation != 2 {
+					t.Fatalf("stop-timeout barrier = %#v, want cleanup owned by reconnect operation", barrier)
+				}
+				if stored := machine.nodes["node-a"]; stored.pendingJobID != "latest-stop" || stored.resumeAfterRecovery {
+					t.Fatalf("stop-timeout barrier lost deferred stop intent: %#v", stored)
+				}
+				releaseKind = EventCleanupComplete
+			}
+
+			for name, completion := range map[string]Event{
+				"latest intent is not owner": {
+					NodeID: "node-a", JobID: "latest-stop", Generation: 2,
+					Kind: releaseKind, At: stateTestEpoch.Add(5 * time.Second),
+				},
+				"stale owner generation": {
+					NodeID: "node-a", JobID: "reconnect-owner", Generation: 1,
+					Kind: releaseKind, At: stateTestEpoch.Add(5 * time.Second),
+				},
+			} {
+				beforeCompletion := cloneNodeRecord(machine.nodes["node-a"])
+				if _, completionErr := machine.Apply(completion); completionErr != nil {
+					t.Fatalf("Apply(%s completion) error = %v", name, completionErr)
+				}
+				if after := machine.nodes["node-a"]; !reflect.DeepEqual(after, beforeCompletion) {
+					t.Fatalf("%s completion released or changed owner barrier:\n got: %#v\nwant: %#v", name, after, beforeCompletion)
+				}
+			}
+
+			disabled := applyMachineEventForJob(t, machine, "node-a", "reconnect-owner", 2, releaseKind, nil, stateTestEpoch.Add(6*time.Second))
+			if disabled.State != model.StateDisabled || disabled.Generation != 2 || disabled.JobID != "latest-stop" || disabled.CleanupPending || disabled.ReconnectPending {
+				t.Fatalf("owner acknowledgement = %#v, want latest stop released to disabled", disabled)
+			}
+			if stored := machine.nodes["node-a"]; stored.pendingJobID != "" || stored.resumeAfterRecovery {
+				t.Fatalf("released stop retained private barrier metadata: %#v", stored)
+			}
+			afterRelease := cloneNodeRecord(machine.nodes["node-a"])
+			if _, lateErr := machine.Apply(Event{
+				NodeID: "node-a", JobID: "reconnect-owner", Generation: 2,
+				Kind: releaseKind, At: stateTestEpoch.Add(7 * time.Second),
+			}); lateErr != nil {
+				t.Fatalf("Apply(late owner completion) error = %v", lateErr)
+			}
+			if after := machine.nodes["node-a"]; !reflect.DeepEqual(after, afterRelease) {
+				t.Fatalf("late owner completion changed released stop:\n got: %#v\nwant: %#v", after, afterRelease)
+			}
+		})
+	}
+}
+
+func TestMachineStopSupersedesPendingReconnectWithoutChangingDistinctStopOwner(t *testing.T) {
+	machine := NewMachine(NewRetryPolicy(zeroSource{}))
+	applyMachineEventForJob(t, machine, "node-a", "active-job", 1, EventEnable, nil, stateTestEpoch)
+	stopping := applyMachineEventForJob(t, machine, "node-a", "stop-owner", 1, EventStop, nil, stateTestEpoch.Add(time.Second))
+	pendingReconnect := applyMachineEventForJob(t, machine, "node-a", "reconnect-intent", stopping.Generation, EventManualReconnect, nil, stateTestEpoch.Add(2*time.Second))
+	if pendingReconnect.State != model.StateStopping || pendingReconnect.JobID != "stop-owner" || pendingReconnect.Generation != 2 || !pendingReconnect.ReconnectPending {
+		t.Fatalf("pending reconnect = %#v, want distinct stop owner retained", pendingReconnect)
+	}
+
+	pendingStop := applyMachineEventForJob(t, machine, "node-a", "latest-stop", 2, EventStop, nil, stateTestEpoch.Add(3*time.Second))
+	if pendingStop.State != model.StateStopping || pendingStop.JobID != "stop-owner" || pendingStop.Generation != 2 || pendingStop.ReconnectPending {
+		t.Fatalf("superseding stop = %#v, want original stop owner retained", pendingStop)
+	}
+	if stored := machine.nodes["node-a"]; stored.pendingJobID != "latest-stop" || stored.resumeAfterRecovery {
+		t.Fatalf("superseding stop record = %#v, want latest stop intent", stored)
+	}
+
+	beforeWrongOwner := cloneNodeRecord(machine.nodes["node-a"])
+	if _, err := machine.Apply(Event{
+		NodeID: "node-a", JobID: "reconnect-intent", Generation: 2,
+		Kind: EventStopped, At: stateTestEpoch.Add(4 * time.Second),
+	}); err != nil {
+		t.Fatalf("Apply(pending reconnect completion) error = %v", err)
+	}
+	if after := machine.nodes["node-a"]; !reflect.DeepEqual(after, beforeWrongOwner) {
+		t.Fatalf("pending reconnect incorrectly released stop-owner barrier:\n got: %#v\nwant: %#v", after, beforeWrongOwner)
+	}
+
+	disabled := applyMachineEventForJob(t, machine, "node-a", "stop-owner", 2, EventStopped, nil, stateTestEpoch.Add(5*time.Second))
+	if disabled.State != model.StateDisabled || disabled.Generation != 2 || disabled.JobID != "latest-stop" || disabled.ReconnectPending {
+		t.Fatalf("stop owner acknowledgement = %#v, want latest stop disabled", disabled)
+	}
+}
+
+func TestMachineRepeatedStopWhileStoppingUsesLatestIntentWithoutGenerationBudget(t *testing.T) {
+	machine := NewMachine(NewRetryPolicy(zeroSource{}))
+	applyMachineEventForJob(t, machine, "node-a", "active-job", math.MaxUint64-1, EventEnable, nil, stateTestEpoch)
+	stopping := applyMachineEventForJob(t, machine, "node-a", "stop-owner", math.MaxUint64-1, EventStop, nil, stateTestEpoch.Add(time.Second))
+	if stopping.State != model.StateStopping || stopping.Generation != math.MaxUint64 || stopping.JobID != "stop-owner" || stopping.ReconnectPending {
+		t.Fatalf("initial stop = %#v, want stopping at generation max", stopping)
+	}
+
+	for index, jobID := range []string{"newer-stop", "latest-stop"} {
+		before := cloneNodeRecord(machine.nodes["node-a"])
+		at := stateTestEpoch.Add(time.Duration(index+2) * time.Second)
+		status, err := machine.Apply(Event{
+			NodeID: "node-a", JobID: jobID, Generation: math.MaxUint64,
+			Kind: EventStop, At: at,
+		})
+		if err != nil {
+			t.Fatalf("Apply(repeated stop %q at generation max) error = %v", jobID, err)
+		}
+		expected := cloneNodeRecord(before)
+		expected.status.UpdatedAt = at
+		expected.status.ReconnectPending = false
+		expected.pendingJobID = jobID
+		expected.resumeAfterRecovery = false
+		if got := machine.nodes["node-a"]; !reflect.DeepEqual(got, expected) {
+			t.Fatalf("repeated stop %q changed owner token or unrelated state:\n got: %#v\nwant: %#v", jobID, got, expected)
+		}
+		if status.Generation != math.MaxUint64 || status.JobID != "stop-owner" || status.State != model.StateStopping {
+			t.Fatalf("repeated stop status = %#v, want original owner at generation max", status)
+		}
+	}
+
+	beforeOverflow := cloneNodeRecord(machine.nodes["node-a"])
+	_, overflowErr := machine.Apply(Event{
+		NodeID: "node-a", JobID: "reconnect-after-stop", Generation: math.MaxUint64,
+		Kind: EventManualReconnect, At: stateTestEpoch.Add(4 * time.Second),
+	})
+	assertInternalError(t, overflowErr)
+	if after := machine.nodes["node-a"]; !reflect.DeepEqual(after, beforeOverflow) {
+		t.Fatalf("overflowing reconnect changed latest stop intent:\n got: %#v\nwant: %#v", after, beforeOverflow)
+	}
+
+	for name, completion := range map[string]Event{
+		"latest intent is not owner": {
+			NodeID: "node-a", JobID: "latest-stop", Generation: math.MaxUint64,
+			Kind: EventStopped, At: stateTestEpoch.Add(5 * time.Second),
+		},
+		"stale owner generation": {
+			NodeID: "node-a", JobID: "stop-owner", Generation: math.MaxUint64 - 1,
+			Kind: EventStopped, At: stateTestEpoch.Add(5 * time.Second),
+		},
+	} {
+		before := cloneNodeRecord(machine.nodes["node-a"])
+		if _, err := machine.Apply(completion); err != nil {
+			t.Fatalf("Apply(%s completion) error = %v", name, err)
+		}
+		if after := machine.nodes["node-a"]; !reflect.DeepEqual(after, before) {
+			t.Fatalf("%s completion changed max-generation barrier", name)
+		}
+	}
+
+	disabled := applyMachineEventForJob(t, machine, "node-a", "stop-owner", math.MaxUint64, EventStopped, nil, stateTestEpoch.Add(6*time.Second))
+	if disabled.State != model.StateDisabled || disabled.Generation != math.MaxUint64 || disabled.JobID != "latest-stop" {
+		t.Fatalf("owner acknowledgement = %#v, want latest stop disabled at generation max", disabled)
+	}
+}
+
 func TestMachineManualReconnectDefersWhileRecovering(t *testing.T) {
 	machine := NewMachine(NewRetryPolicy(rand.NewSource(18)))
 	applyMachineEvent(t, machine, "node-a", 1, EventEnable, nil, stateTestEpoch)
@@ -1007,7 +1204,7 @@ func TestMachineRejectsEveryUnlistedStateEventPairWithoutMutatingRecord(t *testi
 		model.StateValidating: {EventValidated: true, EventStop: true, EventFailure: true, EventTimeout: true, EventRecover: true, EventManualReconnect: true},
 		model.StateOnline:     {EventDegraded: true, EventStop: true, EventFailure: true, EventTimeout: true, EventRecover: true, EventManualReconnect: true, EventStableOnline: true},
 		model.StateDegraded:   {EventHealthy: true, EventStop: true, EventFailure: true, EventTimeout: true, EventRecover: true, EventManualReconnect: true},
-		model.StateStopping:   {EventStopped: true, EventFailure: true, EventTimeout: true, EventManualReconnect: true},
+		model.StateStopping:   {EventStop: true, EventStopped: true, EventFailure: true, EventTimeout: true, EventManualReconnect: true},
 		model.StateFailed:     {EventStop: true, EventRecover: true, EventManualReconnect: true},
 		model.StateBackoff:    {EventStop: true, EventRetryDue: true, EventWANAvailable: true, EventRecover: true, EventManualReconnect: true},
 		model.StateRecovering: {EventStop: true, EventFailure: true, EventTimeout: true, EventRecovered: true, EventCleanupComplete: true, EventManualReconnect: true},
