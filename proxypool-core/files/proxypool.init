@@ -1,65 +1,284 @@
 #!/bin/sh /etc/rc.common
-# 智联盒子服务启动脚本
 
 START=99
 STOP=10
+USE_PROCD=1
 
-PROG="/usr/lib/proxypool/proxypool.sh"
+PROG="${PROXYPOOL_LEGACY_PROG:-/usr/lib/proxypool/proxypool.sh}"
+LEASE_PROG="${PROXYPOOL_LEASE_PROG:-/usr/lib/proxypool/lease.sh}"
+WATCHDOG_PROG="${PROXYPOOL_WATCHDOG_PROG:-/usr/lib/proxypool/watchdog.sh}"
+CRON_INIT="${PROXYPOOL_CRON_INIT:-/etc/init.d/cron}"
+XL2TPD_INIT="${PROXYPOOL_XL2TPD_INIT:-/etc/init.d/xl2tpd}"
+CRONTAB_ROOT="${PROXYPOOL_CRONTAB_ROOT:-/etc/crontabs/root}"
+XL2TPD_PID="${PROXYPOOL_XL2TPD_PID:-/var/run/xl2tpd.pid}"
+RUNTIME_MARKER="${PROXYPOOL_RUNTIME_MARKER:-/var/run/proxypool.backend}"
+LEGACY_RUN_DIR="${PROXYPOOL_LEGACY_RUN_DIR:-/var/run/proxypool}"
 
-start() {
-    local enabled
-    config_load proxypool
-    config_get enabled global enabled 1
+# rc.common opens the procd service JSON transaction before start_service and
+# commits it afterwards. These globals carry the decision into
+# service_started, which runs only after that commit has completed.
+PROXYPOOL_PENDING_BACKEND=
+PROXYPOOL_START_RESULT=0
 
-    [ "$enabled" = "0" ] && return 0
+legacy_start() {
+	local sys_pid
 
-    # 禁用系统 xl2tpd，避免占用 1701 端口导致独立实例冲突
-    if /etc/init.d/xl2tpd enabled 2>/dev/null; then
-        /etc/init.d/xl2tpd stop 2>/dev/null
-        /etc/init.d/xl2tpd disable 2>/dev/null
-    fi
-    # 确保系统 xl2tpd 进程已停止
-    local sys_pid
-    sys_pid=$(cat /var/run/xl2tpd.pid 2>/dev/null)
-    if [ -n "$sys_pid" ] && kill -0 "$sys_pid" 2>/dev/null; then
-        kill "$sys_pid" 2>/dev/null
-        sleep 1
-    fi
+	# Preserve the V1 runtime exactly for rollback. The v2_shadow branch never
+	# enters this function.
+	if "$XL2TPD_INIT" enabled 2>/dev/null; then
+		"$XL2TPD_INIT" stop 2>/dev/null
+		"$XL2TPD_INIT" disable 2>/dev/null
+	fi
+	sys_pid=$(cat "$XL2TPD_PID" 2>/dev/null)
+	if [ -n "$sys_pid" ] && kill -0 "$sys_pid" 2>/dev/null; then
+		kill "$sys_pid" 2>/dev/null
+		sleep 1
+	fi
 
-    echo "Starting 智联盒子..."
-    $PROG start
+	echo "Starting ProxyPool V1..."
+	"$PROG" start
+	"$LEASE_PROG" boot 2>/dev/null
 
-    # 使用期限：初始化本次开机的累计基准（基于 uptime 单调时钟）
-    /usr/lib/proxypool/lease.sh boot 2>/dev/null
-
-    # 注册 cron（幂等：先删旧条目再添加）
-    sed -i '\|/usr/lib/proxypool/watchdog.sh|d' /etc/crontabs/root 2>/dev/null
-    sed -i '\|/usr/lib/proxypool/lease.sh|d' /etc/crontabs/root 2>/dev/null
-    echo "* * * * * /usr/lib/proxypool/watchdog.sh run" >> /etc/crontabs/root
-    echo "*/5 * * * * /usr/lib/proxypool/lease.sh accrue" >> /etc/crontabs/root
-    /etc/init.d/cron restart 2>/dev/null
+	sed -i "\|$WATCHDOG_PROG|d" "$CRONTAB_ROOT" 2>/dev/null
+	sed -i "\|$LEASE_PROG|d" "$CRONTAB_ROOT" 2>/dev/null
+	echo "* * * * * $WATCHDOG_PROG run" >>"$CRONTAB_ROOT"
+	echo "*/5 * * * * $LEASE_PROG accrue" >>"$CRONTAB_ROOT"
+	"$CRON_INIT" restart 2>/dev/null
 }
 
-stop() {
-    echo "Stopping 智联盒子..."
-    $PROG stop
-
-    # 使用期限：停止前把实时累计落盘，避免丢失本次开机已累计的时长
-    /usr/lib/proxypool/lease.sh flush 2>/dev/null
-
-    # 移除 cron
-    sed -i '\|/usr/lib/proxypool/watchdog.sh|d' /etc/crontabs/root 2>/dev/null
-    sed -i '\|/usr/lib/proxypool/lease.sh|d' /etc/crontabs/root 2>/dev/null
-    /etc/init.d/cron restart 2>/dev/null
+legacy_stop() {
+	echo "Stopping ProxyPool V1..."
+	"$PROG" stop
+	"$LEASE_PROG" flush 2>/dev/null
+	sed -i "\|$WATCHDOG_PROG|d" "$CRONTAB_ROOT" 2>/dev/null
+	sed -i "\|$LEASE_PROG|d" "$CRONTAB_ROOT" 2>/dev/null
+	"$CRON_INIT" restart 2>/dev/null
 }
 
-restart() {
-    stop
-    sleep 2
-    start
+legacy_reload() {
+	echo "Reloading ProxyPool V1..."
+	"$PROG" reload
 }
 
-reload() {
-    echo "Reloading 智联盒子..."
-    $PROG reload
+read_runtime_backend() {
+	local recorded=""
+	if [ -r "$RUNTIME_MARKER" ]; then
+		IFS= read -r recorded <"$RUNTIME_MARKER"
+	fi
+	printf '%s' "$recorded"
+}
+
+write_runtime_backend() {
+	local marker_tmp="${RUNTIME_MARKER}.$$"
+	(umask 077 && printf '%s\n' "$1" >"$marker_tmp") || {
+		rm -f "$marker_tmp"
+		return 1
+	}
+	mv -f "$marker_tmp" "$RUNTIME_MARKER" || {
+		rm -f "$marker_tmp"
+		return 1
+	}
+}
+
+cleanup_recorded_backend() {
+	local previous
+	previous=$(read_runtime_backend)
+	case "$previous" in
+		v1)
+			legacy_stop
+			;;
+		v2_shadow)
+			procd_kill proxypool
+			;;
+		"")
+			# Upgrade compatibility: old V1 packages predate the marker but leave
+			# their private runtime directory while active.
+			if [ -d "$LEGACY_RUN_DIR" ]; then
+				legacy_stop
+			fi
+			;;
+		*)
+			# An untrusted marker must never select the mutating legacy path.
+			procd_kill proxypool
+			rm -f "$RUNTIME_MARKER"
+			return 1
+			;;
+	esac
+	rm -f "$RUNTIME_MARKER"
+}
+
+start_shadow() {
+	procd_open_instance || return 1
+	procd_set_param command /usr/sbin/proxypoold --config /etc/config/proxypool --socket /var/run/proxypoold.sock --shadow || return 1
+	procd_set_param respawn 3600 5 5 || return 1
+	procd_set_param stdout 1 || return 1
+	procd_set_param stderr 1 || return 1
+	procd_close_instance || return 1
+}
+
+# Prepare the old side while rc.common has a procd JSON transaction open.
+# Calling procd_kill here would run json_init/json_cleanup and corrupt that
+# transaction. An old shadow instance is instead replaced (or stopped) by the
+# final procd service-set. The synchronous V1 side is safe to stop here.
+prepare_recorded_backend_for_start() {
+	local previous="$1"
+	case "$previous" in
+		v1)
+			legacy_stop
+			;;
+		v2_shadow)
+			:
+			;;
+		"")
+			if [ -d "$LEGACY_RUN_DIR" ]; then
+				legacy_stop
+			fi
+			;;
+		*)
+			# The empty service-set still stops any procd-managed process, but
+			# an untrusted marker must not select or start either backend.
+			return 1
+			;;
+	esac
+}
+
+start_service() {
+	local enabled runtime_backend previous result
+	local already_cleaned="${PROXYPOOL_START_ALREADY_CLEANED:-0}"
+	PROXYPOOL_PENDING_BACKEND=
+	PROXYPOOL_START_RESULT=0
+	PROXYPOOL_START_ALREADY_CLEANED=0
+	config_load proxypool
+	config_get enabled global enabled 1
+	config_get runtime_backend global runtime_backend v1
+	previous=$(read_runtime_backend)
+
+	if [ "$already_cleaned" != "1" ]; then
+		if ! prepare_recorded_backend_for_start "$previous"; then
+			PROXYPOOL_START_RESULT=1
+			return 1
+		fi
+	fi
+
+	case "$runtime_backend" in
+		v1|v2_shadow) ;;
+		*)
+			echo "Invalid ProxyPool runtime_backend; refusing to start" >&2
+			PROXYPOOL_START_RESULT=1
+			return 1
+			;;
+	esac
+
+	[ "$enabled" = "0" ] && return 0
+	case "$runtime_backend" in
+		v1)
+			# The empty procd service-set is committed before service_started
+			# launches V1, so a shadow -> V1 switch cannot overlap.
+			PROXYPOOL_PENDING_BACKEND=v1
+			;;
+		v2_shadow)
+			start_shadow
+			result=$?
+			if [ "$result" -ne 0 ]; then
+				PROXYPOOL_START_RESULT=$result
+				return "$result"
+			fi
+			PROXYPOOL_PENDING_BACKEND=v2_shadow
+			;;
+	esac
+}
+
+service_started() {
+	local pending="$PROXYPOOL_PENDING_BACKEND"
+	local result="$PROXYPOOL_START_RESULT"
+	PROXYPOOL_PENDING_BACKEND=
+	PROXYPOOL_START_RESULT=0
+
+	if [ "$result" -ne 0 ]; then
+		# rc_procd commits even if start_service returned an error. A
+		# partially staged instance must therefore be removed post-commit.
+		procd_kill proxypool
+		rm -f "$RUNTIME_MARKER"
+		return "$result"
+	fi
+
+	case "$pending" in
+		"")
+			# Disabled starts submit an empty service-set and leave no marker.
+			rm -f "$RUNTIME_MARKER"
+			;;
+		v1)
+			if ! legacy_start; then
+				rm -f "$RUNTIME_MARKER"
+				return 1
+			fi
+			if ! write_runtime_backend v1; then
+				legacy_stop || true
+				rm -f "$RUNTIME_MARKER"
+				return 1
+			fi
+			;;
+		v2_shadow)
+			if ! write_runtime_backend v2_shadow; then
+				# The procd set has committed, so procd_kill is safe here.
+				procd_kill proxypool
+				rm -f "$RUNTIME_MARKER"
+				return 1
+			fi
+			;;
+		*)
+			rm -f "$RUNTIME_MARKER"
+			return 1
+			;;
+	esac
+}
+
+stop_service() {
+	local previous runtime_backend
+	previous=$(read_runtime_backend)
+	case "$previous" in
+		v1)
+			legacy_stop
+			;;
+		v2_shadow)
+			# rc.common calls procd_kill after stop_service.
+			;;
+		"")
+			# A package upgrade can install this script before a marker exists.
+			config_load proxypool
+			config_get runtime_backend global runtime_backend v1
+			[ "$runtime_backend" = v1 ] && legacy_stop
+			;;
+		*)
+			rm -f "$RUNTIME_MARKER"
+			return 1
+			;;
+	esac
+	rm -f "$RUNTIME_MARKER"
+}
+
+reload_service() {
+	local current enabled previous result
+	config_load proxypool
+	config_get enabled global enabled 1
+	config_get current global runtime_backend v1
+	previous=$(read_runtime_backend)
+	if [ "$enabled" != "0" ] && [ "$current" = v1 ] && { [ "$previous" = v1 ] || [ -z "$previous" ]; }; then
+		legacy_reload
+		return
+	fi
+	case "$current" in
+		v1|v2_shadow)
+			cleanup_recorded_backend || return 1
+			[ "$enabled" = "0" ] && return 0
+			PROXYPOOL_START_ALREADY_CLEANED=1
+			if start; then result=0; else result=$?; fi
+			PROXYPOOL_START_ALREADY_CLEANED=0
+			return "$result"
+			;;
+		*)
+			cleanup_recorded_backend || true
+			return 1
+			;;
+	esac
 }
