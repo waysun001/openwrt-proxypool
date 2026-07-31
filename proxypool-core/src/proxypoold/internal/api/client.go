@@ -15,6 +15,8 @@ type Client struct {
 	Timeout time.Duration
 }
 
+const defaultClientTimeout = 10 * time.Second
+
 func (c *Client) Call(ctx context.Context, request Request) (Response, error) {
 	encoded, err := json.Marshal(request)
 	if err != nil || len(encoded) > MaxFrameSize {
@@ -27,7 +29,13 @@ func (c *Client) Call(ctx context.Context, request Request) (Response, error) {
 	if path == "" {
 		path = DefaultSocketPath
 	}
-	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", path)
+	timeout := c.Timeout
+	if timeout <= 0 {
+		timeout = defaultClientTimeout
+	}
+	callCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	conn, err := (&net.Dialer{}).DialContext(callCtx, "unix", path)
 	if err != nil {
 		return Response{}, fmt.Errorf("connect control socket: %w", err)
 	}
@@ -35,22 +43,18 @@ func (c *Client) Call(ctx context.Context, request Request) (Response, error) {
 	finished := make(chan struct{})
 	go func() {
 		select {
-		case <-ctx.Done():
+		case <-callCtx.Done():
 			_ = conn.Close()
 		case <-finished:
 		}
 	}()
 	defer close(finished)
-	if timeout := c.Timeout; timeout > 0 {
-		if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
-			return Response{}, errors.New("set control deadline")
-		}
-	} else if deadline, ok := ctx.Deadline(); ok {
+	if deadline, ok := callCtx.Deadline(); ok {
 		if err := conn.SetDeadline(deadline); err != nil {
 			return Response{}, errors.New("set control deadline")
 		}
 	}
-	if _, err := conn.Write(append(encoded, '\n')); err != nil {
+	if err := writeAll(conn, append(encoded, '\n')); err != nil {
 		return Response{}, errors.New("write control request")
 	}
 	frame, err := readFrame(conn)

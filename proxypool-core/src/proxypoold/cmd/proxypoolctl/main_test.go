@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"proxypoold/internal/api"
 )
 
 func TestRunVersion(t *testing.T) {
@@ -76,5 +78,43 @@ func TestRunCallRejectsUnknownOption(t *testing.T) {
 	var out, stderr bytes.Buffer
 	if code := run([]string{"call", "--bad"}, bytes.NewBufferString(`{}`), &out, &stderr); code == 0 || out.Len() != 0 || stderr.Len() == 0 {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), stderr.String())
+	}
+}
+
+func TestRunCallAcceptsExactMaxPayloadWithTerminator(t *testing.T) {
+	base := `{"version":1,"id":"max","method":"status.get","params":{"padding":"` + string(bytes.Repeat([]byte("x"), 64)) + `"}}`
+	input := base + string(bytes.Repeat([]byte(" "), api.MaxFrameSize-len(base)))
+	if len(input) != api.MaxFrameSize {
+		t.Fatalf("payload size=%d", len(input))
+	}
+	for _, suffix := range []string{"\n", "\r\n"} {
+		var out, stderr bytes.Buffer
+		code := run([]string{"call", "--socket", "missing.sock"}, bytes.NewBufferString(input+suffix), &out, &stderr)
+		if code != 1 || out.Len() != 0 || bytes.Contains(stderr.Bytes(), []byte("padding")) {
+			t.Fatalf("suffix=%q code=%d stdout=%q stderr=%q", suffix, code, out.String(), stderr.String())
+		}
+	}
+	var out, stderr bytes.Buffer
+	if code := run([]string{"call"}, bytes.NewBufferString(input+"x\n"), &out, &stderr); code != 2 || out.Len() != 0 {
+		t.Fatalf("oversize code=%d stdout=%q stderr=%q", code, out.String(), stderr.String())
+	}
+}
+
+type shortWriter struct{ limit int }
+
+func (w shortWriter) Write(p []byte) (int, error) {
+	if w.limit == 0 {
+		return 0, nil
+	}
+	if len(p) > w.limit {
+		return w.limit, nil
+	}
+	return len(p), nil
+}
+
+func TestRunFailsWhenStdoutCannotMakeProgress(t *testing.T) {
+	var stderr bytes.Buffer
+	if code := run([]string{"--version"}, bytes.NewReader(nil), shortWriter{}, &stderr); code == 0 {
+		t.Fatal("version succeeded with zero-progress stdout")
 	}
 }

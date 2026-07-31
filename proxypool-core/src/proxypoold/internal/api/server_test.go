@@ -202,7 +202,106 @@ func TestServerTimeoutAndPanicAreStructured(t *testing.T) {
 	})
 }
 
+func TestServerBoundsNonCooperativeHandlers(t *testing.T) {
+	release := make(chan struct{})
+	started := atomic.Int32{}
+	h := &recordingHandler{fn: func(context.Context, api.Request) api.Response {
+		started.Add(1)
+		<-release
+		return api.Response{Result: json.RawMessage(`{}`)}
+	}}
+	path, _ := startServer(t, h, func(s *api.Server) { s.MaxConnections = 8; s.MaxHandlers = 2; s.HandlerTimeout = 5 * time.Millisecond })
+	padding := strings.Repeat("x", api.MaxFrameSize-100)
+	for i := 0; i < 2; i++ {
+		assertError(t, exchange(t, path, []byte(`{"version":1,"id":"hold","method":"status.get","params":{"password":"`+padding+`"}}`+"\n")), "hold", "operation_timeout")
+	}
+	for i := 0; i < 4; i++ {
+		assertError(t, exchange(t, path, []byte(`{"version":1,"id":"busy","method":"status.get","params":{}}`+"\n")), "busy", "server_busy")
+	}
+	if got := started.Load(); got != 2 {
+		t.Fatalf("non-cooperative handlers started = %d, want 2", got)
+	}
+	close(release)
+}
+
+func TestServerNormalizesInvalidHandlerResponses(t *testing.T) {
+	cases := []struct {
+		name     string
+		response api.Response
+	}{
+		{"neither", api.Response{}}, {"both", api.Response{Result: json.RawMessage(`{}`), Error: &api.Error{Code: "x", Message: "x"}}}, {"invalid result", api.Response{Result: json.RawMessage(`{`)}}, {"empty error", api.Response{Error: &api.Error{}}}, {"oversized", api.Response{Result: json.RawMessage(`"` + strings.Repeat("x", api.MaxFrameSize) + `"`)}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path, _ := startServer(t, &recordingHandler{fn: func(context.Context, api.Request) api.Response { return tc.response }}, nil)
+			assertError(t, exchange(t, path, []byte(`{"version":1,"id":"bad","method":"status.get","params":{}}`+"\n")), "bad", "internal_error")
+		})
+	}
+}
+
+func TestServerRejectsSecondFrameArrivingDuringHandler(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	h := &recordingHandler{fn: func(context.Context, api.Request) api.Response {
+		close(entered)
+		<-release
+		return api.Response{Result: json.RawMessage(`{}`)}
+	}}
+	path, _ := startServer(t, h, nil)
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte(`{"version":1,"id":"one","method":"status.get","params":{}}` + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	<-entered
+	if _, err := conn.Write([]byte(`{"version":1,"id":"two","method":"status.get","params":{}}` + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 1024)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response api.Response
+	if err := json.Unmarshal(bytes.TrimSpace(buf[:n]), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.ID != "one" {
+		t.Fatalf("response id = %q", response.ID)
+	}
+	for {
+		n, err = conn.Read(buf)
+		if n != 0 {
+			t.Fatalf("unexpected second response %q", buf[:n])
+		}
+		if err != nil {
+			break
+		}
+	}
+	if h.calls.Load() != 1 {
+		t.Fatalf("handler calls = %d, want 1", h.calls.Load())
+	}
+}
+
 func TestServerPreservesNonSocketPathsAndCleansOwnSocket(t *testing.T) {
+	t.Run("active socket", func(t *testing.T) {
+		h := &recordingHandler{}
+		path, _ := startServer(t, h, nil)
+		err := (&api.Server{Path: path, Handler: &recordingHandler{}}).Serve(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "active") {
+			t.Fatalf("second Serve error = %v", err)
+		}
+		response := exchange(t, path, []byte(`{"version":1,"id":"still","method":"status.get","params":{}}`+"\n"))
+		if response.Error != nil || h.calls.Load() != 1 {
+			t.Fatalf("active server was disrupted: %#v", response)
+		}
+	})
 	t.Run("stale socket", func(t *testing.T) {
 		path := filepath.Join(shortTempDir(t), "control.sock")
 		listener, err := net.Listen("unix", path)
@@ -271,6 +370,30 @@ func TestServerPreservesNonSocketPathsAndCleansOwnSocket(t *testing.T) {
 			t.Fatal("owned socket remains after cancellation")
 		}
 	})
+	t.Run("replacement preserved", func(t *testing.T) {
+		path := filepath.Join(shortTempDir(t), "control.sock")
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() { done <- (&api.Server{Path: path, Handler: &recordingHandler{}}).Serve(ctx) }()
+		for i := 0; i < 100 && !fileExists(path); i++ {
+			time.Sleep(time.Millisecond)
+		}
+		if err := os.Remove(path); err != nil {
+			t.Skipf("cannot replace live socket: %v", err)
+		}
+		if err := os.WriteFile(path, []byte("keep"), 0o600); err != nil {
+			t.Skipf("cannot replace live socket: %v", err)
+		}
+		cancel()
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+		contents, err := os.ReadFile(path)
+		if err != nil || string(contents) != "keep" {
+			t.Fatalf("replacement changed: %q %v", contents, err)
+		}
+	})
 }
 
 func fileExists(path string) bool { _, err := os.Lstat(path); return err == nil }
@@ -305,6 +428,26 @@ func TestClientValidatesResponseAndNeverFormatsRequestParams(t *testing.T) {
 }
 
 func TestClientCancellationAndMalformedResponse(t *testing.T) {
+	t.Run("default timeout", func(t *testing.T) {
+		path := filepath.Join(shortTempDir(t), "peer.sock")
+		listener, err := net.Listen("unix", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer listener.Close()
+		go func() {
+			conn, err := listener.Accept()
+			if err == nil {
+				defer conn.Close()
+				time.Sleep(time.Second)
+			}
+		}()
+		start := time.Now()
+		_, err = (&api.Client{Path: path, Timeout: 20 * time.Millisecond}).Call(context.Background(), api.Request{Version: 1, ID: "deadline", Method: "status.get", Params: json.RawMessage(`{}`)})
+		if err == nil || time.Since(start) > time.Second {
+			t.Fatalf("Call did not honor deadline: %v", err)
+		}
+	})
 	t.Run("cancellation", func(t *testing.T) {
 		path := filepath.Join(shortTempDir(t), "peer.sock")
 		listener, err := net.Listen("unix", path)

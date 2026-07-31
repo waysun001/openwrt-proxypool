@@ -20,7 +20,9 @@ func main() {
 // run is kept separate from main so command-line protocol guarantees can be tested.
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 1 && args[0] == "--version" {
-		_, _ = fmt.Fprintln(stdout, buildinfo.Version)
+		if err := writeAll(stdout, []byte(buildinfo.Version+"\n")); err != nil {
+			return 1
+		}
 		return 0
 	}
 	if len(args) == 0 || args[0] != "call" {
@@ -36,12 +38,20 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		socket = args[i+1]
 		i++
 	}
-	data, err := io.ReadAll(io.LimitReader(stdin, api.MaxFrameSize+1))
-	if err != nil || len(data) > api.MaxFrameSize {
+	data, err := io.ReadAll(io.LimitReader(stdin, api.MaxFrameSize+3))
+	if err != nil || len(data) > api.MaxFrameSize+2 {
 		_, _ = fmt.Fprintln(stderr, "invalid control request input")
 		return 2
 	}
-	data = bytes.TrimSpace(data)
+	if bytes.HasSuffix(data, []byte("\r\n")) {
+		data = data[:len(data)-2]
+	} else if bytes.HasSuffix(data, []byte("\n")) {
+		data = data[:len(data)-1]
+	}
+	if len(data) > api.MaxFrameSize {
+		_, _ = fmt.Fprintln(stderr, "invalid control request input")
+		return 2
+	}
 	if len(data) == 0 || !json.Valid(data) {
 		_, _ = fmt.Fprintln(stderr, "invalid control request input")
 		return 2
@@ -61,6 +71,25 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, "control response encoding failed")
 		return 1
 	}
-	_, _ = stdout.Write(append(encoded, '\n'))
+	if err := writeAll(stdout, append(encoded, '\n')); err != nil {
+		_, _ = fmt.Fprintln(stderr, "control response output failed")
+		return 1
+	}
 	return 0
+}
+
+func writeAll(w io.Writer, data []byte) error {
+	for len(data) > 0 {
+		n, err := w.Write(data)
+		if n > 0 {
+			data = data[n:]
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+	}
+	return nil
 }

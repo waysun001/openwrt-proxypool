@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -32,6 +33,7 @@ type Server struct {
 	Handler                                                    Handler
 	ReadTimeout, WriteTimeout, HandlerTimeout, ShutdownTimeout time.Duration
 	MaxConnections                                             int
+	MaxHandlers                                                int
 	// Methods overrides the stable method set. A nil map uses the protocol's stable set.
 	Methods map[string]struct{}
 }
@@ -50,11 +52,18 @@ func (s *Server) Serve(ctx context.Context) error {
 	if err := removeStaleSocket(path); err != nil {
 		return err
 	}
-	listener, err := net.Listen("unix", path)
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
 	if err != nil {
 		return fmt.Errorf("listen control socket: %w", err)
 	}
-	defer func() { _ = listener.Close(); _ = os.Remove(path) }()
+	listener.SetUnlinkOnClose(false)
+	created, err := os.Lstat(path)
+	if err != nil {
+		_ = listener.Close()
+		return fmt.Errorf("inspect created control socket: %w", err)
+	}
+	defer listener.Close()
+	defer cleanupCreatedSocket(path, created)
 	if runtime.GOOS != "windows" {
 		if err := os.Chmod(path, 0o600); err != nil {
 			return fmt.Errorf("chmod control socket: %w", err)
@@ -65,7 +74,13 @@ func (s *Server) Serve(ctx context.Context) error {
 	if maxConnections <= 0 {
 		maxConnections = 64
 	}
+	maxHandlers := s.MaxHandlers
+	if maxHandlers <= 0 {
+		maxHandlers = maxConnections
+	}
 	sem := make(chan struct{}, maxConnections)
+	handlerSem := make(chan struct{}, maxHandlers)
+	methods := cloneMethods(s.Methods)
 	var workers sync.WaitGroup
 	var activeMu sync.Mutex
 	active := make(map[net.Conn]struct{})
@@ -105,6 +120,13 @@ func (s *Server) Serve(ctx context.Context) error {
 		case sem <- struct{}{}:
 			workers.Add(1)
 			activeMu.Lock()
+			if ctx.Err() != nil {
+				activeMu.Unlock()
+				<-sem
+				_ = conn.Close()
+				workers.Done()
+				continue
+			}
 			active[conn] = struct{}{}
 			activeMu.Unlock()
 			go func() {
@@ -112,7 +134,7 @@ func (s *Server) Serve(ctx context.Context) error {
 				defer func() { <-sem }()
 				defer conn.Close()
 				defer func() { activeMu.Lock(); delete(active, conn); activeMu.Unlock() }()
-				s.serveConn(ctx, conn, readTimeout, writeTimeout, handlerTimeout)
+				s.serveConn(ctx, conn, readTimeout, writeTimeout, handlerTimeout, handlerSem, methods)
 			}()
 		default:
 			_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
@@ -148,7 +170,20 @@ func removeStaleSocket(path string) error {
 		return fmt.Errorf("inspect control socket: %w", err)
 	}
 	if info.Mode()&os.ModeSocket == 0 {
+		conn, probeErr := (&net.Dialer{Timeout: 100 * time.Millisecond}).Dial("unix", path)
+		if probeErr == nil {
+			_ = conn.Close()
+			return errors.New("refusing to replace active control socket")
+		}
 		return errors.New("refusing to replace non-socket control path")
+	}
+	conn, probeErr := (&net.Dialer{Timeout: 100 * time.Millisecond}).Dial("unix", path)
+	if probeErr == nil {
+		_ = conn.Close()
+		return errors.New("refusing to replace active control socket")
+	}
+	if !errors.Is(probeErr, syscall.ECONNREFUSED) {
+		return errors.New("refusing to replace uncertain control socket")
 	}
 	if err := os.Remove(path); err != nil {
 		return fmt.Errorf("remove stale control socket: %w", err)
@@ -156,7 +191,25 @@ func removeStaleSocket(path string) error {
 	return nil
 }
 
-func (s *Server) serveConn(parent context.Context, conn net.Conn, readTimeout, writeTimeout, handlerTimeout time.Duration) {
+func cleanupCreatedSocket(path string, created os.FileInfo) {
+	current, err := os.Lstat(path)
+	if err == nil && os.SameFile(created, current) && (current.Mode()&os.ModeSocket != 0 || runtime.GOOS == "windows") {
+		_ = os.Remove(path)
+	}
+}
+
+func cloneMethods(methods map[string]struct{}) map[string]struct{} {
+	if methods == nil {
+		methods = defaultMethods
+	}
+	copy := make(map[string]struct{}, len(methods))
+	for method := range methods {
+		copy[method] = struct{}{}
+	}
+	return copy
+}
+
+func (s *Server) serveConn(parent context.Context, conn net.Conn, readTimeout, writeTimeout, handlerTimeout time.Duration, handlerSem chan struct{}, methods map[string]struct{}) {
 	_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
 	frame, err := readFrame(conn)
 	if err != nil {
@@ -181,15 +234,23 @@ func (s *Server) serveConn(parent context.Context, conn net.Conn, readTimeout, w
 		_ = writeResponse(conn, errorResponse(id, "unsupported_version", messageFor("unsupported_version")))
 		return
 	}
-	if !s.knownMethod(req.Method) {
+	if _, known := methods[req.Method]; !known {
 		_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 		_ = writeResponse(conn, errorResponse(id, "unknown_method", messageFor("unknown_method")))
+		return
+	}
+	select {
+	case handlerSem <- struct{}{}:
+	default:
+		_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+		_ = writeResponse(conn, errorResponse(id, "server_busy", "control server is busy"))
 		return
 	}
 	callCtx, cancel := context.WithTimeout(parent, handlerTimeout)
 	defer cancel()
 	result := make(chan Response, 1)
 	go func() {
+		defer func() { <-handlerSem }()
 		defer func() {
 			if recover() != nil {
 				result <- errorResponse(id, "internal_error", messageFor("internal_error"))
@@ -200,7 +261,7 @@ func (s *Server) serveConn(parent context.Context, conn net.Conn, readTimeout, w
 	var response Response
 	select {
 	case response = <-result:
-		response.Version, response.ID = ProtocolVersion, id
+		response = normalizeResponse(response, id)
 	case <-callCtx.Done():
 		response = errorResponse(id, "operation_timeout", messageFor("operation_timeout"))
 	}
@@ -256,8 +317,39 @@ func writeResponse(w io.Writer, response Response) error {
 	if len(encoded) > MaxFrameSize {
 		return errFrameTooLarge
 	}
-	_, err = w.Write(append(encoded, '\n'))
-	return err
+	return writeAll(w, append(encoded, '\n'))
+}
+
+var errNoWriteProgress = errors.New("write made no progress")
+
+func writeAll(w io.Writer, data []byte) error {
+	for len(data) > 0 {
+		n, err := w.Write(data)
+		if n > 0 {
+			data = data[n:]
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return errNoWriteProgress
+		}
+	}
+	return nil
+}
+
+func normalizeResponse(response Response, id string) Response {
+	response.Version, response.ID = ProtocolVersion, id
+	validResult := response.Result != nil && json.Valid(response.Result)
+	validError := response.Error != nil && response.Error.Code != "" && response.Error.Message != ""
+	if validResult == validError {
+		return errorResponse(id, "internal_error", messageFor("internal_error"))
+	}
+	encoded, err := json.Marshal(response)
+	if err != nil || len(encoded) > MaxFrameSize {
+		return errorResponse(id, "internal_error", messageFor("internal_error"))
+	}
+	return response
 }
 func errorResponse(id, code, message string) Response {
 	return Response{Version: ProtocolVersion, ID: id, Error: &Error{Code: code, Message: message}}
