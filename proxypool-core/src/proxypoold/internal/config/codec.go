@@ -36,7 +36,7 @@ func Decode(r io.Reader) (model.DesiredConfig, error) {
 			}
 			global = section
 		case "node":
-			if section.name == "" {
+			if !safeUCISectionName(section.name) {
 				return model.DesiredConfig{}, invalidConfig()
 			}
 			if _, exists := cfg.Nodes[section.name]; exists {
@@ -48,7 +48,7 @@ func Decode(r io.Reader) (model.DesiredConfig, error) {
 			}
 			cfg.Nodes[section.name] = node
 		case "device":
-			if section.name == "" {
+			if !safeUCISectionName(section.name) {
 				return model.DesiredConfig{}, invalidConfig()
 			}
 			if _, exists := cfg.Devices[section.name]; exists {
@@ -245,10 +245,9 @@ func uciTokens(line string) ([]string, error) {
 			inToken = true
 		case '#':
 			if inToken {
-				token.WriteRune(character)
-			} else {
-				return fields, nil
+				flush()
 			}
+			return fields, nil
 		case ' ', '\t', '\r':
 			if inToken {
 				flush()
@@ -469,12 +468,12 @@ func validateCodecConfig(cfg model.DesiredConfig) error {
 		return invalidConfig()
 	}
 	for id, node := range cfg.Nodes {
-		if !safeUCIString(id) || !safeUCIString(node.ID) || !safeUCIString(node.Name) || !safeUCIString(node.Server) || !safeUCIString(node.Username) || !safeUCIString(node.Password) || !safeUCIString(node.SLPToken) || !safeUCIString(node.SLPTransport) || !safeUCIString(node.SLPObfsKey) {
+		if !safeUCISectionName(id) || !safeUCISectionName(node.ID) || !safeUCIString(node.Name) || !safeUCIString(node.Server) || !safeUCIString(node.Username) || !safeUCIString(node.Password) || !safeUCIString(node.SLPToken) || !safeUCIString(node.SLPTransport) || !safeUCIString(node.SLPObfsKey) {
 			return invalidConfig()
 		}
 	}
 	for id, device := range cfg.Devices {
-		if !safeUCIString(id) || !safeUCIString(device.ID) || !safeUCIString(device.MAC) || !safeUCIString(device.Hostname) || !safeUCIString(device.NodeID) {
+		if !safeUCISectionName(id) || !safeUCISectionName(device.ID) || !safeUCIString(device.MAC) || !safeUCIString(device.Hostname) || !safeUCIString(device.NodeID) {
 			return invalidConfig()
 		}
 	}
@@ -487,6 +486,18 @@ func safeUCIString(value string) bool {
 	}
 	for _, character := range value {
 		if character <= 0x1f || character == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+func safeUCISectionName(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if !(character >= 'a' && character <= 'z') && !(character >= 'A' && character <= 'Z') && !(character >= '0' && character <= '9') && character != '_' {
 			return false
 		}
 	}

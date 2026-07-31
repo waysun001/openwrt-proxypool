@@ -33,9 +33,9 @@ func TestReplaceRejectsInvalidConfigWithoutChangingFile(t *testing.T) {
 	before := readConfigBytes(t, path)
 	store := NewStore(path)
 	next := validConfig()
-	node := next.Nodes["node-a"]
+	node := next.Nodes["node_a"]
 	node.Port = 0
-	next.Nodes["node-a"] = node
+	next.Nodes["node_a"] = node
 
 	_, err := store.Replace(context.Background(), 3, next)
 	assertCode(t, err, "invalid_config")
@@ -49,14 +49,14 @@ func TestReplaceAdvancesRevisionAndPreservesPolicyID(t *testing.T) {
 	store := NewStore(path)
 	next := validConfig()
 	next.Revision = 999
-	next.Nodes["node-a"] = withNodeRevision(next.Nodes["node-a"], 999)
+	next.Nodes["node_a"] = withNodeRevision(next.Nodes["node_a"], 999)
 
 	got, err := store.Replace(context.Background(), 3, next)
 	if err != nil {
 		t.Fatalf("Replace(): %v", err)
 	}
-	if got.Revision != 4 || got.Nodes["node-a"].Revision != 4 {
-		t.Fatalf("revision = config %d node %d, want 4", got.Revision, got.Nodes["node-a"].Revision)
+	if got.Revision != 4 || got.Nodes["node_a"].Revision != 4 {
+		t.Fatalf("revision = config %d node %d, want 4", got.Revision, got.Nodes["node_a"].Revision)
 	}
 	info, err := os.Stat(path)
 	if err != nil {
@@ -67,9 +67,9 @@ func TestReplaceAdvancesRevisionAndPreservesPolicyID(t *testing.T) {
 	}
 
 	changed := validConfig()
-	node := changed.Nodes["node-a"]
+	node := changed.Nodes["node_a"]
 	node.PolicyID = 9
-	changed.Nodes["node-a"] = node
+	changed.Nodes["node_a"] = node
 	_, err = store.Replace(context.Background(), 4, changed)
 	assertCode(t, err, "invalid_config")
 }
@@ -224,9 +224,9 @@ func TestReplaceDoesNotMutateCallerConfig(t *testing.T) {
 			path := writeInitialConfig(t, 3)
 			next := specialValueConfig("not-a-real-secret")
 			now := time.Date(2031, 2, 3, 4, 5, 6, 0, time.FixedZone("UTC+8", 8*60*60))
-			node := next.Nodes["node-a"]
+			node := next.Nodes["node_a"]
 			node.ExpiresAt = &now
-			next.Nodes["node-a"] = node
+			next.Nodes["node_a"] = node
 			before := cloneForTest(next)
 			_, err := newStore(path, &failingOps{fsOps: osFS{}, fail: fail}).Replace(context.Background(), 3, next)
 			if fail == "" && err != nil {

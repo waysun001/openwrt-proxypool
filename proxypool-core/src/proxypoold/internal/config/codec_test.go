@@ -44,7 +44,7 @@ func TestDecodeEncodeRoundTripPreservesEveryField(t *testing.T) {
 	if !configsEqual(roundTripped, cfg) {
 		t.Fatal("complete semantic round trip differs")
 	}
-	node, ok := roundTripped.Nodes["node-b"]
+	node, ok := roundTripped.Nodes["node_b"]
 	if !ok || node.Name != "Bob's node" || node.Protocol != model.ProtocolSLP || node.ExpiresAt == nil {
 		t.Fatalf("round-tripped node metadata differs")
 	}
@@ -57,17 +57,17 @@ func TestDecodeEncodeRoundTripPreservesEveryField(t *testing.T) {
 	if node.Password != "fixture-password-not-real" || node.SLPToken != "fixture-token-not-real" || node.SLPObfsKey != "fixture-obfs-key-not-real" {
 		t.Fatal("round-tripped secret field was not preserved")
 	}
-	device, ok := roundTripped.Devices["device-b"]
-	if !ok || device.MAC != "00:11:22:33:44:66" || device.Hostname != "Bob's phone" || device.FixedIPv4.String() != "192.0.2.11" || device.NodeID != "node-b" || device.Enabled {
+	device, ok := roundTripped.Devices["device_b"]
+	if !ok || device.MAC != "00:11:22:33:44:66" || device.Hostname != "Bob's phone" || device.FixedIPv4.String() != "192.0.2.11" || device.NodeID != "node_b" || device.Enabled {
 		t.Fatalf("round-tripped device differs")
 	}
 }
 
 func TestEncodeOrdersSectionsAndQuotesApostrophes(t *testing.T) {
 	cfg := validConfig()
-	first := cfg.Nodes["node-a"]
+	first := cfg.Nodes["node_a"]
 	first.Name = "Alice's node"
-	cfg.Nodes["node-a"] = first
+	cfg.Nodes["node_a"] = first
 
 	var encoded bytes.Buffer
 	if err := Encode(&encoded, cfg); err != nil {
@@ -75,10 +75,10 @@ func TestEncodeOrdersSectionsAndQuotesApostrophes(t *testing.T) {
 	}
 	text := encoded.String()
 	globalAt := strings.Index(text, "config global 'global'")
-	nodeAAt := strings.Index(text, "config node 'node-a'")
-	nodeBAt := strings.Index(text, "config node 'node-b'")
-	deviceAAt := strings.Index(text, "config device 'device-a'")
-	deviceBAt := strings.Index(text, "config device 'device-b'")
+	nodeAAt := strings.Index(text, "config node 'node_a'")
+	nodeBAt := strings.Index(text, "config node 'node_b'")
+	deviceAAt := strings.Index(text, "config device 'device_a'")
+	deviceBAt := strings.Index(text, "config device 'device_b'")
 	if globalAt < 0 || nodeAAt < globalAt || nodeBAt < nodeAAt || deviceAAt < nodeBAt || deviceBAt < deviceAAt {
 		t.Fatal("sections are not in global, sorted node, sorted device order")
 	}
@@ -86,7 +86,7 @@ func TestEncodeOrdersSectionsAndQuotesApostrophes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Decode(encoded apostrophe): %v", err)
 	}
-	if decoded.Nodes["node-a"].Name != "Alice's node" {
+	if decoded.Nodes["node_a"].Name != "Alice's node" {
 		t.Fatal("apostrophe was not preserved")
 	}
 }
@@ -177,7 +177,7 @@ func TestDecodeSupportsQuotedFragmentsAndTrailingComment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Decode(): %v", err)
 	}
-	if decoded.Global.RuntimeBackend != "v2_shadow" || decoded.Nodes["node-a"].Password != "left'right\\tail" {
+	if decoded.Global.RuntimeBackend != "v2_shadow" || decoded.Nodes["node_a"].Password != "left'right\\tail" {
 		t.Fatal("quoted fragments or comment were not parsed correctly")
 	}
 }
@@ -248,70 +248,70 @@ func TestEncodeRejectsUnsafeStringInEveryConfigArea(t *testing.T) {
 		"DoH bootstrap": func(cfg *model.DesiredConfig) { cfg.Global.DoHEndpoints[0].BootstrapIP = unsafe },
 		"DoH server":    func(cfg *model.DesiredConfig) { cfg.Global.DoHEndpoints[0].ServerName = unsafe },
 		"node ID": func(cfg *model.DesiredConfig) {
-			node := cfg.Nodes["node-a"]
+			node := cfg.Nodes["node_a"]
 			node.ID = unsafe
-			delete(cfg.Nodes, "node-a")
+			delete(cfg.Nodes, "node_a")
 			cfg.Nodes[unsafe] = node
 		},
 		"node name": func(cfg *model.DesiredConfig) {
-			node := cfg.Nodes["node-a"]
+			node := cfg.Nodes["node_a"]
 			node.Name = unsafe
-			cfg.Nodes["node-a"] = node
+			cfg.Nodes["node_a"] = node
 		},
 		"node server": func(cfg *model.DesiredConfig) {
-			node := cfg.Nodes["node-a"]
+			node := cfg.Nodes["node_a"]
 			node.Server = unsafe
-			cfg.Nodes["node-a"] = node
+			cfg.Nodes["node_a"] = node
 		},
 		"node username": func(cfg *model.DesiredConfig) {
-			node := cfg.Nodes["node-a"]
+			node := cfg.Nodes["node_a"]
 			node.Username = unsafe
-			cfg.Nodes["node-a"] = node
+			cfg.Nodes["node_a"] = node
 		},
 		"node password": func(cfg *model.DesiredConfig) {
-			node := cfg.Nodes["node-a"]
+			node := cfg.Nodes["node_a"]
 			node.Password = unsafe
-			cfg.Nodes["node-a"] = node
+			cfg.Nodes["node_a"] = node
 		},
 		"node token": func(cfg *model.DesiredConfig) {
-			node := cfg.Nodes["node-a"]
+			node := cfg.Nodes["node_a"]
 			node.Protocol = model.ProtocolSLP
 			node.SLPTransport = "quic"
 			node.SLPToken = unsafe
-			cfg.Nodes["node-a"] = node
+			cfg.Nodes["node_a"] = node
 		},
 		"node transport": func(cfg *model.DesiredConfig) {
-			node := cfg.Nodes["node-a"]
+			node := cfg.Nodes["node_a"]
 			node.Protocol = model.ProtocolSLP
 			node.SLPToken = "fixture-token"
 			node.SLPTransport = unsafe
-			cfg.Nodes["node-a"] = node
+			cfg.Nodes["node_a"] = node
 		},
 		"node obfs key": func(cfg *model.DesiredConfig) {
-			node := cfg.Nodes["node-a"]
+			node := cfg.Nodes["node_a"]
 			node.SLPObfsKey = unsafe
-			cfg.Nodes["node-a"] = node
+			cfg.Nodes["node_a"] = node
 		},
 		"device ID": func(cfg *model.DesiredConfig) {
-			device := cfg.Devices["device-a"]
+			device := cfg.Devices["device_a"]
 			device.ID = unsafe
-			delete(cfg.Devices, "device-a")
+			delete(cfg.Devices, "device_a")
 			cfg.Devices[unsafe] = device
 		},
 		"device MAC": func(cfg *model.DesiredConfig) {
-			device := cfg.Devices["device-a"]
+			device := cfg.Devices["device_a"]
 			device.MAC = unsafe
-			cfg.Devices["device-a"] = device
+			cfg.Devices["device_a"] = device
 		},
 		"device hostname": func(cfg *model.DesiredConfig) {
-			device := cfg.Devices["device-a"]
+			device := cfg.Devices["device_a"]
 			device.Hostname = unsafe
-			cfg.Devices["device-a"] = device
+			cfg.Devices["device_a"] = device
 		},
 		"device node ID": func(cfg *model.DesiredConfig) {
-			device := cfg.Devices["device-a"]
+			device := cfg.Devices["device_a"]
 			device.NodeID = unsafe
-			cfg.Devices["device-a"] = device
+			cfg.Devices["device_a"] = device
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -319,6 +319,79 @@ func TestEncodeRejectsUnsafeStringInEveryConfigArea(t *testing.T) {
 			mutate(&cfg)
 			var encoded bytes.Buffer
 			assertCode(t, Encode(&encoded, cfg), "invalid_config")
+		})
+	}
+}
+
+func TestCodecRequiresOpenWrtSafeNamedSectionIDs(t *testing.T) {
+	for _, invalidID := range []string{"node-a", "node a", "节点", "node.a"} {
+		t.Run("encode "+invalidID, func(t *testing.T) {
+			cfg := uciSafeConfig()
+			replaceNodeID(&cfg, "node_a", invalidID)
+			var encoded bytes.Buffer
+			assertCode(t, Encode(&encoded, cfg), "invalid_config")
+		})
+		t.Run("decode "+invalidID, func(t *testing.T) {
+			cfg := uciSafeConfig()
+			var encoded bytes.Buffer
+			if err := Encode(&encoded, cfg); err != nil {
+				t.Fatalf("Encode(safe config): %v", err)
+			}
+			input := bytes.Replace(encoded.Bytes(), []byte("config node 'node_a'"), []byte("config node '"+invalidID+"'"), 1)
+			_, err := Decode(bytes.NewReader(input))
+			assertCode(t, err, "invalid_config")
+		})
+		t.Run("encode device "+invalidID, func(t *testing.T) {
+			cfg := uciSafeConfig()
+			replaceDeviceID(&cfg, "device_a", invalidID)
+			var encoded bytes.Buffer
+			assertCode(t, Encode(&encoded, cfg), "invalid_config")
+		})
+		t.Run("decode device "+invalidID, func(t *testing.T) {
+			cfg := uciSafeConfig()
+			var encoded bytes.Buffer
+			if err := Encode(&encoded, cfg); err != nil {
+				t.Fatalf("Encode(safe config): %v", err)
+			}
+			input := bytes.Replace(encoded.Bytes(), []byte("config device 'device_a'"), []byte("config device '"+invalidID+"'"), 1)
+			_, err := Decode(bytes.NewReader(input))
+			assertCode(t, err, "invalid_config")
+		})
+	}
+
+	cfg := uciSafeConfig()
+	var encoded bytes.Buffer
+	if err := Encode(&encoded, cfg); err != nil {
+		t.Fatalf("Encode(safe config): %v", err)
+	}
+	if !bytes.Contains(encoded.Bytes(), []byte("config node 'node_a'")) || bytes.Contains(encoded.Bytes(), []byte("config node 'node-a'")) {
+		t.Fatal("canonical output did not use an OpenWrt-safe section name")
+	}
+	if _, err := Decode(bytes.NewReader(encoded.Bytes())); err != nil {
+		t.Fatalf("Decode(safe config): %v", err)
+	}
+}
+
+func TestUCITokenizerMatchesOpenWrtCommentRules(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+		want string
+	}{
+		{name: "unquoted comment", line: "option value foo#comment", want: "foo"},
+		{name: "single quote", line: "option value 'foo#bar'", want: "foo#bar"},
+		{name: "double quote", line: "option value \"foo#bar\"", want: "foo#bar"},
+		{name: "escaped hash", line: "option value foo\\#bar", want: "foo#bar"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fields, err := uciTokens(tt.line)
+			if err != nil {
+				t.Fatalf("uciTokens(): %v", err)
+			}
+			if len(fields) != 3 || fields[2] != tt.want {
+				t.Fatal("tokenizer did not produce the expected comment-compatible value")
+			}
 		})
 	}
 }
@@ -380,19 +453,19 @@ func validConfig() model.DesiredConfig {
 			}},
 		},
 		Nodes: map[string]model.Node{
-			"node-b": {ID: "node-b", Name: "Node B", Protocol: model.ProtocolSOCKS5, Enabled: true, Server: "b.example", Port: 1080, PolicyID: 2},
-			"node-a": {ID: "node-a", Name: "Node A", Protocol: model.ProtocolSOCKS5, Enabled: true, Server: "a.example", Port: 1080, PolicyID: 1},
+			"node_b": {ID: "node_b", Name: "Node B", Protocol: model.ProtocolSOCKS5, Enabled: true, Server: "b.example", Port: 1080, PolicyID: 2},
+			"node_a": {ID: "node_a", Name: "Node A", Protocol: model.ProtocolSOCKS5, Enabled: true, Server: "a.example", Port: 1080, PolicyID: 1},
 		},
 		Devices: map[string]model.Device{
-			"device-b": {ID: "device-b", MAC: "00:11:22:33:44:66", Hostname: "B", FixedIPv4: mustAddr("192.0.2.11"), NodeID: "node-b", Enabled: true},
-			"device-a": {ID: "device-a", MAC: "00:11:22:33:44:55", Hostname: "A", FixedIPv4: mustAddr("192.0.2.10"), NodeID: "node-a", Enabled: true},
+			"device_b": {ID: "device_b", MAC: "00:11:22:33:44:66", Hostname: "B", FixedIPv4: mustAddr("192.0.2.11"), NodeID: "node_b", Enabled: true},
+			"device_a": {ID: "device_a", MAC: "00:11:22:33:44:55", Hostname: "A", FixedIPv4: mustAddr("192.0.2.10"), NodeID: "node_a", Enabled: true},
 		},
 	}
 }
 
 func specialValueConfig(value string) model.DesiredConfig {
 	cfg := validConfig()
-	node := cfg.Nodes["node-a"]
+	node := cfg.Nodes["node_a"]
 	node.Name = "Special node"
 	node.Username = value
 	node.Password = value
@@ -404,14 +477,38 @@ func specialValueConfig(value string) model.DesiredConfig {
 	node.SLPObfs = true
 	node.SLPObfsKey = value
 	node.Protocol = model.ProtocolSLP
-	cfg.Nodes["node-a"] = node
-	device := cfg.Devices["device-a"]
+	cfg.Nodes["node_a"] = node
+	device := cfg.Devices["device_a"]
 	device.Hostname = value
-	cfg.Devices["device-a"] = device
+	cfg.Devices["device_a"] = device
 	global := cfg.Global
 	global.LANDevice = "br-lan"
 	cfg.Global = global
 	return cfg
+}
+
+func uciSafeConfig() model.DesiredConfig {
+	return validConfig()
+}
+
+func replaceNodeID(cfg *model.DesiredConfig, oldID, newID string) {
+	node := cfg.Nodes[oldID]
+	node.ID = newID
+	delete(cfg.Nodes, oldID)
+	cfg.Nodes[newID] = node
+	for id, device := range cfg.Devices {
+		if device.NodeID == oldID {
+			device.NodeID = newID
+			cfg.Devices[id] = device
+		}
+	}
+}
+
+func replaceDeviceID(cfg *model.DesiredConfig, oldID, newID string) {
+	device := cfg.Devices[oldID]
+	device.ID = newID
+	delete(cfg.Devices, oldID)
+	cfg.Devices[newID] = device
 }
 
 func mustAddr(text string) netip.Addr {
