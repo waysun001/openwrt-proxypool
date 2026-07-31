@@ -1,7 +1,16 @@
 # Build output
-build/
+/build/
 bin/
 *.ipk
+
+# Firmware artifacts, host binaries, and diagnostic archives
+*.bin
+*.img
+*.trx
+*.sysupgrade
+/proxypool-core/src/proxypoold/proxypoold
+/proxypool-core/src/proxypoold/proxypoolctl
+/diagnostics/
 
 # Temporary files
 *.tmp
