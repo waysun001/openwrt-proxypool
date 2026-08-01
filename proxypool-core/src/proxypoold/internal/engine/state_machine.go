@@ -267,6 +267,19 @@ func (m *Machine) Status(nodeID string) (NodeStatus, bool) {
 	return cloneNodeStatus(record.status), true
 }
 
+// restoreNode is used only to hydrate or roll back the controller's durable
+// projection. Runtime timers deliberately remain unset: after restart the
+// scheduler reconciles uncertain work instead of trusting elapsed timers.
+func (m *Machine) restoreNode(nodeID string, status NodeStatus, exists bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !exists {
+		delete(m.nodes, nodeID)
+		return
+	}
+	m.nodes[nodeID] = nodeRecord{status: cloneNodeStatus(status)}
+}
+
 func (m *Machine) transition(record *nodeRecord, event Event) error {
 	switch event.Kind {
 	case EventEnable:

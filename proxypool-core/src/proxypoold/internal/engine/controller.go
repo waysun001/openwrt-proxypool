@@ -28,6 +28,10 @@ type runtimePersistence interface {
 	Save(context.Context, RuntimeSnapshot) error
 }
 
+type schedulerSubmitter interface {
+	Submit(Job)
+}
+
 type ControllerOption func(*Controller)
 
 func WithControllerClock(clock func() time.Time) ControllerOption {
@@ -64,6 +68,7 @@ type Controller struct {
 	jobs         *JobStore
 	deviceSource platform.DeviceSource
 	leaseManager platform.LeaseManager
+	scheduler    schedulerSubmitter
 
 	desired          model.DesiredConfig
 	statuses         map[string]NodeStatus
@@ -121,6 +126,7 @@ func NewController(desiredStore desiredConfigStore, runtimeStore runtimePersiste
 	}
 	for _, status := range snapshot.NodeStatuses {
 		controller.statuses[status.NodeID] = cloneNodeStatus(status)
+		controller.machine.restoreNode(status.NodeID, status, true)
 	}
 	for _, record := range snapshot.Idempotency {
 		controller.idempotency[record.RequestID] = cloneIdempotencyRecord(record)
@@ -136,6 +142,14 @@ func NewController(desiredStore desiredConfigStore, runtimeStore runtimePersiste
 		}
 	}
 	return controller, nil
+}
+
+// AttachScheduler connects the durable control plane to its sole side-effect
+// owner. Queued work remains durable even when the scheduler is not running.
+func (controller *Controller) AttachScheduler(scheduler schedulerSubmitter) {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	controller.scheduler = scheduler
 }
 
 func (controller *Controller) Handle(ctx context.Context, request api.Request) api.Response {
@@ -470,6 +484,9 @@ func (controller *Controller) finishMutationLocked(ctx context.Context, request 
 			controller.restoreIdempotencyFrontLocked(*removed)
 		}
 		return controllerError(request.ID, ErrorCodeInternal)
+	}
+	if controller.scheduler != nil && !isTerminalJob(job.State) {
+		controller.scheduler.Submit(job)
 	}
 	return api.Response{Version: api.ProtocolVersion, ID: request.ID, Result: resultBytes}
 }
