@@ -1,149 +1,145 @@
 #!/bin/sh
-# 智联盒子 - DNS 代理管理脚本
-# 通过 SLP 客户端内置 DNS 代理（redir-host 模式）绕过 DNS 污染
-# 不再依赖 dnscrypt-proxy2，DNS 查询直接通过 QUIC 隧道转发
+# ProxyPool DNS compatibility gate.
 #
-# 链路: dnsmasq(:53) → SLP DNS Proxy(:dns_port) → [QUIC tunnel] → 8.8.8.8:53
+# Phase 1 deliberately has no publishable DNS data plane.  The legacy SLP files
+# prove only that a PID existed and a port was assigned; they do not bind the
+# process executable, configuration, generation, owner, or listener socket to
+# ProxyPool.  Consequently configure/check/restore all converge dnsmasq to an
+# base-UCI fallback-disabled state while the guardian closes LAN TCP/UDP 53.
+# noresolv plus deleting `server` does not prove that serversfile/confdir or
+# other dnsmasq fragments contain no upstream.  A later owned DNS data plane
+# must validate every configuration source and replace this gate as one atomic
+# publication; this script must never infer ownership from a live PID or port.
 
-SLP_RUN_DIR="/var/run/proxypool/slp"
-RUN_DIR="/var/run/proxypool"
-DNS_PORT_FILE="$RUN_DIR/dns-proxy-port"
-LOG_FILE="/var/log/proxypool.log"
+set -f
+
+RUN_DIR=${PROXYPOOL_DNS_RUN_DIR:-/var/run/proxypool}
+DNS_PORT_FILE=${PROXYPOOL_DNS_PORT_FILE:-$RUN_DIR/dns-proxy-port}
+LOG_FILE=${PROXYPOOL_DNS_LOG_FILE:-/var/log/proxypool.log}
+UCI=${PROXYPOOL_UCI:-uci}
+DNSMASQ_INIT=${PROXYPOOL_DNSMASQ_INIT:-/etc/init.d/dnsmasq}
+DNS_PATH_STATUS=dns_path_unavailable
 
 log_info() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [dns] $*" >> "$LOG_FILE"
+	printf '[%s] [dns] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$LOG_FILE" 2>/dev/null || :
 }
 
 log_error() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [dns] [ERROR] $*" >> "$LOG_FILE"
+	printf '[%s] [dns] [ERROR] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$LOG_FILE" 2>/dev/null || :
 }
 
-# 查找第一个存活的 SLP 客户端 DNS 代理端口
-find_dns_port() {
-    for client_dir in "$SLP_RUN_DIR"/*/; do
-        [ -d "$client_dir" ] || continue
-        local pid_file="${client_dir}slp.pid"
-        local port_file="${client_dir}dns.port"
-        if [ -f "$pid_file" ] && [ -f "$port_file" ]; then
-            local pid=$(cat "$pid_file")
-            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-                cat "$port_file"
-                return 0
-            fi
-        fi
-    done
-    return 1
+stop_dnsmasq() {
+	"$DNSMASQ_INIT" stop >/dev/null 2>&1 || :
+	"$DNSMASQ_INIT" status >/dev/null 2>&1
+	status_result=$?
+	# OpenWrt 23.05.3 rc.common/procd returns exactly 3 when the service is
+	# absent.  Exit 0 means it still exists; 4/other values are unknown and
+	# must not be guessed as stopped.
+	if [ "$status_result" -eq 3 ]; then
+		return 0
+	fi
+	log_error "Could not prove dnsmasq stopped (status=$status_result)"
+	return 1
 }
 
-# ============================================================
-# 配置 DNS 代理（SLP 客户端启动后调用）
-# ============================================================
-configure() {
-    local dns_port="$1"
-
-    # 未指定端口则自动查找
-    if [ -z "$dns_port" ]; then
-        dns_port=$(find_dns_port)
-        if [ -z "$dns_port" ]; then
-            log_info "No SLP client available, skipping DNS configuration"
-            return 1
-        fi
-    fi
-
-    # 已配置相同端口则跳过
-    if [ -f "$DNS_PORT_FILE" ]; then
-        local current_port=$(cat "$DNS_PORT_FILE")
-        if [ "$current_port" = "$dns_port" ]; then
-            # 确认 SLP DNS 代理仍在监听
-            if nc -z -w 1 127.0.0.1 "$dns_port" >/dev/null 2>&1; then
-                return 0
-            fi
-        fi
-    fi
-
-    log_info "Configuring DNS: dnsmasq → SLP DNS Proxy(:$dns_port) → [QUIC tunnel] → 8.8.8.8:53"
-
-    echo "$dns_port" > "$DNS_PORT_FILE"
-
-    # 配置 dnsmasq 指向 SLP 内置 DNS 代理
-    _configure_dnsmasq "$dns_port"
-
-    log_info "DNS proxy active on port $dns_port"
+restart_dnsmasq() {
+	"$DNSMASQ_INIT" restart >/dev/null 2>&1 || return 1
+	"$DNSMASQ_INIT" running >/dev/null 2>&1
+	[ "$?" -eq 0 ]
 }
 
-# ============================================================
-# 恢复 ISP DNS（proxypool 停止或无 SLP 客户端时调用）
-# ============================================================
-restore() {
-    log_info "Restoring DNS to ISP default"
-
-    # 恢复 dnsmasq 为系统默认 DNS
-    _restore_dnsmasq
-
-    rm -f "$DNS_PORT_FILE"
+clear_legacy_dns_claim() {
+	if [ -e "$DNS_PORT_FILE" ] || [ -L "$DNS_PORT_FILE" ]; then
+		if ! rm -f -- "$DNS_PORT_FILE"; then
+			log_error "Could not remove obsolete DNS listener claim: $DNS_PORT_FILE"
+			return 1
+		fi
+	fi
+	return 0
 }
 
-# ============================================================
-# 检查 DNS 代理状态，必要时切换端口或恢复
-# （SLP 客户端断开时调用）
-# ============================================================
-check() {
-    # 未配置过则尝试配置
-    if [ ! -f "$DNS_PORT_FILE" ]; then
-        configure
-        return
-    fi
+# Print the one and only dnsmasq UCI section.  Multiple/missing sections are
+# not guessed because changing the wrong instance could leave a WAN resolver
+# active.  awk excludes option lines by requiring exactly one dot in the key.
+find_unique_dnsmasq_section() {
+	sections=$(
+		"$UCI" -q show dhcp 2>/dev/null |
+			awk -F= '$2 == "dnsmasq" && $1 ~ /^dhcp\.[^.]+$/ { print $1 }'
+	) || return 1
 
-    local current_port=$(cat "$DNS_PORT_FILE")
-
-    # 当前端口仍然存活则无需操作
-    if nc -z -w 1 127.0.0.1 "$current_port" >/dev/null 2>&1; then
-        return 0
-    fi
-
-    # 当前端口失效，寻找替代
-    local new_port=$(find_dns_port)
-    if [ -n "$new_port" ]; then
-        log_info "DNS proxy switching: port $current_port → $new_port"
-        configure "$new_port"
-    else
-        log_info "No SLP clients available, restoring ISP DNS"
-        restore
-    fi
+	set -- $sections
+	[ "$#" -eq 1 ] || return 1
+	case "$1" in
+		dhcp.*) printf '%s\n' "$1" ;;
+		*) return 1 ;;
+	esac
 }
 
-# ============================================================
-# dnsmasq 配置管理
-# ============================================================
+write_unavailable_dnsmasq_config() {
+	dnsmasq_section=$(find_unique_dnsmasq_section) || return 1
 
-_configure_dnsmasq() {
-    local dns_port="$1"
-    uci set dhcp.@dnsmasq[0].noresolv='1'
-    uci delete dhcp.@dnsmasq[0].server 2>/dev/null
-    uci add_list dhcp.@dnsmasq[0].server="127.0.0.1#${dns_port}"
-    uci commit dhcp
-    /etc/init.d/dnsmasq restart 2>/dev/null
+	"$UCI" set "${dnsmasq_section}.noresolv=1" >/dev/null 2>&1 || return 1
+	# A missing option is already the desired state.  Any other delete failure
+	# is caught by the post-commit, full-section verification below.
+	"$UCI" -q delete "${dnsmasq_section}.server" >/dev/null 2>&1 || :
+	"$UCI" commit dhcp >/dev/null 2>&1 || return 1
+
+	verified_section=$(find_unique_dnsmasq_section) || return 1
+	[ "$verified_section" = "$dnsmasq_section" ] || return 1
+	noresolv=$("$UCI" -q get "${dnsmasq_section}.noresolv" 2>/dev/null) || return 1
+	[ "$noresolv" = 1 ] || return 1
+	section_dump=$("$UCI" -q show "$dnsmasq_section" 2>/dev/null) || return 1
+	if printf '%s\n' "$section_dump" | grep -Fq "${dnsmasq_section}.server="; then
+		return 1
+	fi
+	return 0
 }
 
-_restore_dnsmasq() {
-    uci set dhcp.@dnsmasq[0].noresolv='0'
-    uci delete dhcp.@dnsmasq[0].server 2>/dev/null
-    uci commit dhcp
-    /etc/init.d/dnsmasq restart 2>/dev/null
+enforce_dns_unavailable() {
+	legacy_claim_ok=1
+	clear_legacy_dns_claim || legacy_claim_ok=0
+
+	if ! write_unavailable_dnsmasq_config; then
+		log_error 'Could not persist noresolv=1 with no explicit UCI server; stopping dnsmasq'
+		stop_dnsmasq || log_error 'dnsmasq stop verification failed; guardian DNS input must remain closed'
+		return 1
+	fi
+
+	if ! restart_dnsmasq; then
+		log_error 'dnsmasq restart failed; stopping the old process to prevent WAN DNS fallback'
+		stop_dnsmasq || log_error 'dnsmasq stop verification failed; guardian DNS input must remain closed'
+		return 1
+	fi
+
+	[ "$legacy_claim_ok" -eq 1 ] || log_error 'Obsolete DNS listener claim remains, but it is never trusted'
+	log_info 'DNS path unavailable: base UCI fallback disabled and LAN TCP/UDP 53 remains closed'
+	# Internal callers may use this success only to confirm safe convergence.
+	# It does not mean that an Internet DNS path exists.
+	return 0
 }
 
-case "$1" in
-    configure)
-        configure "$2"
-        ;;
-    restore)
-        restore
-        ;;
-    check)
-        check
-        ;;
-    *)
-        echo "Usage: $0 {configure|restore|check} [dns_port]"
-        exit 1
-        ;;
+case "${1-}" in
+	configure|restore|check)
+		# Explicit ports and legacy PID/port files are intentionally ignored.  No
+		# Phase 1 ownership manifest can authenticate them.
+		enforce_dns_unavailable
+		# The public compatibility actions always report DNS path failure, even
+		# after successfully converging base UCI while guardian keeps LAN DNS closed.
+		# Backend admission must treat this as unavailable and must not publish
+		# client access.
+		exit 1
+		;;
+	enforce-unavailable)
+		# Private control-plane action: return zero only when noresolv=1, no
+		# server, restart, and strict procd running verification all succeeded.
+		enforce_dns_unavailable
+		;;
+	status)
+		printf '%s\n' "$DNS_PATH_STATUS"
+		exit 1
+		;;
+	*)
+		echo "Usage: $0 {configure|restore|check|status|enforce-unavailable} [ignored_legacy_port]"
+		exit 2
+		;;
 esac

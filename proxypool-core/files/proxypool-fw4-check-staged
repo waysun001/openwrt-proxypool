@@ -1,0 +1,209 @@
+#!/bin/sh
+set -eu
+
+umask 077
+
+FW4_UCODE="${PROXYPOOL_FW4_UCODE:-/usr/share/ucode/fw4.uc}"
+FW4_MAIN="${PROXYPOOL_FW4_MAIN:-/usr/share/firewall4/main.uc}"
+UTPL="${PROXYPOOL_UTPL:-/usr/bin/utpl}"
+NFT="${PROXYPOOL_NFT:-/usr/sbin/nft}"
+GUARD_RULESET="${PROXYPOOL_GUARD_RULESET:-/usr/lib/proxypool/proxypool-guard.nft}"
+INPUT_GATE="${PROXYPOOL_INPUT_GATE:-/usr/lib/proxypool/proxypool-fw4-input-gate.nft}"
+FORWARD_GATE="${PROXYPOOL_FORWARD_GATE:-/usr/lib/proxypool/proxypool-fw4-forward-gate.nft}"
+NFTABLES_USER_DIR="${PROXYPOOL_NFTABLES_USER_DIR:-/etc/nftables.d}"
+
+fail() {
+	echo "ProxyPool staged fw4 check: $*" >&2
+	exit 1
+}
+
+[ "$#" -eq 1 ] || fail 'expected exactly one staged configuration directory'
+[ "$(id -u)" -eq 0 ] || fail 'must run as root'
+[ -d "$1" ] && [ ! -L "$1" ] || fail 'staged configuration directory is missing or unsafe'
+case "$NFTABLES_USER_DIR" in
+	/*) : ;;
+	*) fail 'nftables user include directory must be absolute' ;;
+esac
+if [ -e "$NFTABLES_USER_DIR" ] || [ -L "$NFTABLES_USER_DIR" ]; then
+	[ -d "$NFTABLES_USER_DIR" ] && [ ! -L "$NFTABLES_USER_DIR" ] ||
+		fail 'nftables user include directory is unsafe'
+fi
+for user_nft in "$NFTABLES_USER_DIR"/*.nft; do
+	if [ -e "$user_nft" ] || [ -L "$user_nft" ]; then
+		fail "unmanaged nftables include is forbidden: $user_nft"
+	fi
+done
+
+STAGED_CONFIG=$(CDPATH= cd -- "$1" && pwd -P) || fail 'cannot resolve staged configuration directory'
+
+for package in firewall dhcp network; do
+	[ -f "$STAGED_CONFIG/$package" ] && [ ! -L "$STAGED_CONFIG/$package" ] ||
+		fail "staged package is missing or unsafe: $package"
+done
+for command_path in "$UTPL" "$NFT"; do
+	[ -x "$command_path" ] || fail "required executable is unavailable: $command_path"
+done
+[ -f "$FW4_UCODE" ] && [ ! -L "$FW4_UCODE" ] && [ -r "$FW4_UCODE" ] ||
+	fail "official fw4 module is missing or unsafe: $FW4_UCODE"
+[ -f "$FW4_MAIN" ] && [ ! -L "$FW4_MAIN" ] && [ -r "$FW4_MAIN" ] ||
+	fail "official fw4 main template is missing or unsafe: $FW4_MAIN"
+
+WORK_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/proxypool-fw4-check.XXXXXX") ||
+	fail 'cannot create isolated checker directory'
+PATCHED_UCODE="$WORK_ROOT/fw4.uc"
+RAW_RENDERED="$WORK_ROOT/ruleset-with-includes.nft"
+RENDERED="$WORK_ROOT/ruleset.nft"
+chmod 700 "$WORK_ROOT"
+
+cleanup() {
+	rm -rf "$WORK_ROOT"
+}
+
+terminate_check() {
+	status=$1
+	trap - EXIT HUP INT TERM
+	cleanup
+	exit "$status"
+}
+
+trap cleanup EXIT
+trap 'terminate_check 129' HUP
+trap 'terminate_check 130' INT
+trap 'terminate_check 143' TERM
+
+cursor_count=$(grep -F 'this.cursor = uci.cursor();' "$FW4_UCODE" | wc -l | tr -d ' ')
+[ "$cursor_count" -eq 1 ] ||
+	fail "official fw4 cursor signature count is $cursor_count, expected 1"
+load_count=$(grep -F 'this.cursor.load("firewall");' "$FW4_UCODE" | wc -l | tr -d ' ')
+[ "$load_count" -eq 1 ] ||
+	fail "official fw4 firewall load signature count is $load_count, expected 1"
+
+# OpenWrt 23.05 libuci still keeps /tmp/.uci in delta_path when only the
+# cursor directories are changed.  Loading the staged firewall by absolute
+# path makes libuci mark the package has_delta=false, so no live pending delta
+# can contaminate validation.
+sed 's|this\.cursor\.load("firewall");|this.cursor.load(getenv("PROXYPOOL_STAGED_CONFIG") + "/firewall");|' \
+	"$FW4_UCODE" >"$PATCHED_UCODE" || fail 'cannot patch absolute staged firewall load'
+[ "$(grep -F 'this.cursor = uci.cursor();' "$PATCHED_UCODE" | wc -l | tr -d ' ')" -eq 1 ] ||
+	fail 'official fw4 cursor was unexpectedly changed'
+[ "$(grep -F 'this.cursor.load(getenv("PROXYPOOL_STAGED_CONFIG") + "/firewall");' "$PATCHED_UCODE" | wc -l | tr -d ' ')" -eq 1 ] ||
+	fail 'absolute staged firewall load replacement was not unique'
+
+for include_file in "$GUARD_RULESET" "$INPUT_GATE" "$FORWARD_GATE"; do
+	[ -f "$include_file" ] && [ ! -L "$include_file" ] && [ -r "$include_file" ] ||
+		fail "owned nft include is missing or unsafe: $include_file"
+done
+USER_INCLUDE="include \"$NFTABLES_USER_DIR/*.nft\""
+
+PROXYPOOL_STAGED_CONFIG=$STAGED_CONFIG
+export PROXYPOOL_STAGED_CONFIG
+
+ACTION=print "$UTPL" -L "$WORK_ROOT" -S "$FW4_MAIN" >"$RAW_RENDERED" ||
+	fail "fw4 failed to render the staged configuration (exit $?)"
+[ -s "$RAW_RENDERED" ] || fail 'fw4 rendered an empty staged ruleset'
+user_include_count=$(grep -F "$USER_INCLUDE" "$RAW_RENDERED" 2>/dev/null | wc -l | tr -d ' ')
+[ "$user_include_count" -eq 1 ] ||
+	fail "official nftables user include signature count is $user_include_count, expected 1"
+
+for include_file in "$GUARD_RULESET" "$INPUT_GATE" "$FORWARD_GATE"; do
+	include_count=$(grep -F "include \"$include_file\"" "$RAW_RENDERED" | wc -l | tr -d ' ')
+	[ "$include_count" -eq 1 ] ||
+		fail "owned nft include was ignored or duplicated: $include_file"
+done
+
+# Expand the three owned snippets into the rendered ruleset before checking
+# signatures and nft syntax.  Other fw4 includes remain native nft include
+# directives and are resolved normally by nft.
+awk -v guard="$GUARD_RULESET" -v input="$INPUT_GATE" -v forward="$FORWARD_GATE" \
+	-v user_include="$USER_INCLUDE" '
+	function emit(path, line) {
+		while ((getline line < path) > 0) print line
+		close(path)
+	}
+	{
+		trimmed = $0
+		gsub(/^[[:space:]]+|[[:space:]]+$/, "", trimmed)
+	}
+	trimmed == user_include { next }
+	index($0, "include \"" guard "\"") { emit(guard); next }
+	index($0, "include \"" input "\"") { emit(input); next }
+	index($0, "include \"" forward "\"") { emit(forward); next }
+	{ print }
+' "$RAW_RENDERED" >"$RENDERED" || fail 'cannot expand owned nft includes'
+if grep -Eq '^[[:space:]]*include[[:space:]]+' "$RENDERED"; then
+	fail 'rendered ruleset contains an unaudited include directive'
+fi
+
+require_rendered_once() {
+	signature=$1
+	description=$2
+	count=$(grep -Fxc "$signature" "$RENDERED" 2>/dev/null || true)
+	[ "$count" -eq 1 ] || fail "$description signature count is $count, expected 1"
+}
+
+require_chain_signature_before_established() {
+	chain_name=$1
+	signature=$2
+	description=$3
+	awk -v wanted_chain="$chain_name" -v wanted_signature="$signature" '
+		function brace_delta(text, opens, closings) {
+			opens = gsub(/\{/, "{", text)
+			closings = gsub(/\}/, "}", text)
+			return opens - closings
+		}
+		{
+			normalized = $0
+			gsub(/[[:space:]][[:space:]]*/, " ", normalized)
+			sub(/^ /, "", normalized)
+			sub(/ $/, "", normalized)
+		}
+		!inside && normalized == "chain " wanted_chain " {" {
+			inside = 1
+			chains++
+			depth = brace_delta($0)
+			next
+		}
+		inside {
+			if (normalized == wanted_signature) {
+				matches++
+				gate_line = NR
+			}
+			if (index(normalized, "ct state vmap { established : accept, related : accept") == 1) {
+				established++
+				established_line = NR
+			}
+			depth += brace_delta($0)
+			if (depth == 0) inside = 0
+		}
+		END {
+			exit !(chains == 1 && matches == 1 && established == 1 &&
+			       gate_line < established_line)
+		}
+	' "$RENDERED" ||
+		fail "$description is not present exactly once before established/related in chain $chain_name"
+}
+
+require_rendered_once \
+	'table inet proxypool_guard {' \
+	'guardian table'
+awk '
+	{
+		normalized = $0
+		gsub(/[[:space:]][[:space:]]*/, " ", normalized)
+		sub(/^ /, "", normalized)
+		sub(/ $/, "", normalized)
+	}
+	normalized == "table inet proxypool_guard {" && !guardian_line { guardian_line = NR }
+	normalized == "table inet fw4 {" && !fw4_line { fw4_line = NR }
+	END { exit !(guardian_line && fw4_line && guardian_line < fw4_line) }
+' "$RENDERED" || fail 'guardian table is not prepended before the fw4 table'
+INPUT_SIGNATURE='iifname "br-lan" meta nfproto ipv4 meta mark & 0x00ff0000 == 0x005a0000 meta l4proto tcp ct status dnat accept'
+FORWARD_SIGNATURE='iifname "br-lan" meta nfproto ipv4 meta mark & 0x00ff0000 == 0x005a0000 meta l4proto tcp accept'
+require_rendered_once "$INPUT_SIGNATURE" 'ProxyPool input gate'
+require_rendered_once "$FORWARD_SIGNATURE" 'ProxyPool forward gate'
+require_chain_signature_before_established input "$INPUT_SIGNATURE" 'ProxyPool input gate'
+require_chain_signature_before_established forward "$FORWARD_SIGNATURE" 'ProxyPool forward gate'
+if grep -Eq '(^|[^[:alnum:]_])(flowtable|flow[[:space:]]+(add|offload))([^[:alnum:]_]|$)' "$RENDERED"; then
+	fail 'rendered ruleset contains forbidden flow offload syntax'
+fi
+"$NFT" -c -f "$RENDERED" || fail 'nft rejected the staged fw4 ruleset'

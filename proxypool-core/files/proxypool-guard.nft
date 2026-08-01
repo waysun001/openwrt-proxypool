@@ -1,0 +1,94 @@
+table inet proxypool_guard;
+delete table inet proxypool_guard;
+
+table inet proxypool_guard {
+	set v1_l2tp_paths {
+		type ipv4_addr . ifname;
+	}
+
+	set v1_tcp_redirects {
+		type ipv4_addr . inet_service;
+	}
+
+	set v2_l2tp_paths {
+		type ether_addr . ipv4_addr . ifname;
+	}
+
+	# Derived from the same validated V2 manifest as v2_l2tp_paths. At the
+	# routed forward hook the destination Ethernet address is not yet reliable,
+	# so return traffic uses the exact client IPv4 and incoming PPP interface.
+	set v2_l2tp_return_paths {
+		type ipv4_addr . ifname;
+	}
+
+	set v2_tcp_redirects {
+		type ether_addr . ipv4_addr . inet_service;
+	}
+
+	set blocked_v4_destinations {
+		type ipv4_addr;
+		flags interval;
+		auto-merge;
+		elements = {
+			0.0.0.0/8,
+			10.0.0.0/8,
+			100.64.0.0/10,
+			127.0.0.0/8,
+			169.254.0.0/16,
+			172.16.0.0/12,
+			192.0.0.0/24,
+			192.0.2.0/24,
+			192.88.99.0/24,
+			192.168.0.0/16,
+			198.18.0.0/15,
+			198.51.100.0/24,
+			203.0.113.0/24,
+			224.0.0.0/4,
+			240.0.0.0/4
+		}
+	}
+
+	chain guard_prerouting {
+		type filter hook prerouting priority -310; policy accept;
+		iifname "br-lan" meta mark set meta mark & 0xff00ffff
+	}
+
+	chain guard_input {
+		type filter hook input priority 10; policy drop;
+		iifname "br-lan" meta nfproto ipv4 udp sport 68 udp dport 67 accept
+		iifname "br-lan" meta nfproto ipv4 ip daddr 192.168.9.1 tcp dport { 80, 443 } accept
+		iifname "br-lan" meta nfproto ipv4 ct original ip daddr @blocked_v4_destinations drop
+		iifname "br-lan" meta nfproto ipv4 meta mark & 0x00ff0000 == 0x005a0000 meta l4proto tcp ct status dnat ip saddr . tcp dport @v1_tcp_redirects accept
+		iifname "br-lan" meta nfproto ipv4 meta mark & 0x00ff0000 == 0x005a0000 meta l4proto tcp ct status dnat ether saddr . ip saddr . tcp dport @v2_tcp_redirects accept
+		iifname "br-lan" drop
+		iifname "lo" accept
+		ct state established,related accept
+		iifname "eth1" meta nfproto ipv4 udp sport 67 udp dport 68 accept
+	}
+
+	chain guard_forward {
+		type filter hook forward priority 10; policy drop;
+		iifname "br-lan" meta nfproto ipv6 drop
+		iifname "br-lan" meta nfproto ipv4 meta l4proto udp drop
+		iifname "br-lan" meta nfproto ipv4 ip daddr @blocked_v4_destinations drop
+		iifname "br-lan" meta nfproto ipv4 meta mark & 0x00ff0000 == 0x005a0000 meta l4proto tcp ip saddr . oifname @v1_l2tp_paths accept
+		iifname "br-lan" meta nfproto ipv4 meta mark & 0x00ff0000 == 0x005a0000 meta l4proto tcp ether saddr . ip saddr . oifname @v2_l2tp_paths accept
+		iifname "br-lan" drop
+		oifname "br-lan" meta nfproto ipv6 drop
+		oifname "br-lan" meta nfproto ipv4 meta l4proto udp drop
+		oifname "br-lan" meta nfproto ipv4 ip saddr @blocked_v4_destinations drop
+		oifname "br-lan" meta nfproto ipv4 ct state established ct direction reply meta l4proto tcp ip daddr . iifname @v1_l2tp_paths accept
+		oifname "br-lan" meta nfproto ipv4 ct state established ct direction reply meta l4proto tcp ip daddr . iifname @v2_l2tp_return_paths accept
+		oifname "br-lan" drop
+	}
+}
+
+table bridge proxypool_l2_guard;
+delete table bridge proxypool_l2_guard;
+
+table bridge proxypool_l2_guard {
+	chain guard_l2_forward {
+		type filter hook forward priority 10; policy drop;
+		meta ibrname "br-lan" meta obrname "br-lan" drop
+	}
+}

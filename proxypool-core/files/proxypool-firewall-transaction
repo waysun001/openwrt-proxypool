@@ -1,0 +1,1078 @@
+#!/bin/sh
+set -eu
+
+umask 077
+
+TRANSACTION_DIR="${PROXYPOOL_FIREWALL_TRANSACTION_DIR:-/etc/proxypool/firewall-transaction}"
+ACTIVATION_MARKER="${PROXYPOOL_FIREWALL_ACTIVATION_MARKER:-/etc/proxypool/firewall-safety-activated}"
+TRANSACTION_LOCK="${PROXYPOOL_TRANSACTION_LOCK:-/var/run/proxypool-firewall-transaction.lock}"
+FW4_LOCK="${PROXYPOOL_FW4_LOCK:-/var/run/fw4.lock}"
+BOOT_ID_FILE="${PROXYPOOL_BOOT_ID_FILE:-/proc/sys/kernel/random/boot_id}"
+CONFIG_DIR="${PROXYPOOL_CONFIG_DIR:-/etc/config}"
+FW4_STATE="${PROXYPOOL_FW4_STATE:-/var/run/fw4.state}"
+FLOCK="${PROXYPOOL_FLOCK:-flock}"
+SYNC="${PROXYPOOL_SYNC:-sync}"
+SHA256SUM="${PROXYPOOL_SHA256SUM:-sha256sum}"
+CONFIG_INSTALL="${PROXYPOOL_CONFIG_INSTALL:-}"
+LS_PROG="${PROXYPOOL_LS_PROG:-/bin/ls}"
+NFT="${PROXYPOOL_NFT:-/usr/sbin/nft}"
+UCI="${PROXYPOOL_UCI:-/sbin/uci}"
+FLOWTABLE_PROBE="${PROXYPOOL_FLOWTABLE_PROBE:-}"
+RUNTIME_VERIFY="${PROXYPOOL_FW4_RUNTIME_VERIFY:-}"
+GUARD_CONTRACT_FILE="${PROXYPOOL_GUARD_CONTRACT_FILE:-/usr/lib/proxypool/proxypool-guard.nft}"
+INPUT_GATE_CONTRACT_FILE="${PROXYPOOL_FW4_INPUT_GATE_CONTRACT_FILE:-/usr/lib/proxypool/proxypool-fw4-input-gate.nft}"
+FORWARD_GATE_CONTRACT_FILE="${PROXYPOOL_FW4_FORWARD_GATE_CONTRACT_FILE:-/usr/lib/proxypool/proxypool-fw4-forward-gate.nft}"
+LAN_ISOLATION_CONTRACT_FILE="${PROXYPOOL_LAN_ISOLATION_CONTRACT_FILE:-/usr/lib/proxypool/lan-isolation.sh}"
+LAN_HOTPLUG_CONTRACT_FILE="${PROXYPOOL_LAN_HOTPLUG_CONTRACT_FILE:-/etc/hotplug.d/net/99-proxypool-lan-isolation}"
+LAN_IFACE_HOTPLUG_CONTRACT_FILE="${PROXYPOOL_LAN_IFACE_HOTPLUG_CONTRACT_FILE:-/etc/hotplug.d/iface/99-proxypool-lan-isolation}"
+LAN_WORKER_CONTRACT_FILE="${PROXYPOOL_LAN_WORKER_CONTRACT_FILE:-/usr/lib/proxypool/lan-isolation-worker.sh}"
+GUARD_INIT_CONTRACT_FILE="${PROXYPOOL_GUARD_INIT_CONTRACT_FILE:-/etc/init.d/proxypool-guard}"
+UCI_STAGED_CONTRACT_FILE="${PROXYPOOL_UCI_STAGED_CONTRACT_FILE:-/usr/lib/proxypool/proxypool-uci-staged.uc}"
+LEGACY_GATE_CONTRACT_FILE="${PROXYPOOL_LEGACY_GATE_CONTRACT_FILE:-/usr/lib/proxypool/legacy-gate.sh}"
+PACKAGES="firewall dhcp network"
+ACTIVATION_SCHEMA_LINE='schema_version=2'
+PROJECTION_SCHEMA_LINE='projection_schema=2'
+CONTRACT_SCHEMA_LINE='contract_schema=3'
+
+fail() {
+	echo "ProxyPool firewall transaction: $*" >&2
+	exit 1
+}
+
+require_absolute_nonroot() {
+	path=$1
+	description=$2
+	case "$path" in
+		/*) : ;;
+		*) fail "$description must be an absolute path" ;;
+	esac
+	[ "$path" != / ] || fail "$description must not be the filesystem root"
+	case "$path" in
+		*/) fail "$description must not have a trailing slash" ;;
+	esac
+}
+
+require_regular() {
+	path=$1
+	description=$2
+	[ -f "$path" ] && [ ! -L "$path" ] ||
+		fail "$description is missing or unsafe: $path"
+}
+
+require_safe_directory() {
+	path=$1
+	description=$2
+	[ -d "$path" ] && [ ! -L "$path" ] ||
+		fail "$description is missing or unsafe: $path"
+}
+
+path_metadata_secure() {
+	path=$1
+	expected_permissions=$2
+	metadata=$("$LS_PROG" -nd "$path" 2>/dev/null) || return 1
+	case "$metadata" in
+		""|*'
+'*) return 1 ;;
+	esac
+	IFS=' 	' read -r permissions links owner group remainder <<EOF
+$metadata
+EOF
+	[ "$permissions" = "$expected_permissions" ] || return 1
+	[ "$owner" = 0 ] && [ "$group" = 0 ] || return 1
+	case "$expected_permissions" in
+		-*) [ "$links" = 1 ] || return 1 ;;
+	esac
+}
+
+require_authority_file() {
+	path=$1
+	description=$2
+	require_regular "$path" "$description"
+	path_metadata_secure "$path" '-rw-------' ||
+		fail "$description has unsafe ownership or permissions: $path"
+}
+
+require_authority_directory() {
+	path=$1
+	description=$2
+	require_safe_directory "$path" "$description"
+	path_metadata_secure "$path" 'drwx------' ||
+		fail "$description has unsafe ownership or permissions: $path"
+}
+
+require_contract_file() {
+	path=$1
+	description=$2
+	expected_permissions=$3
+	require_regular "$path" "$description"
+	path_metadata_secure "$path" "$expected_permissions" ||
+		fail "$description has unsafe ownership, permissions, or links: $path"
+}
+
+require_absolute_nonroot "$TRANSACTION_DIR" "transaction directory"
+require_absolute_nonroot "$ACTIVATION_MARKER" "firewall activation marker"
+require_absolute_nonroot "$TRANSACTION_LOCK" "transaction lock"
+require_absolute_nonroot "$FW4_LOCK" "fw4 lock"
+require_absolute_nonroot "$BOOT_ID_FILE" "boot id file"
+require_absolute_nonroot "$CONFIG_DIR" "configuration directory"
+require_absolute_nonroot "$FW4_STATE" "fw4 state file"
+require_absolute_nonroot "$GUARD_CONTRACT_FILE" "guardian safety contract"
+require_absolute_nonroot "$INPUT_GATE_CONTRACT_FILE" "fw4 input-gate safety contract"
+require_absolute_nonroot "$FORWARD_GATE_CONTRACT_FILE" "fw4 forward-gate safety contract"
+require_absolute_nonroot "$LAN_ISOLATION_CONTRACT_FILE" "LAN isolation safety contract"
+require_absolute_nonroot "$LAN_HOTPLUG_CONTRACT_FILE" "LAN hotplug safety contract"
+require_absolute_nonroot "$LAN_IFACE_HOTPLUG_CONTRACT_FILE" "LAN iface hotplug safety contract"
+require_absolute_nonroot "$LAN_WORKER_CONTRACT_FILE" "LAN reconciliation worker safety contract"
+require_absolute_nonroot "$GUARD_INIT_CONTRACT_FILE" "guardian init safety contract"
+require_absolute_nonroot "$UCI_STAGED_CONTRACT_FILE" "staged UCI safety contract"
+require_absolute_nonroot "$LEGACY_GATE_CONTRACT_FILE" "legacy quarantine safety contract"
+[ "$(dirname "$ACTIVATION_MARKER")" = "$(dirname "$TRANSACTION_DIR")" ] ||
+	fail 'firewall activation marker and transaction journal must share one authority directory'
+[ "$(id -u)" -eq 0 ] || fail 'must run as root'
+command -v "$SYNC" >/dev/null 2>&1 || fail "sync command is unavailable: $SYNC"
+command -v "$SHA256SUM" >/dev/null 2>&1 || fail "sha256 command is unavailable: $SHA256SUM"
+[ -x "$LS_PROG" ] || fail "metadata command is unavailable: $LS_PROG"
+
+read_one_line() {
+	file=$1
+	description=$2
+	require_regular "$file" "$description"
+	line_count=$(wc -l <"$file" | tr -d '[:space:]')
+	[ "$line_count" = 1 ] || fail "$description must contain exactly one line"
+	IFS= read -r line <"$file" || fail "cannot read $description"
+	[ -n "$line" ] || fail "$description must not be empty"
+	byte_count=$(wc -c <"$file" | tr -d '[:space:]')
+	[ "$byte_count" -eq $((${#line} + 1)) ] ||
+		fail "$description contains trailing or non-text bytes"
+	printf '%s\n' "$line"
+}
+
+current_boot_id() {
+	boot_id=$(read_one_line "$BOOT_ID_FILE" "kernel boot id")
+	printf '%s\n' "$boot_id" | grep -Eq '^[A-Za-z0-9._-]+$' ||
+		fail 'kernel boot id contains unsafe characters'
+	printf '%s\n' "$boot_id"
+}
+
+hash_file() {
+	file=$1
+	require_regular "$file" "hashed file"
+	hash_output=$("$SHA256SUM" "$file") || fail "cannot hash $file"
+	digest=${hash_output%%[[:space:]]*}
+	[ "${#digest}" -eq 64 ] && printf '%s\n' "$digest" | grep -Eq '^[0-9A-Fa-f]{64}$' ||
+		fail "invalid SHA-256 output for $file"
+	printf '%s\n' "$digest"
+}
+
+cleanup_projection_files() {
+	rm -f -- "${projection_firewall_raw:-}" "${projection_dhcp_raw:-}" \
+		"${projection_network_raw:-}" "${projection_filtered:-}" 2>/dev/null || true
+	projection_firewall_raw=
+	projection_dhcp_raw=
+	projection_network_raw=
+	projection_filtered=
+}
+
+write_safety_projection() {
+	projection_root=$1
+	projection_output=$2
+	require_safe_directory "$projection_root" "safety projection configuration directory"
+	[ -x "$UCI" ] || fail "UCI command is unavailable: $UCI"
+	for projection_package in $PACKAGES; do
+		require_regular "$projection_root/$projection_package" "safety projection configuration"
+	done
+
+	projection_firewall_raw=$(mktemp "${TMPDIR:-/tmp}/proxypool-projection-firewall.XXXXXX") ||
+		fail 'cannot allocate firewall projection input'
+	projection_dhcp_raw=$(mktemp "${TMPDIR:-/tmp}/proxypool-projection-dhcp.XXXXXX") || {
+		cleanup_projection_files
+		fail 'cannot allocate DHCP projection input'
+	}
+	projection_network_raw=$(mktemp "${TMPDIR:-/tmp}/proxypool-projection-network.XXXXXX") || {
+		cleanup_projection_files
+		fail 'cannot allocate network projection input'
+	}
+	projection_filtered=$(mktemp "${TMPDIR:-/tmp}/proxypool-projection-filtered.XXXXXX") || {
+		cleanup_projection_files
+		fail 'cannot allocate filtered projection input'
+	}
+
+	if ! "$UCI" -c "$projection_root" -q show firewall >"$projection_firewall_raw" 2>/dev/null ||
+		! "$UCI" -c "$projection_root" -q show dhcp >"$projection_dhcp_raw" 2>/dev/null ||
+		! "$UCI" -c "$projection_root" -q show network >"$projection_network_raw" 2>/dev/null; then
+		cleanup_projection_files
+		fail 'cannot read canonical UCI safety projection'
+	fi
+
+	{
+		printf '%s\n' "$PROJECTION_SCHEMA_LINE" '[firewall]'
+		LC_ALL=C sort "$projection_firewall_raw"
+		printf '%s\n' '[dhcp-lan-dns]'
+	} >"$projection_output" || {
+		cleanup_projection_files
+		fail 'cannot write firewall safety projection'
+	}
+
+	# Only dnsmasq sections and DHCP sections attached to LAN affect this
+	# authority.  Lease duration is intentionally excluded: it changes client
+	# lifecycle, not the fail-closed routing/DNS/IPv6 boundary.
+	awk '
+		function lhs_of(line, lhs) { lhs=line; sub(/=.*/, "", lhs); return lhs }
+		function section_of(line, lhs, rest, dot) {
+			lhs=lhs_of(line); sub(/^dhcp\./, "", lhs); dot=index(lhs, ".")
+			return dot ? substr(lhs, 1, dot - 1) : lhs
+		}
+		function value_of(line, value) {
+			value=line; sub(/^[^=]*=/, "", value)
+			if (value ~ /^\047.*\047$/) value=substr(value, 2, length(value) - 2)
+			return value
+		}
+		FNR == NR {
+			section=section_of($0)
+			if ($0 ~ /^dhcp\.[^.]+=dnsmasq$/) relevant[section]=1
+			if (lhs_of($0) ~ /\.interface$/ && value_of($0) == "lan") relevant[section]=1
+			next
+		}
+		{
+			section=section_of($0); lhs=lhs_of($0)
+			if (relevant[section] && lhs !~ /\.leasetime$/) print
+		}
+	' "$projection_dhcp_raw" "$projection_dhcp_raw" >"$projection_filtered" || {
+		cleanup_projection_files
+		fail 'cannot derive DHCP safety projection'
+	}
+	LC_ALL=C sort "$projection_filtered" >>"$projection_output" || {
+		cleanup_projection_files
+		fail 'cannot canonicalize DHCP safety projection'
+	}
+	printf '%s\n' '[network-all]' >>"$projection_output" || {
+		cleanup_projection_files
+		fail 'cannot write network projection header'
+	}
+
+	# Every network section is authority-bearing on this fixed appliance.  A
+	# seemingly unrelated bridge, VLAN lower, macvlan, or interface can become a
+	# second client ingress and bypass name-based policy.  Bind the complete
+	# canonical package; legitimate WAN/topology edits require reactivation.
+	LC_ALL=C sort "$projection_network_raw" >>"$projection_output" || {
+		cleanup_projection_files
+		fail 'cannot canonicalize network safety projection'
+	}
+	cleanup_projection_files
+}
+
+safety_projection_digest() {
+	projection_digest_root=$1
+	projection_digest_file=$(mktemp "${TMPDIR:-/tmp}/proxypool-safety-projection.XXXXXX") ||
+		fail 'cannot allocate safety projection'
+	write_safety_projection "$projection_digest_root" "$projection_digest_file"
+	projection_digest_value=$(hash_file "$projection_digest_file")
+	rm -f -- "$projection_digest_file" || fail 'cannot remove safety projection scratch file'
+	printf '%s\n' "$projection_digest_value"
+}
+
+safety_contract_digest() {
+	require_contract_file "$GUARD_CONTRACT_FILE" "guardian safety contract" '-rw-r--r--'
+	require_contract_file "$INPUT_GATE_CONTRACT_FILE" "fw4 input-gate safety contract" '-rw-r--r--'
+	require_contract_file "$FORWARD_GATE_CONTRACT_FILE" "fw4 forward-gate safety contract" '-rw-r--r--'
+	require_contract_file "$LAN_ISOLATION_CONTRACT_FILE" "LAN isolation safety contract" '-rwxr-xr-x'
+	require_contract_file "$LAN_HOTPLUG_CONTRACT_FILE" "LAN hotplug safety contract" '-rwxr-xr-x'
+	require_contract_file "$LAN_IFACE_HOTPLUG_CONTRACT_FILE" "LAN iface hotplug safety contract" '-rwxr-xr-x'
+	require_contract_file "$LAN_WORKER_CONTRACT_FILE" "LAN reconciliation worker safety contract" '-rwxr-xr-x'
+	require_contract_file "$GUARD_INIT_CONTRACT_FILE" "guardian init safety contract" '-rwxr-xr-x'
+	require_contract_file "$UCI_STAGED_CONTRACT_FILE" "staged UCI safety contract" '-rw-r--r--'
+	require_contract_file "$LEGACY_GATE_CONTRACT_FILE" "legacy quarantine safety contract" '-rwxr-xr-x'
+	contract_digest_file=$(mktemp "${TMPDIR:-/tmp}/proxypool-safety-contract.XXXXXX") ||
+		fail 'cannot allocate safety contract manifest'
+	# The helper/marker are deliberately not inputs to their own digest.  Schema
+	# bumps bind verifier logic; this manifest binds the runtime nft and L2 roles.
+	{
+		printf '%s\n' "$CONTRACT_SCHEMA_LINE"
+		printf 'guardian=%s\n' "$(hash_file "$GUARD_CONTRACT_FILE")"
+		printf 'fw4_input_gate=%s\n' "$(hash_file "$INPUT_GATE_CONTRACT_FILE")"
+		printf 'fw4_forward_gate=%s\n' "$(hash_file "$FORWARD_GATE_CONTRACT_FILE")"
+		printf 'lan_isolation=%s\n' "$(hash_file "$LAN_ISOLATION_CONTRACT_FILE")"
+		printf 'lan_hotplug=%s\n' "$(hash_file "$LAN_HOTPLUG_CONTRACT_FILE")"
+		printf 'lan_iface_hotplug=%s\n' "$(hash_file "$LAN_IFACE_HOTPLUG_CONTRACT_FILE")"
+		printf 'lan_worker=%s\n' "$(hash_file "$LAN_WORKER_CONTRACT_FILE")"
+		printf 'guard_init=%s\n' "$(hash_file "$GUARD_INIT_CONTRACT_FILE")"
+		printf 'uci_staged=%s\n' "$(hash_file "$UCI_STAGED_CONTRACT_FILE")"
+		printf 'legacy_gate=%s\n' "$(hash_file "$LEGACY_GATE_CONTRACT_FILE")"
+	} >"$contract_digest_file" || {
+		rm -f -- "$contract_digest_file"
+		fail 'cannot write safety contract manifest'
+	}
+	contract_digest_value=$(hash_file "$contract_digest_file")
+	rm -f -- "$contract_digest_file" || fail 'cannot remove safety contract scratch file'
+	printf '%s\n' "$contract_digest_value"
+}
+
+write_plain_file() {
+	value=$1
+	destination=$2
+	temporary="$destination.tmp.$$"
+	[ ! -e "$temporary" ] && [ ! -L "$temporary" ] ||
+		fail "temporary journal file already exists: $temporary"
+	printf '%s\n' "$value" >"$temporary" || fail "cannot write $temporary"
+	chmod 600 "$temporary" || fail "cannot protect $temporary"
+	require_authority_file "$temporary" "temporary journal metadata"
+	"$SYNC" || {
+		rm -f "$temporary"
+		fail "cannot sync $temporary"
+	}
+	mv -f "$temporary" "$destination" || {
+		rm -f "$temporary"
+		fail "cannot publish $destination"
+	}
+	"$SYNC" || fail "cannot sync published journal metadata"
+	require_authority_file "$destination" "published journal metadata"
+}
+
+verify_snapshot_file() {
+	root=$1
+	package=$2
+	data="$root/$package"
+	hash="$root/$package.sha256"
+	require_authority_file "$data" "journal snapshot"
+	require_authority_file "$hash" "journal snapshot checksum"
+	expected=$(read_one_line "$hash" "journal snapshot checksum")
+	[ "${#expected}" -eq 64 ] && printf '%s\n' "$expected" | grep -Eq '^[0-9A-Fa-f]{64}$' ||
+		fail "invalid journal checksum for $package"
+	actual=$(hash_file "$data")
+	[ "$actual" = "$expected" ] || fail "journal snapshot checksum mismatch: $package"
+}
+
+journal_present() {
+	[ -e "$TRANSACTION_DIR" ] || [ -L "$TRANSACTION_DIR" ]
+}
+
+validate_journal() {
+	require_authority_directory "$(dirname "$TRANSACTION_DIR")" "transaction parent"
+	require_authority_directory "$TRANSACTION_DIR" "transaction journal"
+	require_authority_directory "$TRANSACTION_DIR/original" "original snapshot directory"
+	require_authority_directory "$TRANSACTION_DIR/staged" "staged snapshot directory"
+	for metadata_file in schema_version state boot_id mode; do
+		require_authority_file "$TRANSACTION_DIR/$metadata_file" "journal metadata"
+	done
+	JOURNAL_SCHEMA=$(read_one_line "$TRANSACTION_DIR/schema_version" "journal schema version")
+	[ "$JOURNAL_SCHEMA" = 1 ] &&
+		[ "$(wc -c <"$TRANSACTION_DIR/schema_version" | tr -d '[:space:]')" = 2 ] ||
+		fail 'unsupported or malformed journal schema version'
+
+	JOURNAL_STATE=$(read_one_line "$TRANSACTION_DIR/state" "journal state")
+	case "$JOURNAL_STATE" in
+		prepared|awaiting-fw4-start|rollback-awaiting-fw4-start) : ;;
+		*) fail "invalid journal state: $JOURNAL_STATE" ;;
+	esac
+	JOURNAL_BOOT_ID=$(read_one_line "$TRANSACTION_DIR/boot_id" "journal boot id")
+	printf '%s\n' "$JOURNAL_BOOT_ID" | grep -Eq '^[A-Za-z0-9._-]+$' ||
+		fail 'journal boot id contains unsafe characters'
+	JOURNAL_MODE=$(read_one_line "$TRANSACTION_DIR/mode" "journal mode")
+	case "$JOURNAL_MODE" in
+		cold|live) : ;;
+		*) fail "invalid journal mode: $JOURNAL_MODE" ;;
+	esac
+
+	for package in $PACKAGES; do
+		verify_snapshot_file "$TRANSACTION_DIR/original" "$package"
+		verify_snapshot_file "$TRANSACTION_DIR/staged" "$package"
+	done
+}
+
+safe_remove_tree() {
+	target=$1
+	case "$target" in
+		"$TRANSACTION_DIR".prepare.*|"$TRANSACTION_DIR".retired.*) : ;;
+		*) fail "refusing unsafe recursive removal target: $target" ;;
+	esac
+	[ "$target" != / ] || fail 'refusing to remove filesystem root'
+	rm -rf -- "$target"
+}
+
+retire_journal() {
+	retired="$TRANSACTION_DIR.retired.$$"
+	[ ! -e "$retired" ] && [ ! -L "$retired" ] ||
+		fail "retired journal path already exists: $retired"
+	mv "$TRANSACTION_DIR" "$retired" || fail 'cannot atomically retire transaction journal'
+	"$SYNC" || fail 'cannot sync retired transaction journal'
+	safe_remove_tree "$retired" || fail 'cannot remove retired transaction journal'
+	"$SYNC" || fail 'cannot sync transaction journal removal'
+}
+
+install_config() {
+	source_file=$1
+	destination=$2
+	require_regular "$source_file" "configuration source"
+	[ ! -L "$destination" ] || return 1
+	if [ -n "$CONFIG_INSTALL" ]; then
+		[ -x "$CONFIG_INSTALL" ] || return 1
+		"$CONFIG_INSTALL" "$source_file" "$destination" || return 1
+		"$SYNC" || return 1
+		return 0
+	fi
+	temporary="$destination.proxypool-transaction.$$"
+	[ ! -e "$temporary" ] && [ ! -L "$temporary" ] || return 1
+	cp -p "$source_file" "$temporary" || {
+		rm -f "$temporary"
+		return 1
+	}
+	"$SYNC" || {
+		rm -f "$temporary"
+		return 1
+	}
+	mv -f "$temporary" "$destination" || {
+		rm -f "$temporary"
+		return 1
+	}
+	"$SYNC"
+}
+
+configs_match_snapshot() {
+	snapshot=$1
+	require_safe_directory "$CONFIG_DIR" "configuration directory"
+	for package in $PACKAGES; do
+		live_file="$CONFIG_DIR/$package"
+		require_regular "$live_file" "live configuration"
+		expected=$(read_one_line "$snapshot/$package.sha256" "journal snapshot checksum")
+		actual=$(hash_file "$live_file")
+		[ "$actual" = "$expected" ] || return 1
+	done
+}
+
+activation_marker_present() {
+	[ -e "$ACTIVATION_MARKER" ] || [ -L "$ACTIVATION_MARKER" ]
+}
+
+read_activation_digest() {
+	key=$1
+	line_number=$2
+	line=$(sed -n "${line_number}p" "$ACTIVATION_MARKER") || return 1
+	case "$line" in
+		"$key="*) digest=${line#*=} ;;
+		*) return 1 ;;
+	esac
+	[ "${#digest}" -eq 64 ] && printf '%s\n' "$digest" | grep -Eq '^[0-9A-Fa-f]{64}$' ||
+		return 1
+	printf '%s\n' "$digest"
+}
+
+activation_current() {
+	local expected_projection expected_contract actual_projection actual_contract
+	local expected_marker_bytes actual_marker_bytes marker_line
+	activation_marker_present || return 1
+	require_authority_directory "$(dirname "$ACTIVATION_MARKER")" "firewall activation authority"
+	require_authority_file "$ACTIVATION_MARKER" "firewall activation marker"
+	[ "$(wc -l <"$ACTIVATION_MARKER" | tr -d '[:space:]')" = 5 ] ||
+		fail 'firewall activation marker has the wrong line count'
+	[ "$(sed -n '1p' "$ACTIVATION_MARKER")" = "$ACTIVATION_SCHEMA_LINE" ] ||
+		fail 'firewall activation marker has an unsupported schema'
+	[ "$(sed -n '2p' "$ACTIVATION_MARKER")" = "$PROJECTION_SCHEMA_LINE" ] ||
+		fail 'firewall activation marker has an unsupported projection schema'
+	[ "$(sed -n '3p' "$ACTIVATION_MARKER")" = "$CONTRACT_SCHEMA_LINE" ] ||
+		fail 'firewall activation marker has an unsupported contract schema'
+	require_safe_directory "$CONFIG_DIR" "configuration directory"
+	expected_projection=$(read_activation_digest projection_digest 4) ||
+		fail 'firewall activation marker has an invalid projection digest'
+	expected_contract=$(read_activation_digest contract_digest 5) ||
+		fail 'firewall activation marker has an invalid contract digest'
+	expected_marker_bytes=$((${#ACTIVATION_SCHEMA_LINE} + 1 + ${#PROJECTION_SCHEMA_LINE} + 1 + ${#CONTRACT_SCHEMA_LINE} + 1))
+	marker_line="projection_digest=$expected_projection"
+	expected_marker_bytes=$((expected_marker_bytes + ${#marker_line} + 1))
+	marker_line="contract_digest=$expected_contract"
+	expected_marker_bytes=$((expected_marker_bytes + ${#marker_line} + 1))
+	actual_marker_bytes=$(wc -c <"$ACTIVATION_MARKER" | tr -d '[:space:]')
+	[ "$actual_marker_bytes" -eq "$expected_marker_bytes" ] ||
+		fail 'firewall activation marker contains trailing or non-text bytes'
+	actual_projection=$(safety_projection_digest "$CONFIG_DIR")
+	[ "$actual_projection" = "$expected_projection" ] || return 1
+	actual_contract=$(safety_contract_digest)
+	[ "$actual_contract" = "$expected_contract" ] || return 1
+	return 0
+}
+
+invalidate_activation() {
+	parent=$(dirname "$ACTIVATION_MARKER")
+	if ! activation_marker_present; then
+		if [ -e "$parent" ] || [ -L "$parent" ]; then
+			require_authority_directory "$parent" "firewall activation authority"
+		fi
+		return 0
+	fi
+	require_authority_directory "$parent" "firewall activation authority"
+	require_authority_file "$ACTIVATION_MARKER" "firewall activation marker"
+	rm -f "$ACTIVATION_MARKER" || fail 'cannot invalidate firewall activation marker'
+	"$SYNC" || fail 'cannot sync firewall activation marker invalidation'
+	[ ! -e "$ACTIVATION_MARKER" ] && [ ! -L "$ACTIVATION_MARKER" ] ||
+		fail 'firewall activation marker survived invalidation'
+}
+
+publish_activation_marker() {
+	local projection_digest contract_digest
+	snapshot=$1
+	parent=$(dirname "$ACTIVATION_MARKER")
+	require_authority_directory "$parent" "firewall activation authority"
+	if activation_marker_present; then
+		require_authority_file "$ACTIVATION_MARKER" "existing firewall activation marker"
+	fi
+	temporary="$ACTIVATION_MARKER.tmp.$$"
+	[ ! -e "$temporary" ] && [ ! -L "$temporary" ] ||
+		fail "temporary activation marker already exists: $temporary"
+	{
+		printf '%s\n' "$ACTIVATION_SCHEMA_LINE"
+		printf '%s\n' "$PROJECTION_SCHEMA_LINE" "$CONTRACT_SCHEMA_LINE"
+		projection_digest=$(safety_projection_digest "$snapshot")
+		contract_digest=$(safety_contract_digest)
+		printf 'projection_digest=%s\n' "$projection_digest"
+		printf 'contract_digest=%s\n' "$contract_digest"
+	} >"$temporary" || fail 'cannot write firewall activation marker'
+	chmod 600 "$temporary" || fail 'cannot protect firewall activation marker'
+	require_authority_file "$temporary" "temporary firewall activation marker"
+	"$SYNC" || fail 'cannot sync firewall activation marker'
+	mv -f "$temporary" "$ACTIVATION_MARKER" || fail 'cannot publish firewall activation marker'
+	"$SYNC" || fail 'cannot sync published firewall activation marker'
+	require_authority_file "$ACTIVATION_MARKER" "published firewall activation marker"
+}
+
+restore_original() {
+	require_safe_directory "$CONFIG_DIR" "configuration directory"
+	restore_status=0
+	for package in $PACKAGES; do
+		install_config "$TRANSACTION_DIR/original/$package" "$CONFIG_DIR/$package" ||
+			restore_status=1
+	done
+	return "$restore_status"
+}
+
+recover_policy_locked() {
+	context=$1
+	if ! journal_present; then
+		journal_parent=$(dirname "$TRANSACTION_DIR")
+		if [ -e "$journal_parent" ] || [ -L "$journal_parent" ]; then
+			require_authority_directory "$journal_parent" "transaction parent"
+		fi
+		return 0
+	fi
+	validate_journal
+	now_boot_id=$(current_boot_id)
+
+	case "$JOURNAL_STATE" in
+		awaiting-fw4-start|rollback-awaiting-fw4-start)
+			if [ "$JOURNAL_BOOT_ID" = "$now_boot_id" ]; then
+				[ "$context" = boot ] && return 0
+				echo "ProxyPool firewall transaction: reboot_required: same-boot activation outcome is pending" >&2
+				return 1
+			fi
+		;;
+	esac
+
+	restore_original || {
+		echo 'ProxyPool firewall transaction: recovery was incomplete; journal retained' >&2
+		return 1
+	}
+
+	configs_match_snapshot "$TRANSACTION_DIR/original" || {
+		echo 'ProxyPool firewall transaction: recovered files do not match journal; journal retained' >&2
+		return 1
+	}
+	retire_journal
+}
+
+prepare_journal() {
+	[ "$#" -eq 2 ] || fail 'prepare-locked requires original and staged directories'
+	original_source=$1
+	staged_source=$2
+	require_absolute_nonroot "$original_source" "original source directory"
+	require_absolute_nonroot "$staged_source" "staged source directory"
+	require_safe_directory "$original_source" "original source directory"
+	require_safe_directory "$staged_source" "staged source directory"
+	journal_present && fail 'an existing transaction journal must be resolved first'
+
+	case "${PROXYPOOL_COLD_BOOT:-}" in
+		1) journal_mode=cold ;;
+		0) journal_mode=live ;;
+		*) fail 'PROXYPOOL_COLD_BOOT must be 0 or 1 while preparing a journal' ;;
+	esac
+	journal_boot_id=$(current_boot_id)
+	parent=$(dirname "$TRANSACTION_DIR")
+	parent_created=0
+	if [ ! -e "$parent" ] && [ ! -L "$parent" ]; then
+		mkdir -p "$parent" || fail "cannot create transaction parent: $parent"
+		parent_created=1
+	fi
+	if [ "$parent_created" -eq 1 ]; then
+		chmod 700 "$parent" || fail "cannot protect transaction parent: $parent"
+	fi
+	require_authority_directory "$parent" "transaction parent"
+
+	PREPARE_DIR="$TRANSACTION_DIR.prepare.$$"
+	[ ! -e "$PREPARE_DIR" ] && [ ! -L "$PREPARE_DIR" ] ||
+		fail "prepare directory already exists: $PREPARE_DIR"
+	mkdir "$PREPARE_DIR" || fail 'cannot create prepare directory'
+	mkdir "$PREPARE_DIR/original" "$PREPARE_DIR/staged" ||
+		fail 'cannot create snapshot directories'
+	chmod 700 "$PREPARE_DIR" "$PREPARE_DIR/original" "$PREPARE_DIR/staged" ||
+		fail 'cannot protect snapshot directories'
+	require_authority_directory "$PREPARE_DIR" "prepare directory"
+	require_authority_directory "$PREPARE_DIR/original" "original prepare directory"
+	require_authority_directory "$PREPARE_DIR/staged" "staged prepare directory"
+
+	for package in $PACKAGES; do
+		require_regular "$original_source/$package" "original configuration"
+		require_regular "$staged_source/$package" "staged configuration"
+		cp -p "$original_source/$package" "$PREPARE_DIR/original/$package" ||
+			fail "cannot snapshot original $package"
+		cp -p "$staged_source/$package" "$PREPARE_DIR/staged/$package" ||
+			fail "cannot snapshot staged $package"
+		chmod 600 "$PREPARE_DIR/original/$package" "$PREPARE_DIR/staged/$package" ||
+			fail "cannot protect $package snapshots"
+		hash_file "$PREPARE_DIR/original/$package" >"$PREPARE_DIR/original/$package.sha256" ||
+			fail "cannot record original $package checksum"
+		hash_file "$PREPARE_DIR/staged/$package" >"$PREPARE_DIR/staged/$package.sha256" ||
+			fail "cannot record staged $package checksum"
+		chmod 600 "$PREPARE_DIR/original/$package.sha256" "$PREPARE_DIR/staged/$package.sha256" ||
+			fail "cannot protect $package checksums"
+		require_authority_file "$PREPARE_DIR/original/$package" "original snapshot"
+		require_authority_file "$PREPARE_DIR/staged/$package" "staged snapshot"
+		require_authority_file "$PREPARE_DIR/original/$package.sha256" "original checksum"
+		require_authority_file "$PREPARE_DIR/staged/$package.sha256" "staged checksum"
+	done
+
+	printf '%s\n' 1 >"$PREPARE_DIR/schema_version"
+	printf '%s\n' "$journal_boot_id" >"$PREPARE_DIR/boot_id"
+	printf '%s\n' "$journal_mode" >"$PREPARE_DIR/mode"
+	printf '%s\n' prepared >"$PREPARE_DIR/state"
+	chmod 600 "$PREPARE_DIR/schema_version" "$PREPARE_DIR/boot_id" "$PREPARE_DIR/mode" "$PREPARE_DIR/state" ||
+		fail 'cannot protect journal metadata'
+	for metadata_file in schema_version boot_id mode state; do
+		require_authority_file "$PREPARE_DIR/$metadata_file" "prepared journal metadata"
+	done
+	"$SYNC" || fail 'cannot sync prepared transaction journal'
+	mv "$PREPARE_DIR" "$TRANSACTION_DIR" || fail 'cannot atomically publish transaction journal'
+	PREPARE_DIR=
+	"$SYNC" || fail 'cannot sync published transaction journal'
+	validate_journal
+}
+
+mark_awaiting() {
+	validate_journal
+	[ "$JOURNAL_STATE" = prepared ] || fail 'only a prepared journal can await activation'
+	configs_match_snapshot "$TRANSACTION_DIR/staged" ||
+		fail 'live configuration does not match the staged snapshot'
+	write_plain_file awaiting-fw4-start "$TRANSACTION_DIR/state"
+}
+
+rollback_locked() {
+	validate_journal
+	restore_original || {
+		echo 'ProxyPool firewall transaction: rollback was incomplete; journal retained' >&2
+		return 1
+	}
+	configs_match_snapshot "$TRANSACTION_DIR/original" || {
+		echo 'ProxyPool firewall transaction: rollback verification failed; journal retained' >&2
+		return 1
+	}
+	if [ "$JOURNAL_MODE" = cold ]; then
+		# A cold conversion never activates fw4 in this process.  While the
+		# inherited fw4 lock is still held, restoring all three files completes
+		# the rollback; there is no kernel/state transition left to acknowledge.
+		retire_journal
+		return 0
+	fi
+	write_plain_file rollback-awaiting-fw4-start "$TRANSACTION_DIR/state"
+}
+
+abort_prepared() {
+	validate_journal
+	[ "$JOURNAL_STATE" = prepared ] || fail 'only a prepared journal can be aborted'
+	configs_match_snapshot "$TRANSACTION_DIR/original" ||
+		fail 'cannot abort after live configuration changed'
+	retire_journal
+}
+
+probe_no_runtime_flowtables() {
+	if [ -n "$FLOWTABLE_PROBE" ]; then
+		[ -x "$FLOWTABLE_PROBE" ] || return 1
+		if "$FLOWTABLE_PROBE"; then
+			return 1
+		else
+			probe_status=$?
+			[ "$probe_status" -eq 1 ]
+			return
+		fi
+	fi
+	[ -x "$NFT" ] || return 1
+	flowtables=$("$NFT" list flowtables 2>/dev/null) || return 1
+	! printf '%s\n' "$flowtables" | grep -Eq '^[[:space:]]*flowtable([[:space:]]|$)'
+}
+
+verify_runtime_chain_order() {
+	chain_name=$1
+	require_dnat=$2
+	ruleset_file=$3
+	awk -v wanted_chain="$chain_name" -v require_dnat="$require_dnat" '
+		function braces(text, opens, closes) {
+			opens = gsub(/\{/, "{", text)
+			closes = gsub(/\}/, "}", text)
+			return opens - closes
+		}
+		{
+			normalized = $0
+			gsub(/[[:space:]][[:space:]]*/, " ", normalized)
+			sub(/^ /, "", normalized)
+			sub(/ $/, "", normalized)
+		}
+		!inside && normalized == "chain " wanted_chain " {" {
+			inside = 1
+			chains++
+			depth = braces($0)
+			next
+		}
+		inside {
+			is_gate = index(normalized, "iifname \"br-lan\"") &&
+				index(normalized, "meta nfproto ipv4") &&
+				normalized ~ /meta mark & 0x0*ff0000 == 0x0*5a0000/ &&
+				index(normalized, "meta l4proto tcp") &&
+				normalized ~ /(^| )accept( |$)/
+			has_dnat = index(normalized, "ct status dnat") != 0
+			if (is_gate && ((require_dnat == 1 && has_dnat) ||
+			                (require_dnat == 0 && !has_dnat))) {
+				gates++
+				gate_line = NR
+			}
+			if (normalized ~ /^ct state established,related accept( |$)/ ||
+			    normalized ~ /^ct state vmap \{ established : accept, related : accept \}( |$)/) {
+				established++
+				established_line = NR
+			}
+			depth += braces($0)
+			if (depth == 0) inside = 0
+		}
+		END {
+			exit !(chains == 1 && gates == 1 && established == 1 &&
+			       gate_line < established_line)
+		}
+	' "$ruleset_file"
+}
+
+verify_guard_inet_runtime() {
+	guard_ruleset=$1
+	awk '
+		function reject() { invalid=1 }
+		function validate_blocked(text, count, parts, i, token, seen_required) {
+			gsub(/[{},;]/, " ", text)
+			count=split(text, parts, /[[:space:]]+/)
+			for (i=1; i<=count; i++) {
+				token=parts[i]
+				if (token == "" || token == "elements" || token == "=") continue
+				if (!(token in allowed_blocked) || seen_blocked[token]++) return 0
+			}
+			for (token in required_blocked)
+				if (!seen_blocked[token]) return 0
+			if (seen_blocked["224.0.0.0/3"] || seen_blocked["224.0.0.0-255.255.255.255"])
+				return !seen_blocked["224.0.0.0/4"] && !seen_blocked["240.0.0.0/4"] &&
+				       !(seen_blocked["224.0.0.0/3"] && seen_blocked["224.0.0.0-255.255.255.255"])
+			return seen_blocked["224.0.0.0/4"] && seen_blocked["240.0.0.0/4"]
+		}
+		BEGIN {
+			set_type["v1_l2tp_paths"]="type ipv4_addr . ifname"
+			set_type["v1_tcp_redirects"]="type ipv4_addr . inet_service"
+			set_type["v2_l2tp_paths"]="type ether_addr . ipv4_addr . ifname"
+			set_type["v2_l2tp_return_paths"]="type ipv4_addr . ifname"
+			set_type["v2_tcp_redirects"]="type ether_addr . ipv4_addr . inet_service"
+			set_type["blocked_v4_destinations"]="type ipv4_addr"
+
+			required_blocked["0.0.0.0/8"]=1
+			required_blocked["10.0.0.0/8"]=1
+			required_blocked["100.64.0.0/10"]=1
+			required_blocked["127.0.0.0/8"]=1
+			required_blocked["169.254.0.0/16"]=1
+			required_blocked["172.16.0.0/12"]=1
+			required_blocked["192.0.0.0/24"]=1
+			required_blocked["192.0.2.0/24"]=1
+			required_blocked["192.88.99.0/24"]=1
+			required_blocked["192.168.0.0/16"]=1
+			required_blocked["198.18.0.0/15"]=1
+			required_blocked["198.51.100.0/24"]=1
+			required_blocked["203.0.113.0/24"]=1
+			for (blocked in required_blocked) allowed_blocked[blocked]=1
+			allowed_blocked["224.0.0.0/4"]=1
+			allowed_blocked["240.0.0.0/4"]=1
+			allowed_blocked["224.0.0.0/3"]=1
+			allowed_blocked["224.0.0.0-255.255.255.255"]=1
+
+			# nftables 1.0.8 prints priorities within ten of a named base in
+			# symbolic form even when the source used a numeric priority.
+			expected["guard_prerouting",1]="type filter hook prerouting priority raw - 10; policy accept;"
+			expected["guard_prerouting",2]="iifname \"br-lan\" meta mark set meta mark & 0xff00ffff"
+			maximum["guard_prerouting"]=2
+
+			expected["guard_input",1]="type filter hook input priority filter + 10; policy drop;"
+			expected["guard_input",2]="iifname \"br-lan\" meta nfproto ipv4 udp sport 68 udp dport 67 accept"
+			expected["guard_input",3]="iifname \"br-lan\" meta nfproto ipv4 ip daddr 192.168.9.1 tcp dport { 80, 443 } accept"
+			expected["guard_input",4]="iifname \"br-lan\" meta nfproto ipv4 ct original ip daddr @blocked_v4_destinations drop"
+			expected["guard_input",5]="iifname \"br-lan\" meta nfproto ipv4 meta mark & 0x00ff0000 == 0x005a0000 meta l4proto tcp ct status dnat ip saddr . tcp dport @v1_tcp_redirects accept"
+			expected["guard_input",6]="iifname \"br-lan\" meta nfproto ipv4 meta mark & 0x00ff0000 == 0x005a0000 meta l4proto tcp ct status dnat ether saddr . ip saddr . tcp dport @v2_tcp_redirects accept"
+			expected["guard_input",7]="iifname \"br-lan\" drop"
+			expected["guard_input",8]="iifname \"lo\" accept"
+			expected["guard_input",9]="ct state established,related accept"
+			expected["guard_input",10]="iifname \"eth1\" meta nfproto ipv4 udp sport 67 udp dport 68 accept"
+			maximum["guard_input"]=10
+
+			expected["guard_forward",1]="type filter hook forward priority filter + 10; policy drop;"
+			expected["guard_forward",2]="iifname \"br-lan\" meta nfproto ipv6 drop"
+			expected["guard_forward",3]="iifname \"br-lan\" meta nfproto ipv4 meta l4proto udp drop"
+			expected["guard_forward",4]="iifname \"br-lan\" meta nfproto ipv4 ip daddr @blocked_v4_destinations drop"
+			expected["guard_forward",5]="iifname \"br-lan\" meta nfproto ipv4 meta mark & 0x00ff0000 == 0x005a0000 meta l4proto tcp ip saddr . oifname @v1_l2tp_paths accept"
+			expected["guard_forward",6]="iifname \"br-lan\" meta nfproto ipv4 meta mark & 0x00ff0000 == 0x005a0000 meta l4proto tcp ether saddr . ip saddr . oifname @v2_l2tp_paths accept"
+			expected["guard_forward",7]="iifname \"br-lan\" drop"
+			expected["guard_forward",8]="oifname \"br-lan\" meta nfproto ipv6 drop"
+			expected["guard_forward",9]="oifname \"br-lan\" meta nfproto ipv4 meta l4proto udp drop"
+			expected["guard_forward",10]="oifname \"br-lan\" meta nfproto ipv4 ip saddr @blocked_v4_destinations drop"
+			expected["guard_forward",11]="oifname \"br-lan\" meta nfproto ipv4 ct state established ct direction reply meta l4proto tcp ip daddr . iifname @v1_l2tp_paths accept"
+			expected["guard_forward",12]="oifname \"br-lan\" meta nfproto ipv4 ct state established ct direction reply meta l4proto tcp ip daddr . iifname @v2_l2tp_return_paths accept"
+			expected["guard_forward",13]="oifname \"br-lan\" drop"
+			maximum["guard_forward"]=13
+		}
+		{
+			line=$0
+			gsub(/[[:space:]][[:space:]]*/, " ", line)
+			sub(/^ /, "", line); sub(/ $/, "", line)
+			if (line == "") next
+			if (table_closed) { reject(); next }
+
+			if (element_mode) {
+				if (line == "}") { element_mode=0; next }
+				if (line ~ /}$/) { sub(/}$/, "", line); element_mode=0 }
+				blocked_text=blocked_text " " line
+				next
+			}
+
+			if (state == "set") {
+				if (line == "}") {
+					if (set_type_count != 1) reject()
+					if (set_name == "blocked_v4_destinations") {
+						if (blocked_flags != 1 || blocked_merge != 1 || blocked_elements != 1 ||
+						    !validate_blocked(blocked_text)) reject()
+					}
+					state=""; next
+				}
+				if (line == set_type[set_name]) { set_type_count++; next }
+				if (set_name != "blocked_v4_destinations") {
+					if (line == "elements = { }" || line == "elements = {}") next
+					reject(); next
+				}
+				if (line == "flags interval") { blocked_flags++; next }
+				if (line == "auto-merge") { blocked_merge++; next }
+				if (line ~ /^elements = \{/) {
+					blocked_elements++
+					sub(/^elements = \{ */, "", line)
+					if (line ~ /}$/) sub(/}$/, "", line); else element_mode=1
+					blocked_text=blocked_text " " line
+					next
+				}
+				reject(); next
+			}
+
+			if (state == "chain") {
+				if (line == "}") {
+					if (chain_step != maximum[chain_name]) reject()
+					state=""; next
+				}
+				chain_step++
+				if (line != expected[chain_name,chain_step]) reject()
+				next
+			}
+
+			if (!table_started) {
+				if (line == "table inet proxypool_guard {") table_started=1
+				else reject()
+				next
+			}
+			if (line == "}") { table_closed=1; next }
+			if (line ~ /^set [A-Za-z0-9_]+ \{$/) {
+				set_name=line; sub(/^set /, "", set_name); sub(/ \{$/, "", set_name)
+				if (!(set_name in set_type) || ++set_seen[set_name] != 1) reject()
+				state="set"; set_type_count=0
+				blocked_flags=0; blocked_merge=0; blocked_elements=0; blocked_text=""
+				next
+			}
+			if (line ~ /^chain [A-Za-z0-9_]+ \{$/) {
+				chain_name=line; sub(/^chain /, "", chain_name); sub(/ \{$/, "", chain_name)
+				if (!(chain_name in maximum) || ++chain_seen[chain_name] != 1) reject()
+				state="chain"; chain_step=0
+				next
+			}
+			reject()
+		}
+		END {
+			if (!table_started || !table_closed || state != "" || element_mode) invalid=1
+			for (name in set_type) if (set_seen[name] != 1) invalid=1
+			for (name in maximum) if (chain_seen[name] != 1) invalid=1
+			exit invalid
+		}
+	' "$guard_ruleset"
+}
+
+verify_guard_bridge_runtime() {
+	bridge_ruleset=$1
+	awk '
+		{
+			line=$0
+			gsub(/[[:space:]][[:space:]]*/, " ", line)
+			sub(/^ /, "", line); sub(/ $/, "", line)
+			if (line == "") next
+			step++
+			expected=""
+			if (step == 1) expected="table bridge proxypool_l2_guard {"
+			else if (step == 2) expected="chain guard_l2_forward {"
+			else if (step == 3) expected="type filter hook forward priority 10; policy drop;"
+			else if (step == 4) expected="meta ibrname \"br-lan\" meta obrname \"br-lan\" drop"
+			else if (step == 5 || step == 6) expected="}"
+			if (expected == "" || line != expected) invalid=1
+		}
+		END { exit !(step == 6 && !invalid) }
+	' "$bridge_ruleset"
+}
+
+verify_fw4_runtime() {
+	if [ -n "$RUNTIME_VERIFY" ]; then
+		[ -x "$RUNTIME_VERIFY" ] || return 1
+		"$RUNTIME_VERIFY"
+		return
+	fi
+	[ -x "$NFT" ] || return 1
+	probe_no_runtime_flowtables || return 1
+	guard_runtime=$(mktemp "${TMPDIR:-/tmp}/proxypool-guard-runtime.XXXXXX") || return 1
+	bridge_runtime=$(mktemp "${TMPDIR:-/tmp}/proxypool-bridge-runtime.XXXXXX") || {
+		rm -f "$guard_runtime"
+		return 1
+	}
+	runtime_rules=$(mktemp "${TMPDIR:-/tmp}/proxypool-fw4-runtime.XXXXXX") || {
+		rm -f "$guard_runtime" "$bridge_runtime"
+		return 1
+	}
+	if ! "$NFT" list table inet proxypool_guard >"$guard_runtime" 2>/dev/null ||
+		! verify_guard_inet_runtime "$guard_runtime" ||
+		! "$NFT" list table bridge proxypool_l2_guard >"$bridge_runtime" 2>/dev/null ||
+		! verify_guard_bridge_runtime "$bridge_runtime"; then
+		rm -f "$guard_runtime" "$bridge_runtime" "$runtime_rules"
+		return 1
+	fi
+	if ! "$NFT" list table inet fw4 >"$runtime_rules" 2>/dev/null; then
+		rm -f "$guard_runtime" "$bridge_runtime" "$runtime_rules"
+		return 1
+	fi
+	if grep -Eq '(^|[^[:alnum:]_])(flowtable|flow[[:space:]]+(add|offload))([^[:alnum:]_]|$)' "$runtime_rules" ||
+		! verify_runtime_chain_order input 1 "$runtime_rules" ||
+		! verify_runtime_chain_order forward 0 "$runtime_rules"; then
+		rm -f "$guard_runtime" "$bridge_runtime" "$runtime_rules"
+		return 1
+	fi
+	rm -f "$guard_runtime" "$bridge_runtime" "$runtime_rules"
+	return 0
+}
+
+finalize_fw4() {
+	[ "${ACTION:-}" = includes ] || fail 'finalization is allowed only during ACTION=includes'
+	journal_present || return 0
+	validate_journal
+	[ "$JOURNAL_BOOT_ID" = "$(current_boot_id)" ] ||
+		fail 'refusing to finalize a cross-boot transaction'
+	case "$JOURNAL_STATE" in
+		awaiting-fw4-start)
+			final_snapshot="$TRANSACTION_DIR/staged"
+		;;
+		rollback-awaiting-fw4-start)
+			final_snapshot="$TRANSACTION_DIR/original"
+		;;
+		*) fail "journal is not awaiting fw4 activation: $JOURNAL_STATE" ;;
+	esac
+	configs_match_snapshot "$final_snapshot" ||
+		fail 'activated configuration does not match the journal'
+	verify_fw4_runtime ||
+		fail 'fw4 runtime acknowledgement failed; transaction journal retained'
+	if [ "$JOURNAL_STATE" = awaiting-fw4-start ]; then
+		# The wrapper must distinguish a runtime-acknowledged S19 activation from
+		# a cross-boot recovery to the post-clamp baseline.  Publish a hash-bound
+		# authority marker before retiring the only recovery journal; if either
+		# operation is interrupted, the next boot retains/retries safely.
+		publish_activation_marker "$final_snapshot"
+	fi
+	retire_journal
+}
+
+PREPARE_DIR=
+cleanup_prepare() {
+	if [ -n "$PREPARE_DIR" ] && { [ -e "$PREPARE_DIR" ] || [ -L "$PREPARE_DIR" ]; }; then
+		safe_remove_tree "$PREPARE_DIR" >/dev/null 2>&1 || true
+	fi
+}
+terminate_prepare() {
+	status=$1
+	trap - EXIT HUP INT TERM
+	cleanup_prepare
+	exit "$status"
+}
+trap cleanup_prepare EXIT
+trap 'terminate_prepare 129' HUP
+trap 'terminate_prepare 130' INT
+trap 'terminate_prepare 143' TERM
+
+command=${1:-}
+[ -n "$command" ] || fail 'missing transaction command'
+shift
+
+case "$command" in
+	journal-present)
+		[ "$#" -eq 0 ] || fail 'journal-present takes no arguments'
+		journal_present
+	;;
+	activation-current)
+		[ "$#" -eq 0 ] || fail 'activation-current takes no arguments'
+		activation_current
+	;;
+	activation-runtime-current)
+		[ "$#" -eq 0 ] || fail 'activation-runtime-current takes no arguments'
+		activation_current
+		verify_fw4_runtime
+	;;
+	invalidate-activation-locked)
+		[ "$#" -eq 0 ] || fail 'invalidate-activation-locked takes no arguments'
+		invalidate_activation
+	;;
+	recover-apply-locked)
+		[ "$#" -eq 0 ] || fail 'recover-apply-locked takes no arguments'
+		recover_policy_locked apply
+	;;
+	prepare-locked)
+		prepare_journal "$@"
+	;;
+	mark-awaiting-locked)
+		[ "$#" -eq 0 ] || fail 'mark-awaiting-locked takes no arguments'
+		mark_awaiting
+	;;
+	rollback-locked)
+		[ "$#" -eq 0 ] || fail 'rollback-locked takes no arguments'
+		rollback_locked
+	;;
+	abort-prepared-locked)
+		[ "$#" -eq 0 ] || fail 'abort-prepared-locked takes no arguments'
+		abort_prepared
+	;;
+	finalize-fw4-locked)
+		[ "$#" -eq 0 ] || fail 'finalize-fw4-locked takes no arguments'
+		finalize_fw4
+	;;
+	recover-only)
+		[ "$#" -eq 0 ] || fail 'recover-only takes no arguments'
+		command -v "$FLOCK" >/dev/null 2>&1 || fail "flock is unavailable: $FLOCK"
+		exec 999>"$TRANSACTION_LOCK" || fail "cannot open transaction lock: $TRANSACTION_LOCK"
+		"$FLOCK" -x 999 || fail 'cannot acquire transaction lock'
+		exec 1000>"$FW4_LOCK" || fail "cannot open fw4 lock: $FW4_LOCK"
+		"$FLOCK" -x 1000 || fail 'cannot acquire fw4 lock'
+		recover_policy_locked boot
+	;;
+	*) fail "unsupported transaction command: $command" ;;
+esac
+
+exit 0

@@ -8,6 +8,13 @@ REDSOCKS_DIR="/var/run/proxypool/redsocks"
 PROBE_DIR="/var/run/proxypool/probe"
 SLP_BIN="/usr/bin/slp-client"
 LOG_FILE="/var/log/proxypool.log"
+LEGACY_GATE="${PROXYPOOL_LEGACY_GATE:-/usr/lib/proxypool/legacy-gate.sh}"
+
+legacy_quarantine() {
+    /bin/sh "$LEGACY_GATE" mutation "$1" >/dev/null 2>&1 || true
+    printf '%s\n' 'legacy_runtime_quarantined'
+    return 125
+}
 
 # SLP 本地 SOCKS5 端口范围: 10801-10999
 BASE_SOCKS5_PORT=10800
@@ -437,6 +444,19 @@ get_local_port() {
 }
 
 case "$1" in
+    port)
+        ;;
+    start|stop|status|test|probe)
+        legacy_quarantine "slp-manager:$1"
+        exit $?
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|status|test|probe|port} <client_id>"
+        exit 1
+        ;;
+esac
+
+case "$1" in
     start)
         start "$2"
         ;;
@@ -455,8 +475,5 @@ case "$1" in
     port)
         get_local_port "$2"
         ;;
-    *)
-        echo "Usage: $0 {start|stop|status|test|probe|port} <client_id>"
-        exit 1
-        ;;
+    *) exit 1 ;;
 esac

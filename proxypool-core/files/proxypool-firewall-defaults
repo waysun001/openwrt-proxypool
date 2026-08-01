@@ -1,0 +1,482 @@
+#!/bin/sh
+set -eu
+
+umask 077
+
+CONFIG_DIR="${PROXYPOOL_CONFIG_DIR:-/etc/config}"
+UCODE="${PROXYPOOL_UCODE:-/usr/bin/ucode}"
+UCI="${PROXYPOOL_UCI:-/sbin/uci}"
+UCI_STAGED_HELPER="${PROXYPOOL_UCI_STAGED_HELPER:-/usr/lib/proxypool/proxypool-uci-staged.uc}"
+UCI_STAGED_APPLY="${PROXYPOOL_UCI_STAGED_APPLY:-}"
+NFT="${PROXYPOOL_NFT:-/usr/sbin/nft}"
+FLOWTABLE_PROBE="${PROXYPOOL_FLOWTABLE_PROBE:-}"
+PENDING_DELTA_PROBE="${PROXYPOOL_PENDING_DELTA_PROBE:-}"
+FW4_MODE_PROBE="${PROXYPOOL_FW4_MODE_PROBE:-}"
+FLOCK="${PROXYPOOL_FLOCK:-flock}"
+SYNC="${PROXYPOOL_SYNC:-sync}"
+FW4_LOCK="${PROXYPOOL_FW4_LOCK:-/var/run/fw4.lock}"
+TRANSACTION_LOCK="${PROXYPOOL_TRANSACTION_LOCK:-/var/run/proxypool-firewall-transaction.lock}"
+TRANSACTION_DIR="${PROXYPOOL_FIREWALL_TRANSACTION_DIR:-/etc/proxypool/firewall-transaction}"
+TRANSACTION_HELPER="${PROXYPOOL_TRANSACTION_HELPER:-/usr/lib/proxypool/proxypool-firewall-transaction}"
+ACTIVATOR="${PROXYPOOL_FW4_ACTIVATOR:-/usr/lib/proxypool/proxypool-fw4-activate}"
+GUARD_RESET="${PROXYPOOL_GUARD_RESET:-/usr/lib/proxypool/guard-resync.sh}"
+FW4_CHECK="${PROXYPOOL_FW4_CHECK:-/usr/lib/proxypool/proxypool-fw4-check-staged}"
+FW4_STATE="${PROXYPOOL_FW4_STATE:-/var/run/fw4.state}"
+BOOT_ID_FILE="${PROXYPOOL_BOOT_ID_FILE:-/proc/sys/kernel/random/boot_id}"
+NFTABLES_USER_DIR="${PROXYPOOL_NFTABLES_USER_DIR:-/etc/nftables.d}"
+COLD_BOOT="${PROXYPOOL_COLD_BOOT:-0}"
+
+fail() {
+	echo "ProxyPool firewall defaults: $*" >&2
+	exit 1
+}
+
+case "$COLD_BOOT" in
+	0) ACTIVATION_MODE=live ;;
+	1) ACTIVATION_MODE=cold ;;
+	*) fail 'PROXYPOOL_COLD_BOOT must be 0 or 1' ;;
+esac
+
+[ "$(id -u)" -eq 0 ] || fail 'must run as root'
+for path_description in \
+	"$CONFIG_DIR:configuration directory" \
+	"$FW4_LOCK:fw4 lock" \
+	"$TRANSACTION_LOCK:transaction lock" \
+	"$TRANSACTION_DIR:transaction directory" \
+	"$FW4_STATE:fw4 state file" \
+	"$BOOT_ID_FILE:boot id file" \
+	"$NFTABLES_USER_DIR:nftables user include directory"; do
+	path=${path_description%%:*}
+	description=${path_description#*:}
+	case "$path" in
+		/*) : ;;
+		*) fail "$description must be an absolute path" ;;
+	esac
+	[ "$path" != / ] || fail "$description must not be the filesystem root"
+done
+
+for executable in "$GUARD_RESET" "$FW4_CHECK" "$TRANSACTION_HELPER" "$ACTIVATOR"; do
+	[ -x "$executable" ] || fail "required executable is unavailable: $executable"
+done
+command -v "$FLOCK" >/dev/null 2>&1 || fail "required command is unavailable: $FLOCK"
+command -v "$SYNC" >/dev/null 2>&1 || fail "required command is unavailable: $SYNC"
+
+if [ -n "$UCI_STAGED_APPLY" ]; then
+	[ -x "$UCI_STAGED_APPLY" ] ||
+		fail "staged UCI apply seam is unavailable: $UCI_STAGED_APPLY"
+else
+	[ -x "$UCODE" ] || fail "required executable is unavailable: $UCODE"
+	[ -f "$UCI_STAGED_HELPER" ] && [ ! -L "$UCI_STAGED_HELPER" ] && [ -r "$UCI_STAGED_HELPER" ] ||
+		fail "staged UCI helper is missing or unsafe: $UCI_STAGED_HELPER"
+fi
+
+[ -d "$CONFIG_DIR" ] && [ ! -L "$CONFIG_DIR" ] ||
+	fail "configuration directory is missing or unsafe: $CONFIG_DIR"
+for package in firewall dhcp network; do
+	source_file="$CONFIG_DIR/$package"
+	[ -f "$source_file" ] && [ ! -L "$source_file" ] ||
+		fail "managed configuration is missing or unsafe: $source_file"
+done
+
+probe_active_flowtables() {
+	if [ -n "$FLOWTABLE_PROBE" ]; then
+		[ -x "$FLOWTABLE_PROBE" ] || return 2
+		"$FLOWTABLE_PROBE"
+		return
+	fi
+	[ -x "$NFT" ] || return 2
+	flowtables=$("$NFT" list flowtables 2>/dev/null) || return 2
+	printf '%s\n' "$flowtables" | grep -Eq '^[[:space:]]*flowtable([[:space:]]|$)'
+}
+
+flowtable_status() {
+	phase=$1
+	if probe_active_flowtables; then
+		echo "ProxyPool firewall defaults: active nft flowtable detected during $phase" >&2
+		return 1
+	else
+		probe_status=$?
+		if [ "$probe_status" -ne 1 ]; then
+			echo "ProxyPool firewall defaults: cannot determine flowtable state during $phase" >&2
+			return 1
+		fi
+	fi
+	return 0
+}
+
+probe_pending_deltas() {
+	if [ -n "$PENDING_DELTA_PROBE" ]; then
+		[ -x "$PENDING_DELTA_PROBE" ] || return 2
+		"$PENDING_DELTA_PROBE"
+		return
+	fi
+	[ -x "$UCI" ] || return 2
+	for package in firewall dhcp network; do
+		changes=$("$UCI" -q changes "$package" 2>/dev/null) || return 2
+		[ -z "$changes" ] || return 1
+	done
+	return 0
+}
+
+require_no_pending_deltas() {
+	if probe_pending_deltas; then
+		return 0
+	else
+		probe_status=$?
+	fi
+	[ "$probe_status" -eq 1 ] &&
+		fail 'pending UCI delta exists for firewall, dhcp, or network'
+	fail 'cannot determine pending UCI delta state'
+}
+
+probe_fw4_mode() {
+	wanted=$1
+	if [ -n "$FW4_MODE_PROBE" ]; then
+		[ -x "$FW4_MODE_PROBE" ] || return 2
+		"$FW4_MODE_PROBE" "$wanted"
+		return
+	fi
+	if [ -L "$FW4_STATE" ]; then
+		return 2
+	elif [ -e "$FW4_STATE" ]; then
+		[ -f "$FW4_STATE" ] || return 2
+		state_presence=present
+	else
+		state_presence=absent
+	fi
+	[ -x "$NFT" ] || return 2
+	tables=$("$NFT" list tables 2>/dev/null) || return 2
+	table_count=$(printf '%s\n' "$tables" |
+		grep -Ec '^[[:space:]]*table[[:space:]]+inet[[:space:]]+fw4[[:space:]]*$' || true)
+	case "$table_count" in
+		0) table_presence=absent ;;
+		1) table_presence=present ;;
+		*) return 2 ;;
+	esac
+	case "$wanted:$state_presence:$table_presence" in
+		cold:absent:absent|live:present:present) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+require_fw4_mode() {
+	probe_fw4_mode "$ACTIVATION_MODE" ||
+		fail "fw4 state/table do not prove $ACTIVATION_MODE activation mode"
+}
+
+require_empty_user_nft_dir() {
+	if [ -e "$NFTABLES_USER_DIR" ] || [ -L "$NFTABLES_USER_DIR" ]; then
+		[ -d "$NFTABLES_USER_DIR" ] && [ ! -L "$NFTABLES_USER_DIR" ] ||
+			fail 'nftables user include directory is unsafe'
+	fi
+	for user_nft in "$NFTABLES_USER_DIR"/*.nft; do
+		if [ -e "$user_nft" ] || [ -L "$user_nft" ]; then
+			fail "unmanaged nftables include is forbidden: $user_nft"
+		fi
+	done
+}
+
+TX_LOCK_HELD=0
+FW4_LOCK_HELD=0
+acquire_transaction_lock() {
+	exec 999>"$TRANSACTION_LOCK" || return 1
+	"$FLOCK" -x 999 || {
+		exec 999>&-
+		return 1
+	}
+	TX_LOCK_HELD=1
+}
+
+acquire_fw4_lock() {
+	exec 1000>"$FW4_LOCK" || return 1
+	"$FLOCK" -x 1000 || {
+		exec 1000>&-
+		return 1
+	}
+	FW4_LOCK_HELD=1
+}
+
+release_locks() {
+	if [ "$FW4_LOCK_HELD" -eq 1 ]; then
+		exec 1000>&-
+		FW4_LOCK_HELD=0
+	fi
+	if [ "$TX_LOCK_HELD" -eq 1 ]; then
+		exec 999>&-
+		TX_LOCK_HELD=0
+	fi
+}
+
+PROXYPOOL_CONFIG_DIR=$CONFIG_DIR
+PROXYPOOL_FW4_LOCK=$FW4_LOCK
+PROXYPOOL_TRANSACTION_LOCK=$TRANSACTION_LOCK
+PROXYPOOL_FIREWALL_TRANSACTION_DIR=$TRANSACTION_DIR
+PROXYPOOL_TRANSACTION_HELPER=$TRANSACTION_HELPER
+PROXYPOOL_FW4_STATE=$FW4_STATE
+PROXYPOOL_BOOT_ID_FILE=$BOOT_ID_FILE
+PROXYPOOL_NFTABLES_USER_DIR=$NFTABLES_USER_DIR
+PROXYPOOL_COLD_BOOT=$COLD_BOOT
+PROXYPOOL_FW4_LOCK_HELD=1
+export PROXYPOOL_CONFIG_DIR PROXYPOOL_FW4_LOCK PROXYPOOL_TRANSACTION_LOCK
+export PROXYPOOL_FIREWALL_TRANSACTION_DIR PROXYPOOL_TRANSACTION_HELPER
+export PROXYPOOL_FW4_STATE PROXYPOOL_BOOT_ID_FILE PROXYPOOL_NFTABLES_USER_DIR
+export PROXYPOOL_COLD_BOOT PROXYPOOL_FW4_LOCK_HELD
+
+# Lock order is global and fixed: ProxyPool transaction, then official fw4.
+# fd1000 remains inherited and locked through config swap and both candidate
+# and compensating activation, so no normal fw4 operation can interleave.
+acquire_transaction_lock || fail "cannot acquire transaction lock: $TRANSACTION_LOCK"
+acquire_fw4_lock || fail "cannot acquire fw4 lock: $FW4_LOCK"
+
+# First kernel observation: active/unknown must leave guardian, UCI, staging,
+# and any pre-existing durable journal completely untouched.
+flowtable_status preflight || fail 'cold reboot is required before conversion'
+require_no_pending_deltas
+require_empty_user_nft_dir
+require_fw4_mode
+
+# A cross-boot or pre-install interrupted WAL is restored before a new apply.
+# A same-boot awaiting activation is deliberately not recovered or replaced.
+"$TRANSACTION_HELPER" recover-apply-locked ||
+	fail 'an earlier firewall transaction cannot be safely recovered'
+
+# Recheck immediately before the one-way clamp and guardian revocation.
+flowtable_status pre-mutation || fail 'flowtable state changed before safety mutation'
+
+# The first conversion mutation is an atomic replacement of the independent
+# guardian with empty authorization sets.  Once this succeeds, SIGKILL at any
+# later marker/clamp/staging boundary remains network fail-closed even before a
+# multi-file WAL is needed.  A reset failure leaves every managed file and the
+# previous activation marker untouched so package integration can defer cold.
+"$GUARD_RESET" reset-empty || fail 'cannot establish an empty guardian'
+
+# Any previously acknowledged runtime applies only to the old, fully settled
+# transaction.  Revoke that authority before the first conversion mutation so
+# a later failure or same-boot WAL can never make the backend start gate accept
+# stale evidence.  The read-only preflights above deliberately precede this.
+"$TRANSACTION_HELPER" invalidate-activation-locked ||
+	fail 'cannot invalidate prior firewall activation authority'
+
+WORK_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/proxypool-firewall.XXXXXX") ||
+	fail 'cannot create transaction workspace'
+STAGE="$WORK_ROOT/staged"
+STAGE_DELTA="$WORK_ROOT/staged-delta"
+CLAMP_DELTA="$WORK_ROOT/clamp-delta"
+ORIGINAL="$WORK_ROOT/original"
+mkdir -p "$STAGE" "$STAGE_DELTA" "$CLAMP_DELTA" "$ORIGINAL"
+chmod 700 "$WORK_ROOT" "$STAGE" "$STAGE_DELTA" "$CLAMP_DELTA" "$ORIGINAL" 2>/dev/null || true
+
+WAL_PUBLISHED=0
+HANDOFF=0
+ROLLBACK_RUNNING=0
+ACTIVATION_IN_FLIGHT=0
+
+run_uci_action() {
+	action=$1
+	config_directory=$2
+	delta_directory=$3
+	if [ -n "$UCI_STAGED_APPLY" ]; then
+		"$UCI_STAGED_APPLY" "$action" "$config_directory" "$delta_directory"
+		return
+	fi
+	"$UCODE" "$UCI_STAGED_HELPER" "$action" "$config_directory" "$delta_directory"
+}
+
+install_config() {
+	source_file=$1
+	destination=$2
+	[ -f "$source_file" ] && [ ! -L "$source_file" ] || return 1
+	[ ! -L "$destination" ] || return 1
+	if [ -n "${PROXYPOOL_CONFIG_INSTALL:-}" ]; then
+		[ -x "$PROXYPOOL_CONFIG_INSTALL" ] || return 1
+		"$PROXYPOOL_CONFIG_INSTALL" "$source_file" "$destination" || return 1
+		"$SYNC" || return 1
+		return 0
+	fi
+	temporary="$destination.proxypool.$$"
+	[ ! -e "$temporary" ] && [ ! -L "$temporary" ] || return 1
+	cp -p "$source_file" "$temporary" || {
+		rm -f "$temporary"
+		return 1
+	}
+	"$SYNC" || {
+		rm -f "$temporary"
+		return 1
+	}
+	mv -f "$temporary" "$destination" || {
+		rm -f "$temporary"
+		return 1
+	}
+	"$SYNC"
+}
+
+wal_still_present() {
+	if "$TRANSACTION_HELPER" journal-present; then
+		return 0
+	else
+		journal_status=$?
+	fi
+	[ "$journal_status" -eq 1 ] || return 0
+	# Helper-wide validation failures also use status 1, so confirm the exact
+	# authority path is truly absent before any caller retires its WAL state.
+	if [ -e "$TRANSACTION_DIR" ] || [ -L "$TRANSACTION_DIR" ]; then
+		return 0
+	fi
+	return 1
+}
+
+run_live_activation() {
+	ACTIVATION_IN_FLIGHT=1
+	if "$ACTIVATOR" live; then
+		ACTIVATION_IN_FLIGHT=0
+		return 0
+	else
+		activation_result=$?
+		# A signal-shaped status cannot prove that a grandchild which inherited
+		# fd1000 has terminated.  Keep the in-flight flag set so signal/EXIT
+		# paths are forbidden from starting rollback activation.
+		if [ "$activation_result" -lt 128 ]; then
+			ACTIVATION_IN_FLIGHT=0
+		fi
+		return "$activation_result"
+	fi
+}
+
+activation_outcome_unknown() {
+	[ "$1" -ge 128 ]
+}
+
+rollback_transaction() {
+	[ "$WAL_PUBLISHED" -eq 1 ] || return 0
+	[ "$ROLLBACK_RUNNING" -eq 0 ] || return 1
+	ROLLBACK_RUNNING=1
+	if ! "$TRANSACTION_HELPER" rollback-locked; then
+		ROLLBACK_RUNNING=0
+		return 1
+	fi
+	if [ "$ACTIVATION_MODE" = live ] && wal_still_present; then
+		if run_live_activation; then
+			:
+		else
+			# The restored baseline has already received its one compensating
+			# activation attempt.  A known failure is no safer to repeat from the
+			# EXIT trap than an unknown/signalled outcome: retain the WAL and let a
+			# reboot establish a clean kernel boundary before recovery.
+			HANDOFF=1
+			ROLLBACK_RUNNING=0
+			return 1
+		fi
+	fi
+	if wal_still_present; then
+		ROLLBACK_RUNNING=0
+		return 1
+	fi
+	WAL_PUBLISHED=0
+	ROLLBACK_RUNNING=0
+	return 0
+}
+
+cleanup() {
+	status=$?
+	trap - EXIT HUP INT TERM
+	if [ "$status" -ne 0 ] && [ "$HANDOFF" -eq 0 ] &&
+		[ "$ACTIVATION_IN_FLIGHT" -eq 0 ] && [ "$WAL_PUBLISHED" -eq 1 ]; then
+		rollback_transaction >/dev/null 2>&1 || true
+	fi
+	release_locks >/dev/null 2>&1 || true
+	rm -rf -- "$WORK_ROOT"
+	exit "$status"
+}
+
+terminate() {
+	status=$1
+	trap - EXIT HUP INT TERM
+	if [ "$ACTIVATION_IN_FLIGHT" -eq 1 ]; then
+		# A signalled parent cannot prove whether the activator or one of its
+		# children is still committing under inherited fd1000.  Preserve WAL.
+		HANDOFF=1
+	fi
+	if [ "$HANDOFF" -eq 0 ] && [ "$WAL_PUBLISHED" -eq 1 ]; then
+		rollback_transaction >/dev/null 2>&1 || true
+	fi
+	release_locks >/dev/null 2>&1 || true
+	rm -rf -- "$WORK_ROOT"
+	exit "$status"
+}
+
+trap cleanup EXIT
+trap 'terminate 129' HUP
+trap 'terminate 130' INT
+trap 'terminate 143' TERM
+
+# This atomic commit is intentionally one-way.  Besides offload, it disables
+# the pinned automatic include surface and replaces all UCI includes with the
+# four audited ProxyPool includes.  The resulting file is the WAL baseline.
+run_uci_action clamp-offload "$CONFIG_DIR" "$CLAMP_DELTA" ||
+	fail 'cannot atomically clamp live firewall safety settings'
+
+for package in firewall dhcp network; do
+	cp -p "$CONFIG_DIR/$package" "$STAGE/$package" || fail "cannot stage $package"
+	cp -p "$CONFIG_DIR/$package" "$ORIGINAL/$package" || fail "cannot snapshot $package"
+done
+
+run_uci_action apply-defaults "$STAGE" "$STAGE_DELTA" ||
+	fail 'cannot build isolated staged UCI configuration'
+"$FW4_CHECK" "$STAGE" || fail 'staged fw4 validation failed'
+
+"$TRANSACTION_HELPER" prepare-locked "$ORIGINAL" "$STAGE" ||
+	fail 'cannot publish durable firewall transaction'
+WAL_PUBLISHED=1
+
+# Third observation is adjacent to live replacement.  On active/unknown the
+# unchanged post-clamp baseline permits safe WAL retirement; guardian stays empty.
+if ! flowtable_status pre-install; then
+	if "$TRANSACTION_HELPER" abort-prepared-locked; then
+		WAL_PUBLISHED=0
+	fi
+	fail 'flowtable state changed before live installation'
+fi
+
+for package in firewall dhcp network; do
+	if ! install_config "$STAGE/$package" "$CONFIG_DIR/$package"; then
+		rollback_transaction ||
+			fail "install of $package failed and durable rollback remains pending"
+		fail "install of $package failed; clamped baseline restored"
+	fi
+done
+
+"$TRANSACTION_HELPER" mark-awaiting-locked || {
+	rollback_transaction ||
+		fail 'activation journal update failed and durable rollback remains pending'
+	fail 'activation journal update failed; clamped baseline restored'
+}
+
+if [ "$ACTIVATION_MODE" = cold ]; then
+	# S18 validates under a quarantine sentinel; S19 performs the official
+	# start, and ACTION=includes retires this same-boot WAL only after runtime
+	# proof.  The uci-default wrapper may deliberately retain itself meanwhile.
+	HANDOFF=1
+	release_locks || fail 'cannot release cold-boot transaction locks'
+	exit 0
+fi
+
+if run_live_activation; then
+	:
+else
+	activation_status=$?
+	if activation_outcome_unknown "$activation_status"; then
+		HANDOFF=1
+		fail 'candidate activation outcome is unknown; transaction journal retained and reboot is required'
+	fi
+	if ! rollback_transaction; then
+		fail 'candidate activation failed and durable compensating rollback remains pending'
+	fi
+	fail 'candidate activation failed; clamped baseline was reactivated'
+fi
+
+if wal_still_present; then
+	fail 'candidate activation returned without durable journal acknowledgement'
+fi
+WAL_PUBLISHED=0
+release_locks || fail 'cannot release firewall transaction locks'
+exit 0

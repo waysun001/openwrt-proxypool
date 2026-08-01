@@ -1,5 +1,8 @@
 <%+header%>
 
+<link rel="stylesheet" href="<%=resource%>/proxypool-global.css" />
+<script type="text/javascript" src="<%=resource%>/proxypool-global.js"></script>
+
 <style>
 /* 全局字体与基础 */
 .pp-page-title { max-width: 1840px; margin: 0 auto; padding: 16px 20px 0; }
@@ -449,9 +452,36 @@ function safeJson(r) {
     });
 }
 
+function requireActionSuccess(result) {
+    if (result && result.success === true) {
+        return result;
+    }
+    var code = result && result.error ? String(result.error) : 'operation_failed';
+    var message = code;
+    if (code === 'dns_path_unavailable') {
+        message = 'DNS 路径不可用，安全数据通路尚未就绪，操作已被阻止';
+    }
+    var error = new Error(message);
+    error.code = code;
+    error.result = result || {};
+    throw error;
+}
+
+function isDnsPathUnavailableError(error) {
+    return !!(error && (error.code === 'dns_path_unavailable' ||
+        (error.result && error.result.dns_path_status === 'dns_path_unavailable')));
+}
+
+function showActionFailure(prefix, error) {
+    var detail = error && error.message ? error.message : '请求失败';
+    alert(prefix + ': ' + detail);
+}
+
 var clientData = [];
 var nextClientId = 1;
 var pendingActions = {};
+var currentInternetReady = false;
+var currentDNSPathStatus = 'dns_path_unavailable';
 
 function setPendingState(id, state, label) {
     pendingActions[id] = { state: state, label: label || '处理中...', time: Date.now() };
@@ -524,8 +554,9 @@ function getFilteredAndSortedClients() {
     if (filterType !== 'all') {
         list = list.filter(function(c) {
             if (filterType === 'l2tp' || filterType === 'socks5' || filterType === 'slp') return c.type === filterType;
-            if (filterType === 'connected') return c.status === 'connected';
-            if (filterType === 'disconnected') return c.enabled && c.status !== 'connected' && c.status !== 'disabled';
+            if (filterType === 'connected') return currentInternetReady && c.status === 'connected';
+            if (filterType === 'disconnected') return c.enabled &&
+                (!currentInternetReady || (c.status !== 'connected' && c.status !== 'disabled'));
             if (filterType === 'disabled') return !c.enabled || c.status === 'disabled';
             return true;
         });
@@ -863,6 +894,9 @@ function renderClients() {
         if (pendingInfo) {
             statusClass = 'pending';
             statusText = pendingInfo.label || '处理中...';
+        } else if (!currentInternetReady && c.status === 'connected') {
+            statusClass = 'disconnected';
+            statusText = 'DNS路径不可用';
         } else if (c.status === 'connected') {
             statusClass = 'connected';
             statusText = '已连接';
@@ -880,7 +914,7 @@ function renderClients() {
             statusText = '未连接';
         }
 
-        if (c.status === 'connected' && c.ip_addr) {
+        if (currentInternetReady && c.status === 'connected' && c.ip_addr) {
             statusText = '已连接<br><small style="color:#666;">' + c.ip_addr + '</small>';
         }
 
@@ -1116,6 +1150,7 @@ function toggleClient(id, enabled) {
 
     fetch(apiUrl + '?action=toggle_client&client=' + id + '&enabled=' + (enabled ? '1' : '0'))
         .then(safeJson)
+        .then(requireActionSuccess)
         .then(function() {
             clearPendingState(id);
             refreshStatusFull();
@@ -1126,6 +1161,7 @@ function toggleClient(id, enabled) {
             console.error('Toggle error:', e);
             clearPendingState(id);
             refreshStatusFull();
+            showActionFailure(enabled ? '启用失败' : '停用失败', e);
         });
 }
 
@@ -1139,14 +1175,18 @@ function startClient(id) {
     renderClients();
 
     fetch(apiUrl + '?action=start_client&client=' + id)
+        .then(safeJson)
+        .then(requireActionSuccess)
         .then(function() {
             clearPendingState(id);
             refreshStatusFull();
             schedulePostOpProbe();
         })
-        .catch(function() {
+        .catch(function(e) {
+            console.error('Start error:', e);
             clearPendingState(id);
             refreshStatusFull();
+            showActionFailure('连接失败', e);
         });
 }
 
@@ -1176,6 +1216,8 @@ function sequentialConnect(ids, doneCallback) {
         renderClients();
 
         fetch(apiUrl + '?action=start_client&client=' + id)
+            .then(safeJson)
+            .then(requireActionSuccess)
             .then(function() {
                 clearPendingState(id);
                 refreshStatusFull();
@@ -1185,6 +1227,13 @@ function sequentialConnect(ids, doneCallback) {
                 console.error('Sequential connect error for ' + id + ':', e);
                 clearPendingState(id);
                 refreshStatusFull();
+                if (isDnsPathUnavailableError(e)) {
+                    _seqConnectAbort = true;
+                    _seqConnecting = false;
+                    showActionFailure('批量连接已停止', e);
+                    if (doneCallback) doneCallback(false, e);
+                    return;
+                }
                 connectNext();
             });
     }
@@ -1267,13 +1316,15 @@ function saveRemark(id, remark) {
 function reloadConfig() {
     fetch(apiUrl + '?action=reload')
         .then(safeJson)
-        .then(function(result) {
-            if (result.success) {
-                alert('配置已应用');
-                setTimeout(refreshStatusFull, 2000);
-            }
+        .then(requireActionSuccess)
+        .then(function() {
+            alert('配置已应用');
+            setTimeout(refreshStatusFull, 2000);
         })
-        .catch(function(e) { console.error('Reload error:', e); });
+        .catch(function(e) {
+            console.error('Reload error:', e);
+            showActionFailure('应用配置失败', e);
+        });
 }
 
 var _logRawText = '';
@@ -1347,8 +1398,8 @@ function updateTopMenuStats(summary) {
     var disconnectedEl = document.getElementById('pp-stat-disconnected');
 
     if (totalEl) totalEl.textContent = summary.total;
-    if (connectedEl) connectedEl.textContent = summary.connected;
-    if (disconnectedEl) disconnectedEl.textContent = summary.disconnected;
+    if (connectedEl) connectedEl.textContent = currentInternetReady ? summary.connected : 0;
+    if (disconnectedEl) disconnectedEl.textContent = currentInternetReady ? summary.disconnected : summary.enabled;
 }
 
 // 使用期限到期：覆盖全屏"正在加载中"并停止一切轮询
@@ -1377,13 +1428,16 @@ function refreshStatusFull() {
         .then(function(data) {
             if (data && data.locked) { showLeaseLocked(); return; }
 
+            currentInternetReady = data.internet_ready !== false;
+            currentDNSPathStatus = data.dns_path_status || '';
+
             if (data && data.summary) {
                 updateTopMenuStats(data.summary);
             }
 
             // 顶部 WAN 联网状态（复用 proxypool-global.js 的渲染逻辑）
             if (data && typeof window.ppUpdateWanStatus === 'function') {
-                window.ppUpdateWanStatus(data.network);
+                window.ppUpdateWanStatus(data.network, data.internet_ready, data.dns_path_status);
             }
 
             if (data && data.devices) {

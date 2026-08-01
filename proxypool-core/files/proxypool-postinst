@@ -1,0 +1,132 @@
+#!/bin/sh
+set -eu
+
+umask 077
+
+SYNC="${PROXYPOOL_SYNC:-sync}"
+TEMPORARY=
+
+fail() {
+	echo "ProxyPool package integration: $*" >&2
+	exit 1
+}
+
+cleanup() {
+	if [ -n "$TEMPORARY" ] && { [ -e "$TEMPORARY" ] || [ -L "$TEMPORARY" ]; }; then
+		rm -f "$TEMPORARY" >/dev/null 2>&1 || true
+	fi
+}
+
+terminate() {
+	status=$1
+	trap - EXIT HUP INT TERM
+	cleanup
+	exit "$status"
+}
+
+trap cleanup EXIT
+trap 'terminate 129' HUP
+trap 'terminate 130' INT
+trap 'terminate 143' TERM
+
+require_absolute_nonroot() {
+	path=$1
+	description=$2
+	case "$path" in
+		/*) : ;;
+		*) fail "$description must be an absolute path" ;;
+	esac
+	[ "$path" != / ] || fail "$description must not be the filesystem root"
+}
+
+require_executable() {
+	path=$1
+	description=$2
+	[ -f "$path" ] && [ ! -L "$path" ] && [ -x "$path" ] ||
+		fail "$description is missing or unsafe: $path"
+}
+
+schedule_cold_wrapper() {
+	require_absolute_nonroot "$COLD_TEMPLATE" 'cold-wrapper template'
+	require_absolute_nonroot "$UCI_DEFAULTS_DIR" 'uci-defaults directory'
+	[ -f "$COLD_TEMPLATE" ] && [ ! -L "$COLD_TEMPLATE" ] ||
+		fail "cold-wrapper template is missing or unsafe: $COLD_TEMPLATE"
+	[ -d "$UCI_DEFAULTS_DIR" ] && [ ! -L "$UCI_DEFAULTS_DIR" ] ||
+		fail "uci-defaults directory is missing or unsafe: $UCI_DEFAULTS_DIR"
+
+	destination="$UCI_DEFAULTS_DIR/99-proxypool-safety"
+	if [ -e "$destination" ] || [ -L "$destination" ]; then
+		[ -f "$destination" ] && [ ! -L "$destination" ] ||
+			fail "scheduled cold wrapper is unsafe: $destination"
+	fi
+	TEMPORARY="$destination.tmp.$$"
+	[ ! -e "$TEMPORARY" ] && [ ! -L "$TEMPORARY" ] ||
+		fail "temporary cold wrapper already exists: $TEMPORARY"
+	cp "$COLD_TEMPLATE" "$TEMPORARY" || fail 'cannot copy cold-wrapper template'
+	chmod 755 "$TEMPORARY" || fail 'cannot make cold wrapper executable'
+	"$SYNC" || fail 'cannot sync cold-wrapper data'
+	mv -f "$TEMPORARY" "$destination" || fail 'cannot publish cold wrapper'
+	TEMPORARY=
+	"$SYNC" || fail 'cannot sync published cold wrapper'
+}
+
+clear_cold_wrapper() {
+	destination="$UCI_DEFAULTS_DIR/99-proxypool-safety"
+	if [ ! -e "$destination" ] && [ ! -L "$destination" ]; then
+		return 0
+	fi
+	[ -f "$destination" ] && [ ! -L "$destination" ] ||
+		fail "scheduled cold wrapper is unsafe: $destination"
+	rm -f "$destination" || fail 'cannot retire scheduled cold wrapper'
+	"$SYNC" || fail 'cannot sync cold-wrapper retirement'
+}
+
+command -v "$SYNC" >/dev/null 2>&1 || fail "sync command is unavailable: $SYNC"
+
+INSTALL_ROOT=${IPKG_INSTROOT:-}
+if [ -n "$INSTALL_ROOT" ]; then
+	case "$INSTALL_ROOT" in
+		/*) : ;;
+		*) fail 'IPKG_INSTROOT must be an absolute path' ;;
+	esac
+	root_prefix=${INSTALL_ROOT%/}
+	COLD_TEMPLATE="$root_prefix/usr/lib/proxypool/proxypool-safety-uci-default"
+	UCI_DEFAULTS_DIR="$root_prefix/etc/uci-defaults"
+	schedule_cold_wrapper
+	exit 0
+fi
+
+GUARD_INIT="${PROXYPOOL_GUARD_INIT:-/etc/init.d/proxypool-guard}"
+LAN_ISOLATION="${PROXYPOOL_LAN_ISOLATION:-/usr/lib/proxypool/lan-isolation.sh}"
+FIREWALL_DEFAULTS="${PROXYPOOL_FIREWALL_DEFAULTS:-/usr/lib/proxypool/proxypool-firewall-defaults}"
+COLD_TEMPLATE="${PROXYPOOL_COLD_WRAPPER_TEMPLATE:-/usr/lib/proxypool/proxypool-safety-uci-default}"
+UCI_DEFAULTS_DIR="${PROXYPOOL_UCI_DEFAULTS_DIR:-/etc/uci-defaults}"
+
+require_executable "$GUARD_INIT" 'guardian init script'
+require_executable "$LAN_ISOLATION" 'LAN isolation helper'
+# Publish the fail-closed evidence before any target action which can fail.
+# OpenWrt 23.05 default_postinst continues on to `start` packaged init scripts
+# after this helper; proxypool.init independently requires the runtime-bound
+# activation marker, while this wrapper guarantees a cold retry is queued.
+schedule_cold_wrapper
+# Publish durable L2 work before enabling or invoking any packaged service.
+# default_postinst subsequently starts the guardian's singleton worker; if it
+# never reaches that step, the pending marker survives for S18 on reboot.
+"$LAN_ISOLATION" request || fail 'cannot publish LAN convergence request; cold fallback was retained'
+if ! "$GUARD_INIT" enable; then
+	fail 'guardian could not be enabled; cold fallback was retained'
+fi
+
+if [ -f "$FIREWALL_DEFAULTS" ] && [ ! -L "$FIREWALL_DEFAULTS" ] &&
+	[ -x "$FIREWALL_DEFAULTS" ] &&
+	PROXYPOOL_COLD_BOOT=0 "$FIREWALL_DEFAULTS"; then
+	require_absolute_nonroot "$UCI_DEFAULTS_DIR" 'uci-defaults directory'
+	[ -d "$UCI_DEFAULTS_DIR" ] && [ ! -L "$UCI_DEFAULTS_DIR" ] ||
+		fail "uci-defaults directory is missing or unsafe: $UCI_DEFAULTS_DIR"
+	clear_cold_wrapper
+	exit 0
+fi
+
+echo 'ProxyPool package integration: live firewall conversion was deferred; reboot immediately' >&2
+echo 'ProxyPool package integration: do not connect clients or treat this router as safe before that reboot completes' >&2
+exit 0

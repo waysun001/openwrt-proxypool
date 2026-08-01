@@ -1,160 +1,194 @@
-name: Build OpenWrt
+name: Build GL-MT6000 firmware with pinned custom kernel
 
 on:
-  # push 触发已禁用，仅保留手动触发（避免与 build-fast 冲突）
-  # push:
-  #   branches: [ main ]
-  #   paths-ignore:
-  #     - '**.md'
-  # pull_request:
-  #   branches: [ main ]
   workflow_dispatch:
-    inputs:
-      openwrt_version:
-        description: 'OpenWrt版本'
-        required: true
-        default: '23.05.3'
-        type: choice
-        options:
-          - '23.05.3'
-          - '23.05.2'
-          - 'snapshot'
 
 permissions:
-  contents: write
+  contents: read
 
 env:
-  REPO_URL: https://github.com/openwrt/openwrt
-  REPO_BRANCH: v23.05.3
-  DEVICE: gl-mt6000
+  OPENWRT_VERSION: '23.05.3'
+  OPENWRT_COMMIT: 01170d518da1c8ade9d26e56d0135d12cda8e781
+  PACKAGES_FEED_COMMIT: 063b2393cbc3e5aab9d2b40b2911cab1c3967c59
+  LUCI_FEED_COMMIT: b07cf9dcfc37e021e5619a41c847e63afbd5d34a
+  ROUTING_FEED_COMMIT: 648753932d5a7deff7f2bdb33c000018a709ad84
+  TELEPHONY_FEED_COMMIT: 86af194d03592121f5321474ec9918dd109d3057
+  REPO_URL: https://github.com/openwrt/openwrt.git
   TARGET: mediatek
   SUBTARGET: filogic
-  TZ: Asia/Shanghai
 
 jobs:
-  build:
+  host:
     runs-on: ubuntu-22.04
-
+    permissions:
+      contents: read
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-
-    - name: 初始化编译环境
-      env:
-        DEBIAN_FRONTEND: noninteractive
-      run: |
-        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
-        sudo -E apt-get -qq update
-        sudo -E apt-get -qq install build-essential clang flex bison g++ gawk \
-          gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
-          python3-distutils rsync unzip zlib1g-dev file wget qemu-utils
-        sudo -E apt-get -qq autoremove --purge
-        sudo -E apt-get -qq clean
-        sudo timedatectl set-timezone "$TZ"
-        sudo mkdir -p /workdir
-        sudo chown $USER:$GROUPS /workdir
-
-    - name: 克隆 OpenWrt 源码
-      working-directory: /workdir
-      run: |
-        git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
-        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
-
-    - name: 加载自定义 feeds
-      run: |
-        # 添加自定义 feeds
-        echo "src-link proxypool $GITHUB_WORKSPACE" >> openwrt/feeds.conf.default
-
-    - name: 更新 feeds
-      run: |
-        cd openwrt
-
-        # 优化 git 网络配置，防止大仓库克隆中断
-        git config --global http.postBuffer 524288000
-        git config --global http.lowSpeedLimit 1000
-        git config --global http.lowSpeedTime 60
-
-        # 将 git.openwrt.org 替换为 GitHub 镜像（避免 RPC/curl 18 断连）
-        sed -i 's|https://git.openwrt.org/openwrt/openwrt.git|https://github.com/openwrt/openwrt.git|g' feeds.conf.default
-        sed -i 's|https://git.openwrt.org/feed/packages.git|https://github.com/openwrt/packages.git|g' feeds.conf.default
-        sed -i 's|https://git.openwrt.org/project/luci.git|https://github.com/openwrt/luci.git|g' feeds.conf.default
-
-        # 更新 feeds，带重试
-        feeds_ok=0
-        for attempt in 1 2 3; do
-          echo "=== feeds update attempt $attempt ==="
-          if ./scripts/feeds update -a; then
-            feeds_ok=1
-            break
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.20.14'
+          cache-dependency-path: proxypool-core/src/proxypoold/go.mod
+      - name: Prepare pinned OpenWrt 23.05.3 nft checker
+        env:
+          OPENWRT_NFT_ROOTFS: ${{ runner.temp }}/openwrt-23.05.3-x86-64-rootfs
+        run: |
+          sh ./scripts/prepare-openwrt-nft.sh "$OPENWRT_NFT_ROOTFS"
+          chmod 755 "$GITHUB_WORKSPACE/scripts/openwrt-target-nft.sh"
+          {
+            echo "PROXYPOOL_OPENWRT_ROOTFS=$OPENWRT_NFT_ROOTFS"
+            echo "PROXYPOOL_TARGET_NFT=$GITHUB_WORKSPACE/scripts/openwrt-target-nft.sh"
+          } >> "$GITHUB_ENV"
+      - name: Run host gates first
+        run: ./scripts/test-host.sh
+      - name: Check pushed commit range
+        env:
+          EVENT_BASE_SHA: ${{ github.event.before }}
+          EVENT_HEAD_SHA: ${{ github.sha }}
+        run: |
+          base="$EVENT_BASE_SHA"
+          if [ -z "$base" ]; then
+            base=$(git rev-parse HEAD^ 2>/dev/null || printf '%040d' 0)
           fi
-          echo "Attempt $attempt failed, waiting 30s..."
-          sleep 30
-        done
+          sh ./scripts/check-whitespace-range.sh "$base" "$EVENT_HEAD_SHA"
 
-        if [ "$feeds_ok" != "1" ]; then
-          echo "Error: feeds update failed after 3 attempts"
-          exit 1
-        fi
+  build:
+    needs: host
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout ProxyPool
+        uses: actions/checkout@v4
 
-        ./scripts/feeds install -a
+      - name: Install OpenWrt build dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib \
+            g++-multilib gettext git libelf-dev libncurses5-dev libssl-dev \
+            python3 python3-distutils python3-ply rsync swig unzip zlib1g-dev \
+            file wget xsltproc
 
-    - name: 安装自定义软件包
-      run: |
-        cd openwrt
-        ./scripts/feeds install luci-app-proxypool proxypool-core
+      - name: Checkout pinned OpenWrt source
+        run: |
+          git clone --filter=blob:none --no-checkout "$REPO_URL" openwrt
+          cd openwrt
+          git fetch --depth 1 origin "$OPENWRT_COMMIT"
+          git checkout --detach "$OPENWRT_COMMIT"
+          [ "$(git rev-parse HEAD)" = "$OPENWRT_COMMIT" ]
+          git rev-parse HEAD > ../openwrt-commit.txt
 
-    - name: 加载编译配置
-      run: |
-        cp config/gl-mt6000.config openwrt/.config
-        cd openwrt
-        make defconfig
+      - name: Configure pinned source feeds
+        run: |
+          mkdir -p local-feed
+          cp -a proxypool-core luci-app-proxypool local-feed/
+          printf '%s\n' \
+            "src-git packages https://git.openwrt.org/feed/packages.git^$PACKAGES_FEED_COMMIT" \
+            "src-git luci https://git.openwrt.org/project/luci.git^$LUCI_FEED_COMMIT" \
+            "src-git routing https://git.openwrt.org/feed/routing.git^$ROUTING_FEED_COMMIT" \
+            "src-git telephony https://git.openwrt.org/feed/telephony.git^$TELEPHONY_FEED_COMMIT" \
+            "src-link proxypool $GITHUB_WORKSPACE/local-feed" \
+            > openwrt/feeds.conf.default
+          cd openwrt
+          feed_updated=0
+          for attempt in 1 2 3; do
+            if ./scripts/feeds update -a; then
+              feed_updated=1
+              break
+            fi
+            [ "$attempt" -eq 3 ] || sleep 10
+          done
+          [ "$feed_updated" = "1" ] || {
+            echo 'feeds update failed after 3 attempts' >&2
+            exit 1
+          }
+          [ "$(git -C feeds/packages rev-parse HEAD)" = "$PACKAGES_FEED_COMMIT" ]
+          [ "$(git -C feeds/luci rev-parse HEAD)" = "$LUCI_FEED_COMMIT" ]
+          [ "$(git -C feeds/routing rev-parse HEAD)" = "$ROUTING_FEED_COMMIT" ]
+          [ "$(git -C feeds/telephony rev-parse HEAD)" = "$TELEPHONY_FEED_COMMIT" ]
+          mkdir -p ../build-evidence
+          printf '%s\n' \
+            "packages $PACKAGES_FEED_COMMIT" \
+            "luci $LUCI_FEED_COMMIT" \
+            "routing $ROUTING_FEED_COMMIT" \
+            "telephony $TELEPHONY_FEED_COMMIT" \
+            > ../build-evidence/feed-commits.txt
+          ./scripts/feeds install -a
+          ./scripts/feeds install -p proxypool proxypool-core luci-app-proxypool
 
-    - name: 下载依赖包
-      run: |
-        cd openwrt
-        make download -j8
-        find dl -size -1024c -exec ls -l {} \;
-        find dl -size -1024c -exec rm -f {} \;
+      - name: Stage image overlay and build configuration
+        run: |
+          sh ./scripts/prepare-image-files.sh files image-files
+          mkdir -p openwrt/files
+          cp -a image-files/. openwrt/files/
+          cp config/gl-mt6000.config openwrt/.config
+          cd openwrt
+          make defconfig
 
-    - name: 编译固件
-      id: compile
-      run: |
-        cd openwrt
-        echo -e "$(nproc) thread compile"
-        make -j$(nproc) || make -j1 || make -j1 V=s
-        echo "status=success" >> $GITHUB_OUTPUT
-        grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
-        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
-        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+      - name: Install the two MT7531 isolation patches
+        run: |
+          cd openwrt
+          mapfile -t kernel_patches < <(find ../openwrt-patches/23.05.3 -maxdepth 1 -type f -name '*.patch')
+          [ "${#kernel_patches[@]}" -eq 2 ]
+          [ -f ../openwrt-patches/23.05.3/998-net-bridge-offload-br-isolated.patch ]
+          [ ! -L ../openwrt-patches/23.05.3/998-net-bridge-offload-br-isolated.patch ]
+          [ -f ../openwrt-patches/23.05.3/999-net-dsa-mt7530-bridge-port-isolation.patch ]
+          [ ! -L ../openwrt-patches/23.05.3/999-net-dsa-mt7530-bridge-port-isolation.patch ]
+          cp ../openwrt-patches/23.05.3/. target/linux/generic/backport-5.15/
 
-    - name: 整理输出文件
-      id: organize
-      if: steps.compile.outputs.status == 'success'
-      run: |
-        cd openwrt/bin/targets/$TARGET/$SUBTARGET
-        rm -rf packages
-        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
-        echo "status=success" >> $GITHUB_OUTPUT
+      - name: Download source archives
+        run: |
+          cd openwrt
+          make download -j8
+          if find dl -type f -size -1024c -print | grep -q .; then
+            echo 'OpenWrt download directory contains truncated files' >&2
+            exit 1
+          fi
 
-    - name: 上传固件
-      uses: actions/upload-artifact@v4
-      if: steps.organize.outputs.status == 'success'
-      with:
-        name: OpenWrt_ProxyPool_${{ env.DEVICE }}${{ env.FILE_DATE }}
-        path: ${{ env.FIRMWARE }}
+      - name: Prepare and verify the custom target kernel
+        run: |
+          set -o pipefail
+          mkdir -p build-evidence
+          cd openwrt
+          make target/linux/prepare V=s 2>&1 | tee ../build-evidence/target-linux-prepare.log
+          sh ../scripts/verify-openwrt-kernel-isolation.sh . ../openwrt-patches/23.05.3 2>&1 |
+            tee ../build-evidence/kernel-isolation-verification.log
+          sha256sum ../openwrt-patches/23.05.3/*.patch > ../build-evidence/kernel-patches.sha256
+          cp .config ../build-evidence/openwrt.config
+          cp ../openwrt-commit.txt ../build-evidence/
 
-    - name: 创建 Release
-      uses: softprops/action-gh-release@v1
-      if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.organize.outputs.status == 'success'
-      with:
-        tag_name: v${{ github.run_number }}
-        files: ${{ env.FIRMWARE }}/*
-        body: |
-          ## OpenWrt ProxyPool 固件
+      - name: Compile complete firmware
+        run: |
+          set -o pipefail
+          cd openwrt
+          make -j"$(nproc)" V=s 2>&1 | tee ../build-evidence/firmware-build.log
 
-          - 设备: GL-MT6000
-          - 编译时间: ${{ env.FILE_DATE }}
-          - OpenWrt版本: ${{ env.REPO_BRANCH }}
+      - name: Inspect unique packages and collect GL-MT6000 evidence
+        run: |
+          cd openwrt
+          mapfile -t packages < <(find bin -type f -name 'proxypool-core_*.ipk')
+          [ "${#packages[@]}" -eq 1 ]
+          sh ../scripts/inspect-ipk.sh "${packages[0]}" aarch64_cortex-a53
+          mapfile -t luci_packages < <(find bin -type f -name 'luci-app-proxypool_*.ipk')
+          [ "${#luci_packages[@]}" -eq 1 ]
+          sh ../scripts/inspect-luci-ipk.sh "${luci_packages[0]}"
+          mapfile -t firmware < <(
+            find "bin/targets/$TARGET/$SUBTARGET" -maxdepth 1 -type f \
+              -name '*glinet_gl-mt6000*squashfs-sysupgrade.bin'
+          )
+          [ "${#firmware[@]}" -eq 1 ]
 
-          ### 更新日志
-          ${{ github.event.head_commit.message }}
+          mkdir -p ../firmware-evidence
+          cp "${packages[0]}" "${luci_packages[0]}" "${firmware[0]}" ../firmware-evidence/
+          cp ../build-evidence/* ../firmware-evidence/
+          sh ../scripts/regenerate-sha256sums.sh ../firmware-evidence
+
+      - name: Upload custom-kernel build evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: proxypool-gl-mt6000-custom-kernel-${{ github.sha }}
+          path: firmware-evidence/
+          if-no-files-found: error

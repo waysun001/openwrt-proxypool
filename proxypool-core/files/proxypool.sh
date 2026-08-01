@@ -1,10 +1,20 @@
 #!/bin/sh
 # 智联盒子 - 代理池主控脚本
 
-SCRIPT_DIR="/usr/lib/proxypool"
-CONFIG_FILE="/etc/config/proxypool"
-RUN_DIR="/var/run/proxypool"
-LOG_FILE="/var/log/proxypool.log"
+SCRIPT_DIR=${PROXYPOOL_SCRIPT_DIR:-/usr/lib/proxypool}
+CONFIG_FILE=${PROXYPOOL_CONFIG_FILE:-/etc/config/proxypool}
+RUN_DIR=${PROXYPOOL_RUN_DIR:-/var/run/proxypool}
+LOG_FILE=${PROXYPOOL_LOG_FILE:-/var/log/proxypool.log}
+UCI=${PROXYPOOL_UCI:-uci}
+LEGACY_GATE=${PROXYPOOL_LEGACY_GATE:-/usr/lib/proxypool/legacy-gate.sh}
+
+# Phase 1 has a single runtime writer. Deny every retained V1 mutation before
+# directory creation, logging, configuration reads, or process/network work.
+legacy_quarantine() {
+    /bin/sh "$LEGACY_GATE" mutation "$1" >/dev/null 2>&1 || true
+    printf '%s\n' 'legacy_runtime_quarantined'
+    return 125
+}
 
 # 日志函数
 log() {
@@ -21,8 +31,8 @@ log_error() { log "error" "$@"; }
 # 初始化目录
 init_dirs() {
     mkdir -p "$RUN_DIR"
-    mkdir -p "/var/run/proxypool/clients"
-    mkdir -p "/var/run/proxypool/redsocks"
+    mkdir -p "$RUN_DIR/clients"
+    mkdir -p "$RUN_DIR/redsocks"
     touch "$LOG_FILE"
 }
 
@@ -31,12 +41,12 @@ get_config() {
     local section="$1"
     local option="$2"
     local default="$3"
-    uci -q get "proxypool.$section.$option" || echo "$default"
+    "$UCI" -q get "proxypool.$section.$option" || echo "$default"
 }
 
 # 获取所有客户端
 get_clients() {
-    uci show proxypool 2>/dev/null | grep "=client" | cut -d'.' -f2 | cut -d'=' -f1
+    "$UCI" show proxypool 2>/dev/null | grep "=client" | cut -d'.' -f2 | cut -d'=' -f1
 }
 
 # 检查客户端是否启用
@@ -44,6 +54,39 @@ is_client_enabled() {
     local client="$1"
     local enabled=$(get_config "$client" "enabled" "0")
     [ "$enabled" = "1" ]
+}
+
+# A successful backend start is forbidden until an owned DNS data plane can
+# publish the exact readiness token.  Phase 1 intentionally returns
+# dns_path_unavailable, so start/connect operations stop here before creating
+# runtime files, processes, or firewall authorization.
+require_dns_path_ready() {
+    local dns_status
+    if dns_status=$("$SCRIPT_DIR/dns-manager.sh" status 2>/dev/null); then
+        if [ "$dns_status" = "dns_path_ready" ]; then
+            return 0
+        fi
+    else
+        dns_status=dns_path_unavailable
+    fi
+    echo "ProxyPool backend admission denied: ${dns_status:-dns_path_unavailable}" >&2
+    return 1
+}
+
+action_creates_backend() {
+    local action="$1"
+    shift
+    case "$action" in
+        start|start_client|batch_connect|batch_enable|sequential_start)
+            return 0
+            ;;
+        toggle_client)
+            [ "$#" -ge 1 ] || return 1
+            [ "$(get_config "$1" "enabled" "0")" = "1" ]
+            return
+            ;;
+    esac
+    return 1
 }
 
 # ============================================================
@@ -170,6 +213,7 @@ restart_client() {
     "$SCRIPT_DIR/firewall.sh" remove_client "$client"
     _stop_client_nofirewall "$client"
     _clear_stopping "$client"
+    require_dns_path_ready || return 1
     sleep 1
     _start_client_nofirewall "$client"
     "$SCRIPT_DIR/firewall.sh" add_client "$client"
@@ -186,6 +230,7 @@ save_restart_client() {
     "$SCRIPT_DIR/firewall.sh" remove_client "$client"
     _stop_client_nofirewall "$client"
     _clear_stopping "$client"
+    require_dns_path_ready || return 1
     sleep 1
     _start_client_nofirewall "$client"
     "$SCRIPT_DIR/firewall.sh" add_client "$client"
@@ -475,11 +520,32 @@ main() {
     local action="$1"
     shift
 
+    # Classify before DNS admission and init_dirs so denied/unknown calls stay
+    # side-effect free even when their arguments or live UCI are malformed.
+    case "$action" in
+        status)
+            status
+            return $?
+            ;;
+        start|stop|restart|reload|start_client|stop_client|restart_client|save_restart_client|toggle_client|probe_all|batch_connect|batch_disconnect|batch_enable|batch_disable|batch_delete|sequential_start)
+            legacy_quarantine "proxypool:$action"
+            return $?
+            ;;
+        *)
+            echo "Usage: $0 {start|stop|restart|reload|start_client|stop_client|restart_client|save_restart_client|toggle_client|probe_all|batch_connect|batch_disconnect|batch_enable|batch_disable|batch_delete|sequential_start|status} [client_id...]"
+            return 1
+            ;;
+    esac
+
+    if action_creates_backend "$action" "$@"; then
+        require_dns_path_ready || return 1
+    fi
+
     init_dirs
 
     case "$action" in
         start)
-            # 启动前先恢复 ISP DNS（防止上次异常退出遗留 noresolv 配置导致 DNS 不可用）
+            # 启动前先强制 DNS fail-closed（noresolv=1 且不发布任何 WAN 上游）
             "$SCRIPT_DIR/dns-manager.sh" restore
             "$SCRIPT_DIR/firewall.sh" init
             start_all_clients
@@ -487,7 +553,7 @@ main() {
             "$SCRIPT_DIR/dns-manager.sh" configure
             ;;
         stop)
-            # 先恢复 ISP DNS（确保停止期间路由器自身 DNS 可用）
+            # 停止时仍保持 DNS fail-closed，绝不恢复 ISP/WAN 上游
             "$SCRIPT_DIR/dns-manager.sh" restore
             stop_all_clients
             "$SCRIPT_DIR/firewall.sh" cleanup
@@ -496,12 +562,16 @@ main() {
             "$SCRIPT_DIR/dns-manager.sh" restore
             stop_all_clients
             "$SCRIPT_DIR/firewall.sh" cleanup
+            require_dns_path_ready || return 1
             sleep 2
             "$SCRIPT_DIR/firewall.sh" init
             start_all_clients
             "$SCRIPT_DIR/dns-manager.sh" configure
             ;;
         reload)
+            stop_all_clients
+            "$SCRIPT_DIR/firewall.sh" cleanup
+            require_dns_path_ready || return 1
             reload_config
             ;;
         start_client)
@@ -544,8 +614,7 @@ main() {
             sequential_start "$@"
             ;;
         *)
-            echo "Usage: $0 {start|stop|restart|reload|start_client|stop_client|restart_client|toggle_client|batch_connect|batch_disconnect|batch_enable|batch_disable|batch_delete|sequential_start|status} [client_id...]"
-            exit 1
+            return 1
             ;;
     esac
 }

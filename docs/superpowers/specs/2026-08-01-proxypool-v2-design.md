@@ -175,7 +175,11 @@ GL-MT6000 上采用下列组合：
 - bridge family nftables 规则作为统一兜底，拒绝普通终端 MAC 之间的转发；
 - 不开启可能绕过入站分类的硬件或软件 flow offload，除非后续证明规则语义完全一致。
 
+OpenWrt 23.05.3 的 Linux 5.15.150 bridge 默认不会把 `BR_ISOLATED` 通知给内建的 MT7530/MT7531 DSA 驱动，交换芯片仍可能绕过 CPU 在物理端口间直接转发；即使回移通知和 port-matrix 支持，端口加入 bridge 到 userspace 设置 flag 之间仍有短窗口。因此 GL-MT6000 安全固件默认拒绝 MT7531 bridge offload，让五个 LAN user port 的硬件矩阵始终只连接 CPU，再由 Linux bridge isolation 与独立 nft guardian 执行拒绝。该固件必须从固定 OpenWrt 源码完整编译，并保留回移补丁作为纵深防御；SDK 只用于构建软件包，ImageBuilder 产物不能作为本项目的安全固件。源码与补丁验证通过只说明构建合同成立，永久硬件隔离仍以两台有线设备跨两个物理 LAN 口的 ARP、IPv4、IPv6 和广播真机测试为发布门槛。
+
 由于已确认每个物理 LAN 口下没有多终端交换机，端口隔离可以覆盖有线终端互访。若未来改变拓扑，必须使用独立 VLAN 或可管理交换机重新设计。
+
+冷启动时，无线隔离校验失败不能仅依赖内存态 `wifi down`，因为随后启动的 netifd 仍可能读取原配置并重新拉起 AP。安全实现先在 `/etc/proxypool/wireless-quarantine` 原子发布 `PREPARING`，保留 root-only recovery，再把活动 wireless 原子替换为“所有已知无线运行 section 显式 `disabled=1`”的配置；若原配置语法损坏，则使用空的惰性 wireless 配置。存在 `/tmp/.uci` pending delta 时保持 `PREPARING` 并阻塞 S20，不删除或提交用户 delta；真正冷重启清空 delta 且 fallback 复核通过后转为 `DISABLED`。`DISABLED` 可让有线管理网络启动，但继续阻止 ProxyPool readiness，只有管理员经有线管理替换活动配置、且完整正常拓扑校验通过后才清除。该状态与 recovery 由 sysupgrade 保留。
 
 ### 6.2 基础三层拒绝
 
@@ -475,7 +479,7 @@ daemon 向 logd 输出结构化日志，至少包含 timestamp、level、node ID
 - LuCI API 的只读/写入方法和输入限制；
 - 模拟 xl2tpd、netifd 和代理进程的故障注入。
 
-CI 构建目标包和固件，并执行 host 单元测试、静态检查和配置渲染测试。硬件特性通过真机测试脚本验证。
+CI 使用 SDK 构建和检查目标软件包，并从固定 OpenWrt commit 及官方 23.05.3 发布时的四个精确 feed commit 完整编译唯一可测试固件；kernel prepare 后验证最终 MT7530/MT7531 隔离源码及内建驱动配置。host 单元测试、静态检查和配置渲染测试不能替代真机硬件验证。
 
 ### 16.2 第一轮：L2TP 共享架构
 
@@ -540,7 +544,7 @@ CI 构建目标包和固件，并执行 host 单元测试、静态检查和配�
 ## 18. 关键风险与控制
 
 - **共享 xl2tpd 扩大故障域**：procd respawn、generation 检测、先撤授权、分批恢复，并在第一轮与旧多实例基线对比。
-- **DSA/无线隔离存在硬件差异**：以 GL-MT6000 真机抓包和端口组合测试作为发布门槛。
+- **DSA/无线隔离存在硬件差异**：禁止把官方 ImageBuilder 固件当成安全产物；使用固定源码和回移补丁完整构建，并以 GL-MT6000 真机抓包和端口组合测试作为发布门槛。
 - **DoH 上游或节点不兼容**：支持多个可配置上游，逐节点验证并明确报错，禁止 DNS 回退。
 - **Go 二进制增加固件体积**：在实施早期建立固件大小预算并使用裁剪构建；不以牺牲状态可靠性为代价退回复杂 Shell 并发。
 - **迁移时旧绑定缺少 MAC**：只自动使用可确认 DHCP lease，不猜测；设备下次接入后自动完成。

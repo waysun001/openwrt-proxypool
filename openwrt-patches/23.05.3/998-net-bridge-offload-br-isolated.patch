@@ -1,0 +1,24 @@
+From: ProxyPool maintainers <noreply@proxypool.local>
+Date: Sat, 1 Aug 2026 00:00:00 +0800
+Subject: [PATCH] net: bridge: send BR_ISOLATED to switchdev
+
+Backport the BR_ISOLATED part of upstream commit
+c3976a3f84451ca05ea5be013af6071bf9acab2c to the OpenWrt 23.05.3
+Linux 5.15.150 patch-stack API.
+
+Without this change the bridge accepts the isolated flag in software but
+never notifies the offloaded MT7531 data plane. The switch can then continue
+forwarding between two LAN ports without the frame reaching the CPU.
+
+--- a/net/bridge/br_switchdev.c
++++ b/net/bridge/br_switchdev.c
+@@ -71,7 +71,8 @@ bool nbp_switchdev_allowed_egress(const
+ 
+ /* Flags that can be offloaded to hardware */
+ #define BR_PORT_FLAGS_HW_OFFLOAD (BR_LEARNING | BR_FLOOD | \
+-				  BR_MCAST_FLOOD | BR_BCAST_FLOOD)
++				  BR_MCAST_FLOOD | BR_BCAST_FLOOD | \
++				  BR_ISOLATED)
+ 
+ int br_switchdev_set_port_flag(struct net_bridge_port *p,
+ 			       unsigned long flags,

@@ -5,6 +5,13 @@ RUN_DIR="/var/run/proxypool"
 REDSOCKS_DIR="/var/run/proxypool/redsocks"
 PROBE_DIR="/var/run/proxypool/probe"
 LOG_FILE="/var/log/proxypool.log"
+LEGACY_GATE="${PROXYPOOL_LEGACY_GATE:-/usr/lib/proxypool/legacy-gate.sh}"
+
+legacy_quarantine() {
+    /bin/sh "$LEGACY_GATE" mutation "$1" >/dev/null 2>&1 || true
+    printf '%s\n' 'legacy_runtime_quarantined'
+    return 125
+}
 
 BASE_TCP_PORT=12300
 BASE_UDP_PORT=12400
@@ -260,6 +267,19 @@ get_local_port() {
 }
 
 case "$1" in
+    port)
+        ;;
+    start|stop|status|test|probe)
+        legacy_quarantine "socks5-manager:$1"
+        exit $?
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|status|test|probe|port} <client_id> [tcp|udp]"
+        exit 1
+        ;;
+esac
+
+case "$1" in
     start)
         start "$2"
         ;;
@@ -278,8 +298,5 @@ case "$1" in
     port)
         get_local_port "$2" "$3"
         ;;
-    *)
-        echo "Usage: $0 {start|stop|status|test|probe|port} <client_id> [tcp|udp]"
-        exit 1
-        ;;
+    *) exit 1 ;;
 esac

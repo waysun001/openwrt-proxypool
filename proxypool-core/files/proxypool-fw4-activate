@@ -1,0 +1,392 @@
+#!/bin/sh
+set -eu
+
+umask 077
+
+CONFIG_DIR="${PROXYPOOL_CONFIG_DIR:-/etc/config}"
+FW4_UCODE="${PROXYPOOL_FW4_UCODE:-/usr/share/ucode/fw4.uc}"
+FW4_MAIN="${PROXYPOOL_FW4_MAIN:-/usr/share/firewall4/main.uc}"
+FW4_STATE="${PROXYPOOL_FW4_STATE:-/var/run/fw4.state}"
+FW4_LOCK="${PROXYPOOL_FW4_LOCK:-/var/run/fw4.lock}"
+UTPL="${PROXYPOOL_UTPL:-/usr/bin/utpl}"
+NFT="${PROXYPOOL_NFT:-/usr/sbin/nft}"
+FLOCK="${PROXYPOOL_FLOCK:-flock}"
+SYNC="${PROXYPOOL_SYNC:-sync}"
+FW4_CHECK="${PROXYPOOL_FW4_CHECK:-/usr/lib/proxypool/proxypool-fw4-check-staged}"
+TRANSACTION_HELPER="${PROXYPOOL_TRANSACTION_HELPER:-/usr/lib/proxypool/proxypool-firewall-transaction}"
+TRANSACTION_DIR="${PROXYPOOL_FIREWALL_TRANSACTION_DIR:-/etc/proxypool/firewall-transaction}"
+MODE_PROBE="${PROXYPOOL_FW4_MODE_PROBE:-}"
+NFTABLES_USER_DIR="${PROXYPOOL_NFTABLES_USER_DIR:-/etc/nftables.d}"
+GUARD_RULESET="${PROXYPOOL_GUARD_RULESET:-/usr/lib/proxypool/proxypool-guard.nft}"
+INPUT_GATE="${PROXYPOOL_INPUT_GATE:-/usr/lib/proxypool/proxypool-fw4-input-gate.nft}"
+FORWARD_GATE="${PROXYPOOL_FORWARD_GATE:-/usr/lib/proxypool/proxypool-fw4-forward-gate.nft}"
+INHERITED_FW4_LOCK="${PROXYPOOL_FW4_LOCK_HELD:-0}"
+LS_PROG="${PROXYPOOL_LS_PROG:-/bin/ls}"
+
+fail() {
+	echo "ProxyPool fw4 activator: $*" >&2
+	exit 1
+}
+
+fail_with_status() {
+	status=$1
+	shift
+	echo "ProxyPool fw4 activator: $*" >&2
+	exit "$status"
+}
+
+[ "$#" -eq 1 ] || fail 'expected exactly one activation mode'
+MODE=$1
+case "$MODE" in
+	cold|live) : ;;
+	*) fail 'activation mode must be cold or live' ;;
+esac
+
+for path_description in \
+	"$CONFIG_DIR:configuration directory" \
+	"$FW4_STATE:fw4 state file" \
+	"$FW4_LOCK:fw4 lock" \
+	"$TRANSACTION_DIR:firewall transaction journal"; do
+	path=${path_description%%:*}
+	description=${path_description#*:}
+	case "$path" in
+		/*) : ;;
+		*) fail "$description must be an absolute path" ;;
+	esac
+	[ "$path" != / ] || fail "$description must not be the filesystem root"
+done
+
+[ "$(id -u)" -eq 0 ] || fail 'must run as root'
+[ -d "$CONFIG_DIR" ] && [ ! -L "$CONFIG_DIR" ] || fail 'configuration directory is unsafe'
+for package in firewall dhcp network; do
+	[ -f "$CONFIG_DIR/$package" ] && [ ! -L "$CONFIG_DIR/$package" ] ||
+		fail "managed configuration is missing or unsafe: $package"
+done
+case "$NFTABLES_USER_DIR" in
+	/*) : ;;
+	*) fail 'nftables user include directory must be absolute' ;;
+esac
+if [ -e "$NFTABLES_USER_DIR" ] || [ -L "$NFTABLES_USER_DIR" ]; then
+	[ -d "$NFTABLES_USER_DIR" ] && [ ! -L "$NFTABLES_USER_DIR" ] ||
+		fail 'nftables user include directory is unsafe'
+fi
+for user_nft in "$NFTABLES_USER_DIR"/*.nft; do
+	if [ -e "$user_nft" ] || [ -L "$user_nft" ]; then
+		fail "unmanaged nftables include is forbidden: $user_nft"
+	fi
+done
+for executable in "$UTPL" "$NFT" "$FW4_CHECK" "$TRANSACTION_HELPER"; do
+	[ -x "$executable" ] || fail "required executable is unavailable: $executable"
+done
+for include_file in "$GUARD_RULESET" "$INPUT_GATE" "$FORWARD_GATE"; do
+	[ -f "$include_file" ] && [ ! -L "$include_file" ] && [ -r "$include_file" ] ||
+		fail "owned nft include is missing or unsafe: $include_file"
+done
+case "$INHERITED_FW4_LOCK" in
+	0|1) : ;;
+	*) fail 'PROXYPOOL_FW4_LOCK_HELD must be 0 or 1' ;;
+esac
+command -v "$FLOCK" >/dev/null 2>&1 || fail "flock is unavailable: $FLOCK"
+command -v "$SYNC" >/dev/null 2>&1 || fail "sync is unavailable: $SYNC"
+[ -x "$LS_PROG" ] || fail "metadata command is unavailable: $LS_PROG"
+[ -f "$FW4_UCODE" ] && [ ! -L "$FW4_UCODE" ] && [ -r "$FW4_UCODE" ] ||
+	fail "official fw4 module is missing or unsafe: $FW4_UCODE"
+[ -f "$FW4_MAIN" ] && [ ! -L "$FW4_MAIN" ] && [ -r "$FW4_MAIN" ] ||
+	fail "official fw4 template is missing or unsafe: $FW4_MAIN"
+
+candidate_state_secure() {
+	[ -f "$CANDIDATE_STATE" ] && [ ! -L "$CANDIDATE_STATE" ] && [ -s "$CANDIDATE_STATE" ] ||
+		return 1
+	metadata=$("$LS_PROG" -nd "$CANDIDATE_STATE" 2>/dev/null) || return 1
+	case "$metadata" in
+		""|*'
+'*) return 1 ;;
+	esac
+	IFS=' 	' read -r permissions links owner group remainder <<EOF
+$metadata
+EOF
+	[ "$permissions" = '-rw-------' ] && [ "$links" = 1 ] &&
+		[ "$owner" = 0 ] && [ "$group" = 0 ]
+}
+
+probe_fw4_mode() {
+	wanted=$1
+	if [ -n "$MODE_PROBE" ]; then
+		[ -x "$MODE_PROBE" ] || return 2
+		"$MODE_PROBE" "$wanted"
+		return
+	fi
+
+	if [ -L "$FW4_STATE" ]; then
+		return 2
+	elif [ -e "$FW4_STATE" ]; then
+		[ -f "$FW4_STATE" ] || return 2
+		state_presence=present
+	else
+		state_presence=absent
+	fi
+
+	tables=$("$NFT" list tables 2>/dev/null) || return 2
+	table_count=$(printf '%s\n' "$tables" |
+		grep -Ec '^[[:space:]]*table[[:space:]]+inet[[:space:]]+fw4[[:space:]]*$' || true)
+	case "$table_count" in
+		0) table_presence=absent ;;
+		1) table_presence=present ;;
+		*) return 2 ;;
+	esac
+
+	case "$wanted:$state_presence:$table_presence" in
+		cold:absent:absent|live:present:present) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+restore_previous_state() {
+	[ "$STATE_TOUCHED" -eq 1 ] || return 0
+	[ "$NFT_APPLIED" -eq 0 ] || return 0
+	[ "$NFT_OUTCOME_UNKNOWN" -eq 0 ] || return 0
+	if [ "$HAD_STATE" -eq 1 ]; then
+		[ -f "$OLD_STATE" ] && [ ! -L "$OLD_STATE" ] || return 1
+		mv -f "$OLD_STATE" "$FW4_STATE" || return 1
+	else
+		[ ! -L "$FW4_STATE" ] || return 1
+		rm -f "$FW4_STATE" || return 1
+	fi
+	"$SYNC"
+}
+
+WORK_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/proxypool-fw4-activate.XXXXXX") ||
+	fail 'cannot create activation workspace'
+PATCHED_UCODE="$WORK_ROOT/fw4.uc"
+RAW_RULESET="$WORK_ROOT/ruleset-with-includes.nft"
+RULESET="$WORK_ROOT/ruleset.nft"
+CANDIDATE_STATE="$FW4_STATE.proxypool-candidate.$$"
+OLD_STATE="$FW4_STATE.proxypool-old.$$"
+chmod 700 "$WORK_ROOT"
+STATE_TOUCHED=0
+NFT_APPLIED=0
+NFT_OUTCOME_UNKNOWN=0
+NFT_IN_FLIGHT=0
+CHILD_OUTCOME_UNKNOWN=0
+CHILD_IN_FLIGHT=0
+HAD_STATE=0
+SUCCESS=0
+
+cleanup() {
+	status=$?
+	trap - EXIT HUP INT TERM
+	if [ "$SUCCESS" -ne 1 ]; then
+		restore_previous_state >/dev/null 2>&1 || true
+	fi
+	if [ "$CHILD_OUTCOME_UNKNOWN" -eq 0 ]; then
+		rm -f "$CANDIDATE_STATE" "$OLD_STATE"
+		rm -rf -- "$WORK_ROOT"
+	fi
+	exit "$status"
+}
+
+terminate() {
+	status=$1
+	trap - EXIT HUP INT TERM
+	if [ "$CHILD_IN_FLIGHT" -eq 1 ]; then
+		CHILD_OUTCOME_UNKNOWN=1
+	fi
+	if [ "$NFT_IN_FLIGHT" -eq 1 ]; then
+		NFT_OUTCOME_UNKNOWN=1
+	fi
+	restore_previous_state >/dev/null 2>&1 || true
+	if [ "$CHILD_OUTCOME_UNKNOWN" -eq 0 ]; then
+		rm -f "$CANDIDATE_STATE" "$OLD_STATE"
+		rm -rf -- "$WORK_ROOT"
+	fi
+	exit "$status"
+}
+
+trap cleanup EXIT
+trap 'terminate 129' HUP
+trap 'terminate 130' INT
+trap 'terminate 143' TERM
+
+if [ "$INHERITED_FW4_LOCK" -eq 1 ]; then
+	[ -e "/proc/$$/fd/1000" ] || fail 'inherited fw4 lock descriptor is missing'
+else
+	exec 1000>"$FW4_LOCK" || fail "cannot open fw4 lock: $FW4_LOCK"
+fi
+"$FLOCK" -x 1000 || fail 'cannot acquire inherited fw4 lock'
+probe_fw4_mode "$MODE" || fail "fw4 runtime does not match requested $MODE activation mode"
+
+# Revalidate the exact installed candidate while the official fw4 lock is
+# held.  The checker and this activator both patch the same pinned cursor-load
+# signature to an absolute package path, excluding /tmp/.uci deltas.
+CHILD_IN_FLIGHT=1
+if "$FW4_CHECK" "$CONFIG_DIR"; then
+	CHILD_IN_FLIGHT=0
+else
+	child_status=$?
+	CHILD_IN_FLIGHT=0
+	if [ "$child_status" -ge 128 ]; then
+		CHILD_OUTCOME_UNKNOWN=1
+		fail_with_status "$child_status" 'reboot_required: final fw4 validation outcome is unknown; WAL retained'
+	fi
+	fail 'installed configuration failed final fw4 validation'
+fi
+
+cursor_count=$(grep -F 'this.cursor = uci.cursor();' "$FW4_UCODE" | wc -l | tr -d ' ')
+[ "$cursor_count" -eq 1 ] ||
+	fail "official fw4 cursor signature count is $cursor_count, expected 1"
+load_count=$(grep -F 'this.cursor.load("firewall");' "$FW4_UCODE" | wc -l | tr -d ' ')
+[ "$load_count" -eq 1 ] ||
+	fail "official fw4 firewall load signature count is $load_count, expected 1"
+state_count=$(grep -F 'const STATEFILE = "/var/run/fw4.state";' "$FW4_UCODE" | wc -l | tr -d ' ')
+[ "$state_count" -eq 1 ] ||
+	fail "official fw4 state signature count is $state_count, expected 1"
+
+sed \
+	-e 's|this\.cursor\.load("firewall");|this.cursor.load(getenv("PROXYPOOL_LIVE_CONFIG") + "/firewall");|' \
+	-e 's|const STATEFILE = "/var/run/fw4.state";|const STATEFILE = getenv("PROXYPOOL_FW4_STATE");|' \
+	"$FW4_UCODE" >"$PATCHED_UCODE" || fail 'cannot patch official fw4 module'
+[ "$(grep -F 'this.cursor.load(getenv("PROXYPOOL_LIVE_CONFIG") + "/firewall");' "$PATCHED_UCODE" | wc -l | tr -d ' ')" -eq 1 ] ||
+	fail 'absolute live firewall load replacement was not unique'
+[ "$(grep -F 'const STATEFILE = getenv("PROXYPOOL_FW4_STATE");' "$PATCHED_UCODE" | wc -l | tr -d ' ')" -eq 1 ] ||
+	fail 'fw4 state path replacement was not unique'
+
+PROXYPOOL_LIVE_CONFIG=$CONFIG_DIR
+PROXYPOOL_FW4_STATE=$CANDIDATE_STATE
+PROXYPOOL_TRANSACTION_HELPER=$TRANSACTION_HELPER
+export PROXYPOOL_LIVE_CONFIG PROXYPOOL_FW4_STATE PROXYPOOL_TRANSACTION_HELPER
+
+[ ! -e "$CANDIDATE_STATE" ] && [ ! -L "$CANDIDATE_STATE" ] ||
+	fail 'candidate fw4 state path already exists'
+[ ! -e "$OLD_STATE" ] && [ ! -L "$OLD_STATE" ] ||
+	fail 'old fw4 state backup path already exists'
+if [ "$MODE" = live ]; then
+	cp -p "$FW4_STATE" "$OLD_STATE" || fail 'cannot back up official fw4 state'
+	"$SYNC" || fail 'cannot sync official fw4 state backup'
+	HAD_STATE=1
+fi
+
+CHILD_IN_FLIGHT=1
+if ACTION=start "$UTPL" -L "$WORK_ROOT" -S "$FW4_MAIN" >"$RAW_RULESET"; then
+	CHILD_IN_FLIGHT=0
+else
+	child_status=$?
+	CHILD_IN_FLIGHT=0
+	if [ "$child_status" -ge 128 ]; then
+		CHILD_OUTCOME_UNKNOWN=1
+		fail_with_status "$child_status" 'reboot_required: fw4 rendering outcome is unknown; WAL retained'
+	fi
+	fail 'absolute-path fw4 rendering failed'
+fi
+[ -s "$RAW_RULESET" ] || fail 'absolute-path fw4 rendering produced an empty ruleset'
+candidate_state_secure || fail 'fw4 did not publish a root-only candidate state file'
+
+USER_INCLUDE="include \"$NFTABLES_USER_DIR/*.nft\""
+user_include_count=$(grep -F "$USER_INCLUDE" "$RAW_RULESET" 2>/dev/null | wc -l | tr -d ' ')
+[ "$user_include_count" -eq 1 ] ||
+	fail "official nftables user include signature count is $user_include_count, expected 1"
+for include_file in "$GUARD_RULESET" "$INPUT_GATE" "$FORWARD_GATE"; do
+	include_count=$(grep -F "include \"$include_file\"" "$RAW_RULESET" 2>/dev/null | wc -l | tr -d ' ')
+	[ "$include_count" -eq 1 ] ||
+		fail "owned nft include was ignored or duplicated: $include_file"
+done
+
+# Eliminate the pinned, root-user-controlled glob after proving its directory
+# empty, inline the three audited snippets, then reject every residual include.
+awk -v guard="$GUARD_RULESET" -v input="$INPUT_GATE" -v forward="$FORWARD_GATE" \
+	-v user_include="$USER_INCLUDE" '
+	function emit(path, line) {
+		while ((getline line < path) > 0) print line
+		close(path)
+	}
+	{
+		trimmed = $0
+		gsub(/^[[:space:]]+|[[:space:]]+$/, "", trimmed)
+	}
+	trimmed == user_include { next }
+	index($0, "include \"" guard "\"") { emit(guard); next }
+	index($0, "include \"" input "\"") { emit(input); next }
+	index($0, "include \"" forward "\"") { emit(forward); next }
+	{ print }
+' "$RAW_RULESET" >"$RULESET" || fail 'cannot inline audited nft includes'
+if grep -Eq '^[[:space:]]*include[[:space:]]+' "$RULESET"; then
+	fail 'final activation ruleset contains an unaudited include directive'
+fi
+
+if grep -Eq '(^|[^[:alnum:]_])(flowtable|flow[[:space:]]+(add|offload))([^[:alnum:]_]|$)' "$RULESET"; then
+	fail 'rendered activation ruleset contains forbidden flow offload syntax'
+fi
+CHILD_IN_FLIGHT=1
+if "$NFT" -c -f "$RULESET"; then
+	CHILD_IN_FLIGHT=0
+else
+	child_status=$?
+	CHILD_IN_FLIGHT=0
+	if [ "$child_status" -ge 128 ]; then
+		CHILD_OUTCOME_UNKNOWN=1
+		fail_with_status "$child_status" 'reboot_required: nft check outcome is unknown; WAL retained'
+	fi
+	fail 'nft rejected the final activation ruleset'
+fi
+
+# The official module rendered state beside the live state path without
+# touching it.  Only after render + nft -c succeed is candidate state renamed
+# atomically into place.  A later nft failure restores the exact old state and
+# never runs ACTION=includes.
+[ ! -L "$FW4_STATE" ] || fail 'live fw4 state became a symlink'
+mv -f "$CANDIDATE_STATE" "$FW4_STATE" || fail 'cannot atomically publish candidate fw4 state'
+STATE_TOUCHED=1
+"$SYNC" || fail 'cannot sync candidate fw4 state publication'
+NFT_IN_FLIGHT=1
+CHILD_IN_FLIGHT=1
+if "$NFT" -f "$RULESET"; then
+	NFT_APPLIED=1
+	NFT_IN_FLIGHT=0
+	CHILD_IN_FLIGHT=0
+else
+	nft_status=$?
+	NFT_IN_FLIGHT=0
+	CHILD_IN_FLIGHT=0
+	if [ "$nft_status" -ge 128 ]; then
+		NFT_OUTCOME_UNKNOWN=1
+		CHILD_OUTCOME_UNKNOWN=1
+		fail_with_status "$nft_status" 'reboot_required: nft activation outcome is unknown; new state and WAL retained'
+	fi
+	fail 'nft failed to atomically activate the final ruleset'
+fi
+
+# OpenWrt runs script includes after the nft transaction with ACTION=includes.
+# Include exit status is warning-only, so successful guardian reset/finalization
+# is proven by the durable journal disappearing, not by utpl's exit status.
+PROXYPOOL_FW4_STATE=$FW4_STATE
+export PROXYPOOL_FW4_STATE
+CHILD_IN_FLIGHT=1
+if ACTION=includes "$UTPL" -L "$WORK_ROOT" -S "$FW4_MAIN"; then
+	CHILD_IN_FLIGHT=0
+else
+	child_status=$?
+	CHILD_IN_FLIGHT=0
+	if [ "$child_status" -ge 128 ]; then
+		CHILD_OUTCOME_UNKNOWN=1
+		fail_with_status "$child_status" 'reboot_required: fw4 include outcome is unknown; WAL retained'
+	fi
+	fail 'reboot_required: fw4 applied but include processing failed'
+fi
+if "$TRANSACTION_HELPER" journal-present; then
+	fail 'reboot_required: fw4 applied but durable activation acknowledgement is missing'
+else
+	journal_status=$?
+fi
+case "$journal_status" in
+	1)
+		[ ! -e "$TRANSACTION_DIR" ] && [ ! -L "$TRANSACTION_DIR" ] ||
+			fail 'transaction helper reported absent while exact journal evidence remains'
+		;;
+	12[8-9]|1[3-9][0-9]|2[0-4][0-9]|25[0-5])
+		CHILD_OUTCOME_UNKNOWN=1
+		fail_with_status "$journal_status" 'reboot_required: activation acknowledgement outcome is unknown; WAL retained'
+		;;
+	*) fail "cannot prove durable activation acknowledgement (status $journal_status)" ;;
+esac
+
+SUCCESS=1
+exit 0

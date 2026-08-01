@@ -1,0 +1,64 @@
+#!/bin/sh
+set -eu
+
+CONFIG_DIR="${PROXYPOOL_CONFIG_DIR:-/etc/config}"
+FIREWALL_DEFAULTS="${PROXYPOOL_FIREWALL_DEFAULTS:-/usr/lib/proxypool/proxypool-firewall-defaults}"
+TRANSACTION_HELPER="${PROXYPOOL_TRANSACTION_HELPER:-/usr/lib/proxypool/proxypool-firewall-transaction}"
+TRANSACTION_DIR="${PROXYPOOL_FIREWALL_TRANSACTION_DIR:-/etc/proxypool/firewall-transaction}"
+FW4_CHECK="${PROXYPOOL_FW4_CHECK:-/usr/lib/proxypool/proxypool-fw4-check-staged}"
+
+fail() {
+	echo "ProxyPool cold firewall integration: $*" >&2
+	exit 1
+}
+
+case "$CONFIG_DIR" in
+	/*) : ;;
+	*) fail 'configuration directory must be an absolute path' ;;
+esac
+[ "$CONFIG_DIR" != / ] || fail 'configuration directory must not be the filesystem root'
+[ -d "$CONFIG_DIR" ] && [ ! -L "$CONFIG_DIR" ] ||
+	fail "configuration directory is missing or unsafe: $CONFIG_DIR"
+
+for executable in "$FIREWALL_DEFAULTS" "$TRANSACTION_HELPER" "$FW4_CHECK"; do
+	[ -f "$executable" ] && [ ! -L "$executable" ] && [ -x "$executable" ] ||
+		fail "required executable is missing or unsafe: $executable"
+done
+
+# An interrupted or awaiting transaction is owned by the S18/S19 recovery
+# path.  Returning nonzero makes OpenWrt keep this uci-default for another boot.
+if "$TRANSACTION_HELPER" journal-present; then
+	fail 'firewall transaction is still pending; cold wrapper retained'
+else
+	journal_status=$?
+fi
+[ "$journal_status" -eq 1 ] || fail 'firewall journal state is indeterminate; cold wrapper retained'
+[ ! -e "$TRANSACTION_DIR" ] && [ ! -L "$TRANSACTION_DIR" ] ||
+	fail 'firewall transaction evidence remains; cold wrapper retained'
+
+# A prior boot may have completed S19 after this wrapper deliberately failed.
+# The hash-bound marker is written only after runtime gate verification; a
+# checker-clean post-clamp baseline restored after a power loss has no marker
+# and must be retried instead of being mistaken for a completed conversion.
+if "$TRANSACTION_HELPER" activation-current && "$FW4_CHECK" "$CONFIG_DIR"; then
+	exit 0
+fi
+
+if ! PROXYPOOL_COLD_BOOT=1 "$FIREWALL_DEFAULTS"; then
+	fail 'cold firewall defaults failed; cold wrapper retained'
+fi
+
+if "$TRANSACTION_HELPER" journal-present; then
+	fail 'firewall activation is awaiting S19; cold wrapper retained'
+else
+	journal_status=$?
+fi
+[ "$journal_status" -eq 1 ] || fail 'firewall activation journal state is indeterminate; cold wrapper retained'
+[ ! -e "$TRANSACTION_DIR" ] && [ ! -L "$TRANSACTION_DIR" ] ||
+	fail 'firewall activation evidence remains; cold wrapper retained'
+
+if ! "$TRANSACTION_HELPER" activation-current || ! "$FW4_CHECK" "$CONFIG_DIR"; then
+	fail 'firewall activation lacks a runtime acknowledgement; cold wrapper retained'
+fi
+
+exit 0

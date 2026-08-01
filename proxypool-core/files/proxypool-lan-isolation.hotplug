@@ -1,0 +1,37 @@
+#!/bin/sh
+set -u
+
+LAN_ISOLATION="${PROXYPOOL_LAN_ISOLATION:-/usr/lib/proxypool/lan-isolation.sh}"
+UBUS="${PROXYPOOL_HOTPLUG_UBUS:-/bin/ubus}"
+
+case "${ACTION:-}" in
+	add|change|move) : ;;
+	ifup|ifupdate)
+		[ "${INTERFACE:-}" = lan ] || exit 0
+		;;
+	*) exit 0 ;;
+esac
+
+[ -x "$LAN_ISOLATION" ] || {
+	echo "ProxyPool LAN isolation hotplug: helper is not executable: $LAN_ISOLATION" >&2
+	exit 1
+}
+
+"$LAN_ISOLATION" request || {
+	echo 'ProxyPool LAN isolation hotplug: cannot publish durable reconciliation request' >&2
+	exit 1
+}
+
+# Waking the singleton procd worker is latency optimization only.  The
+# root-only pending marker and the worker's periodic audit remain authoritative
+# if ubus is unavailable, times out, or the worker is between respawns.
+signal_number=$(kill -l USR1 2>/dev/null) || exit 0
+case "$signal_number" in
+	''|*[!0-9]*) exit 0 ;;
+esac
+if [ -x "$UBUS" ]; then
+	"$UBUS" -t 1 call service signal \
+		"{\"name\":\"proxypool-guard\",\"instance\":\"lan-reconciler\",\"signal\":$signal_number}" \
+		>/dev/null 2>&1 || :
+fi
+exit 0

@@ -1,4 +1,4 @@
-name: Build ProxyPool firmware (OpenWrt 23.05.3)
+name: Build ProxyPool packages (OpenWrt 23.05.3 SDK)
 
 on:
   push:
@@ -6,15 +6,19 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
   OPENWRT_VERSION: '23.05.3'
   TARGET: mediatek
   SUBTARGET: filogic
-  DEVICE_PROFILE: glinet_gl-mt6000
   SDK_FILE: openwrt-sdk-23.05.3-mediatek-filogic_gcc-12.3.0_musl.Linux-x86_64.tar.xz
   SDK_SHA256: e51af2eff648e0f6ee8d8a918ed0973105a11daa9fe63e31eb52e315ca852fe5
-  IMAGEBUILDER_FILE: openwrt-imagebuilder-23.05.3-mediatek-filogic.Linux-x86_64.tar.xz
-  IMAGEBUILDER_SHA256: 3fbe4df2261718d7824fc71eb0b063e4711bc2614ec89556b314df3996e8dddb
+  PACKAGES_FEED_COMMIT: 063b2393cbc3e5aab9d2b40b2911cab1c3967c59
+  LUCI_FEED_COMMIT: b07cf9dcfc37e021e5619a41c847e63afbd5d34a
+  ROUTING_FEED_COMMIT: 648753932d5a7deff7f2bdb33c000018a709ad84
+  TELEPHONY_FEED_COMMIT: 86af194d03592121f5321474ec9918dd109d3057
 
 jobs:
   host:
@@ -29,6 +33,16 @@ jobs:
         with:
           go-version: '1.20.14'
           cache-dependency-path: proxypool-core/src/proxypoold/go.mod
+      - name: Prepare pinned OpenWrt 23.05.3 nft checker
+        env:
+          OPENWRT_NFT_ROOTFS: ${{ runner.temp }}/openwrt-23.05.3-x86-64-rootfs
+        run: |
+          sh ./scripts/prepare-openwrt-nft.sh "$OPENWRT_NFT_ROOTFS"
+          chmod 755 "$GITHUB_WORKSPACE/scripts/openwrt-target-nft.sh"
+          {
+            echo "PROXYPOOL_OPENWRT_ROOTFS=$OPENWRT_NFT_ROOTFS"
+            echo "PROXYPOOL_TARGET_NFT=$GITHUB_WORKSPACE/scripts/openwrt-target-nft.sh"
+          } >> "$GITHUB_ENV"
       - name: Run host gates first
         run: ./scripts/test-host.sh
       - name: Check pushed or proposed commit range
@@ -72,6 +86,12 @@ jobs:
           cp -r proxypool-core sdk/package/proxypool/
           cp -r luci-app-proxypool sdk/package/proxypool/
           cd sdk
+          printf '%s\n' \
+            "src-git packages https://git.openwrt.org/feed/packages.git^$PACKAGES_FEED_COMMIT" \
+            "src-git luci https://git.openwrt.org/project/luci.git^$LUCI_FEED_COMMIT" \
+            "src-git routing https://git.openwrt.org/feed/routing.git^$ROUTING_FEED_COMMIT" \
+            "src-git telephony https://git.openwrt.org/feed/telephony.git^$TELEPHONY_FEED_COMMIT" \
+            > feeds.conf.default
           feed_updated=0
           for attempt in 1 2 3; do
             if ./scripts/feeds update -a; then
@@ -84,6 +104,16 @@ jobs:
             echo 'feeds update failed after 3 attempts' >&2
             exit 1
           }
+          [ "$(git -C feeds/packages rev-parse HEAD)" = "$PACKAGES_FEED_COMMIT" ]
+          [ "$(git -C feeds/luci rev-parse HEAD)" = "$LUCI_FEED_COMMIT" ]
+          [ "$(git -C feeds/routing rev-parse HEAD)" = "$ROUTING_FEED_COMMIT" ]
+          [ "$(git -C feeds/telephony rev-parse HEAD)" = "$TELEPHONY_FEED_COMMIT" ]
+          printf '%s\n' \
+            "packages $PACKAGES_FEED_COMMIT" \
+            "luci $LUCI_FEED_COMMIT" \
+            "routing $ROUTING_FEED_COMMIT" \
+            "telephony $TELEPHONY_FEED_COMMIT" \
+            > ../feed-commits.txt
           ./scripts/feeds install -a
           printf '%s\n' \
             'CONFIG_PACKAGE_proxypool-core=m' \
@@ -104,67 +134,23 @@ jobs:
           make package/proxypool/luci-app-proxypool/clean
           make package/proxypool/luci-app-proxypool/compile V=s -j1 2>&1 | tee ../luci-app-proxypool-build.log
 
-      - name: Inspect core IPK paths, modes, and architecture
+      - name: Inspect unique core and LuCI IPK payloads
         run: |
           mapfile -t packages < <(find sdk/bin -type f -name 'proxypool-core_*.ipk')
           [ "${#packages[@]}" -eq 1 ]
           sh ./scripts/inspect-ipk.sh "${packages[0]}" aarch64_cortex-a53
-          mkdir -p packages
-          find sdk/bin -type f -name '*.ipk' -exec cp '{}' packages/ \;
+          mapfile -t luci_packages < <(find sdk/bin -type f -name 'luci-app-proxypool_*.ipk')
+          [ "${#luci_packages[@]}" -eq 1 ]
+          sh ./scripts/inspect-luci-ipk.sh "${luci_packages[0]}"
 
-      - name: Download matching ImageBuilder
-        run: |
-          base_url="https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${TARGET}/${SUBTARGET}"
-          curl --fail --location --retry 3 --output "$IMAGEBUILDER_FILE" "$base_url/$IMAGEBUILDER_FILE"
-          printf '%s  %s\n' "$IMAGEBUILDER_SHA256" "$IMAGEBUILDER_FILE" | sha256sum -c -
-          tar -xf "$IMAGEBUILDER_FILE"
-          mv "${IMAGEBUILDER_FILE%.tar.xz}" imagebuilder
-
-      - name: Build GL-MT6000 image
-        run: |
-          sh ./scripts/prepare-image-files.sh files image-files
-          mkdir -p imagebuilder/packages
-          cp packages/*.ipk imagebuilder/packages/
-          cd imagebuilder
-          packages='luci luci-i18n-base-zh-cn luci-i18n-firewall-zh-cn'
-          packages="$packages luci-lua-runtime luci-compat luci-lib-jsonc"
-          packages="$packages xl2tpd ppp ppp-mod-pppol2tp kmod-l2tp kmod-pppol2tp"
-          packages="$packages redsocks nftables kmod-nft-tproxy kmod-nft-socket"
-          packages="$packages ip-full conntrack netcat proxypool-core luci-app-proxypool"
-          make image PROFILE="$DEVICE_PROFILE" PACKAGES="$packages" FILES=../image-files V=s
-
-      - name: Collect artifacts
-        run: |
-          mkdir -p output
-          find imagebuilder/bin -type f \( -name '*sysupgrade*' -o -name '*factory*' \) -exec cp '{}' output/ \;
-          cp proxypool-core-build.log luci-app-proxypool-build.log output/
-          cp packages/*.ipk output/
-          test -n "$(find output -type f -name '*sysupgrade*' -print -quit)"
-          sh ./scripts/regenerate-sha256sums.sh output
+          mkdir -p package-evidence
+          cp "${packages[0]}" "${luci_packages[0]}" package-evidence/
+          cp proxypool-core-build.log luci-app-proxypool-build.log feed-commits.txt package-evidence/
+          sh ./scripts/regenerate-sha256sums.sh package-evidence
 
       - name: Upload build evidence
         uses: actions/upload-artifact@v4
         with:
-          name: proxypool-openwrt-23.05.3
-          path: output/
-
-  release:
-    needs: build
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-22.04
-    permissions:
-      contents: write
-    steps:
-      - name: Download verified build artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: proxypool-openwrt-23.05.3
-          path: output
-
-      - name: Publish release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v2-shadow-${{ github.run_number }}
-          name: ProxyPool V2 shadow ${{ github.run_number }}
-          files: output/*
-          generate_release_notes: true
+          name: proxypool-packages-openwrt-23.05.3
+          path: package-evidence/
+          if-no-files-found: error

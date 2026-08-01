@@ -19,16 +19,23 @@ LEGACY_CONFIG_FILE="$TEST_TMP/proxypool"
 V2_CONFIG_FILE="$TEST_TMP/proxypool_v2"
 SELECTOR_FILE="$TEST_TMP/proxypool_runtime"
 CRONTAB_FILE="$TEST_TMP/crontab"
+WATCHDOG_FILE="$TEST_TMP/watchdog"
 PID_FILE="$TEST_TMP/xl2tpd.pid"
 PROCD_RUNNING_FILE="$TEST_TMP/procd-running"
 PROCD_STAGED_FILE="$TEST_TMP/procd-staged"
 PROCD_TRANSACTION_FILE="$TEST_TMP/procd-transaction"
 LEGACY_RUNNING_FILE="$TEST_TMP/legacy-running"
 QUERY_COUNT_FILE="$TEST_TMP/query-count"
+SED_COUNT_FILE="$TEST_TMP/sed-count"
+FIREWALL_SAFETY_TEMPLATE_FILE="$TEST_TMP/proxypool-safety-uci-default"
+FIREWALL_TRANSACTION_HELPER_FILE="$TEST_TMP/proxypool-firewall-transaction"
+FIREWALL_TRANSACTION_DIR="$TEST_TMP/firewall-transaction"
+LAN_ISOLATION_HELPER_FILE="$TEST_TMP/lan-isolation"
+LEGACY_GATE_FILE="$TEST_TMP/legacy-gate"
 export TRACE_FILE MARKER_FILE QUARANTINE_FILE TRANSITION_FILE ACTIVE_SNAPSHOT_FILE
 export SNAPSHOT_ROOT LEGACY_CONFIG_FILE V2_CONFIG_FILE SELECTOR_FILE
 export PROCD_RUNNING_FILE PROCD_STAGED_FILE PROCD_TRANSACTION_FILE LEGACY_RUNNING_FILE
-export QUERY_COUNT_FILE PERSISTENT_STATE_DIR ACTIVATED_BACKEND_FILE CLEANUP_REQUIRED_FILE
+export QUERY_COUNT_FILE SED_COUNT_FILE PERSISTENT_STATE_DIR ACTIVATED_BACKEND_FILE CLEANUP_REQUIRED_FILE
 
 make_fake() {
 	path=$1
@@ -77,12 +84,74 @@ case "${1-}" in
 		case "${PROXYPOOL_TEST_LEGACY_FAIL-}" in reload|reload_and_stop) exit 1 ;; esac
 		;;
 esac'
-make_fake "$TEST_TMP/lease" 'printf "lease:%s\n" "$*" >>"$TRACE_FILE"'
-make_fake "$TEST_TMP/cron" 'printf "cron:%s\n" "$*" >>"$TRACE_FILE"'
+make_fake "$TEST_TMP/lease" '
+printf "lease:%s\n" "$*" >>"$TRACE_FILE"
+[ "${PROXYPOOL_TEST_LEASE_FAIL-}:${1-}" != "flush:flush" ]'
+make_fake "$TEST_TMP/cron" '
+printf "cron:%s\n" "$*" >>"$TRACE_FILE"
+[ "${PROXYPOOL_TEST_CRON_FAIL-}:${1-}" != "restart:restart" ]'
 make_fake "$TEST_TMP/xl2tpd" '
 printf "xl2tpd:%s\n" "$*" >>"$TRACE_FILE"
+[ "${PROXYPOOL_TEST_MUTATE_LEGACY_ON_XL2TPD_DISABLE-0}:${1-}" != "1:disable" ] ||
+	printf "# changed-during-xl2tpd-disable\n" >>"$LEGACY_CONFIG_FILE"
 [ "${1-}" = enabled ] && exit 0
 exit 0'
+make_fake "$LEGACY_GATE_FILE" '
+printf "gate:%s\n" "$*" >>"$TRACE_FILE"
+printf "%s\n" legacy_runtime_quarantined
+exit 125'
+make_fake "$FIREWALL_TRANSACTION_HELPER_FILE" '
+printf "safety:%s\n" "$*" >>"$TRACE_FILE"
+case "${1-}" in
+	journal-present)
+		case "${PROXYPOOL_TEST_FIREWALL_JOURNAL:-absent}" in
+			present) exit 0 ;;
+			absent) exit 1 ;;
+			*) exit 2 ;;
+		esac
+		;;
+	activation-current)
+		[ "${PROXYPOOL_TEST_FIREWALL_ACTIVATION:-current}" = current ]
+		;;
+	activation-runtime-current)
+		[ "${PROXYPOOL_TEST_FIREWALL_RUNTIME:-current}" = current ]
+		;;
+	*) exit 2 ;;
+esac'
+make_fake "$LAN_ISOLATION_HELPER_FILE" '
+printf "l2:%s\n" "$*" >>"$TRACE_FILE"
+[ "${PROXYPOOL_TEST_LAN_ISOLATION:-ready}" = ready ]'
+make_fake "$TEST_TMP/ls-metadata" '
+[ "$#" -eq 2 ] && [ "$1" = -nd ] || exit 2
+path=$2
+[ -e "$path" ] && [ ! -L "$path" ] || exit 1
+owner=0
+group=0
+host_metadata=$(LC_ALL=C ls -nd "$path") || exit 1
+set -- $host_metadata
+links=$2
+if [ -d "$path" ]; then
+	permissions=drwx------
+elif [ "$path" = "${PROXYPOOL_FIREWALL_TRANSACTION_HELPER:-}" ]; then
+	permissions=-rwxr-xr-x
+else
+	permissions=-rw-------
+fi
+case "${PROXYPOOL_TEST_METADATA_FAULT-}" in
+	state_owner) [ "$path" != "$PERSISTENT_STATE_DIR" ] || owner=1000 ;;
+	state_mode) [ "$path" != "$PERSISTENT_STATE_DIR" ] || permissions=drwxrwxrwx ;;
+	state_links) [ "$path" != "$PERSISTENT_STATE_DIR" ] || links=7 ;;
+	activated_owner) [ "$path" != "$ACTIVATED_BACKEND_FILE" ] || owner=1000 ;;
+	activated_mode) [ "$path" != "$ACTIVATED_BACKEND_FILE" ] || permissions=-rw-rw-rw- ;;
+	activated_links) [ "$path" != "$ACTIVATED_BACKEND_FILE" ] || links=2 ;;
+	cleanup_owner) [ "$path" != "$CLEANUP_REQUIRED_FILE" ] || owner=1000 ;;
+	cleanup_mode) [ "$path" != "$CLEANUP_REQUIRED_FILE" ] || permissions=-rw-rw-rw- ;;
+	cleanup_links) [ "$path" != "$CLEANUP_REQUIRED_FILE" ] || links=2 ;;
+	firewall_helper_owner) [ "$path" != "${PROXYPOOL_FIREWALL_TRANSACTION_HELPER:-}" ] || owner=1000 ;;
+	firewall_helper_mode) [ "$path" != "${PROXYPOOL_FIREWALL_TRANSACTION_HELPER:-}" ] || permissions=-rwxrwxrwx ;;
+	firewall_helper_links) [ "$path" != "${PROXYPOOL_FIREWALL_TRANSACTION_HELPER:-}" ] || links=2 ;;
+esac
+printf "%s %s %s %s 0 Jan 1 00:00 %s\n" "$permissions" "$links" "$owner" "$group" "$path"'
 make_fake "$TEST_TMP/controller" '
 command_name=${1-}
 case "$command_name" in
@@ -181,6 +250,10 @@ assert_contains_fragment() {
 
 assert_not_contains_fragment() {
 	if grep -Fq -- "$1" "$TRACE_FILE"; then fail "unexpected trace fragment: $1"; fi
+}
+
+assert_not_contains() {
+	if grep -Fqx -- "$1" "$TRACE_FILE"; then fail "unexpected trace line: $1"; fi
 }
 
 assert_no_backend_mutation() {
@@ -285,8 +358,10 @@ reset_case() {
 	: >"$CRONTAB_FILE"
 	rm -f "$MARKER_FILE" "$TRANSITION_FILE" "$ACTIVE_SNAPSHOT_FILE"
 	rm -rf "$QUARANTINE_FILE"
-	rm -f "$PID_FILE" "$PROCD_RUNNING_FILE" "$PROCD_STAGED_FILE" "$PROCD_TRANSACTION_FILE" "$LEGACY_RUNNING_FILE" "$QUERY_COUNT_FILE"
+	rm -f "$PID_FILE" "$PROCD_RUNNING_FILE" "$PROCD_STAGED_FILE" "$PROCD_TRANSACTION_FILE" "$LEGACY_RUNNING_FILE" "$QUERY_COUNT_FILE" "$SED_COUNT_FILE"
 	rm -rf "$SNAPSHOT_ROOT" "$PERSISTENT_STATE_DIR" "$TEST_TMP/legacy-run" "$SELECTOR_FILE"
+	rm -rf "$FIREWALL_TRANSACTION_DIR"
+	printf '%s\n' '# safety template fixture' >"$FIREWALL_SAFETY_TEMPLATE_FILE"
 	write_legacy_config 1
 	write_v2_config v2_shadow 1
 	set_selector_only missing
@@ -310,10 +385,17 @@ run_action() (
 	export PROXYPOOL_LEGACY_PROG="$TEST_TMP/legacy"
 	export PROXYPOOL_LEASE_PROG="$TEST_TMP/lease"
 	export PROXYPOOL_CRON_INIT="$TEST_TMP/cron"
+	export PROXYPOOL_WATCHDOG_PROG="$WATCHDOG_FILE"
 	export PROXYPOOL_XL2TPD_INIT="$TEST_TMP/xl2tpd"
 	export PROXYPOOL_CRONTAB_ROOT="$CRONTAB_FILE"
 	export PROXYPOOL_XL2TPD_PID="$PID_FILE"
 	export PROXYPOOL_LEGACY_RUN_DIR="$TEST_TMP/legacy-run"
+	export PROXYPOOL_LS_PROG="$TEST_TMP/ls-metadata"
+	export PROXYPOOL_FIREWALL_SAFETY_TEMPLATE="$FIREWALL_SAFETY_TEMPLATE_FILE"
+	export PROXYPOOL_FIREWALL_TRANSACTION_HELPER="$FIREWALL_TRANSACTION_HELPER_FILE"
+	export PROXYPOOL_FIREWALL_TRANSACTION_DIR="$FIREWALL_TRANSACTION_DIR"
+	export PROXYPOOL_LAN_ISOLATION="$LAN_ISOLATION_HELPER_FILE"
+	export PROXYPOOL_LEGACY_GATE="$LEGACY_GATE_FILE"
 
 	procd_open_service() {
 		printf 'procd:service-open:%s\n' "$*" >>"$TRACE_FILE"
@@ -390,6 +472,15 @@ run_action() (
 		done
 		command rm "$@"
 	}
+	sed() {
+		printf 'sed:%s\n' "$*" >>"$TRACE_FILE"
+		sed_count=0
+		[ ! -f "$SED_COUNT_FILE" ] || sed_count=$(cat "$SED_COUNT_FILE")
+		sed_count=$((sed_count + 1))
+		printf '%s\n' "$sed_count" >"$SED_COUNT_FILE"
+		[ "${PROXYPOOL_TEST_SED_FAIL-}" != "$sed_count" ] || return 1
+		command sed "$@"
+	}
 	start() {
 		local start_result=0 service_result=0
 		printf 'rc:start\n' >>"$TRACE_FILE"
@@ -409,10 +500,18 @@ run_action() (
 	sleep() { printf 'sleep:%s\n' "$*" >>"$TRACE_FILE"; }
 
 	. "$INIT"
+	# The historical transaction matrix still exercises unreachable V1 code as
+	# rollback documentation. Production admission is enforced only in the new
+	# explicit quarantine cases below; this local redefinition never reaches the
+	# packaged init script.
+	if [ "${PROXYPOOL_TEST_ENFORCE_LEGACY_QUARANTINE:-0}" != 1 ]; then
+		legacy_quarantine() { return 0; }
+	fi
 	case "$action" in
 		start) start ;;
 		stop) stop ;;
 		reload) reload_service ;;
+		restart) restart ;;
 		triggers) service_triggers ;;
 	esac
 )
@@ -420,6 +519,344 @@ run_action() (
 run_start() { run_action start; }
 run_stop() { run_action stop; }
 run_reload() { run_action reload; }
+run_restart() { run_action restart; }
+
+write_legacy_cron() {
+	printf '* * * * * %s run\n*/5 * * * * %s accrue\n' \
+		"$WATCHDOG_FILE" "$TEST_TMP/lease" >"$CRONTAB_FILE"
+}
+
+assert_crontab_contains() {
+	grep -Fq -- "$1" "$CRONTAB_FILE" || fail "missing crontab entry: $1"
+}
+
+assert_crontab_not_contains() {
+	if grep -Fq -- "$1" "$CRONTAB_FILE"; then fail "unexpected crontab entry: $1"; fi
+}
+
+make_dangling_symlink() {
+	link_path=$1
+	target_path=$2
+	if ln -s "$target_path" "$link_path" 2>/dev/null && [ -L "$link_path" ]; then
+		return 0
+	fi
+	rm -f "$link_path"
+	command -v powershell.exe >/dev/null 2>&1 || return 1
+	command -v cygpath >/dev/null 2>&1 || return 1
+	PROXYPOOL_TEST_NATIVE_LINK=$(cygpath -w "$link_path")
+	PROXYPOOL_TEST_NATIVE_TARGET=$(cygpath -w "$target_path")
+	export PROXYPOOL_TEST_NATIVE_LINK PROXYPOOL_TEST_NATIVE_TARGET
+	powershell.exe -NoProfile -NonInteractive -Command '
+		$ErrorActionPreference = "Stop"
+		$link = $env:PROXYPOOL_TEST_NATIVE_LINK
+		$target = $env:PROXYPOOL_TEST_NATIVE_TARGET
+		New-Item -ItemType File -Path $target | Out-Null
+		try {
+			New-Item -ItemType SymbolicLink -Path $link -Target $target | Out-Null
+		} finally {
+			Remove-Item -LiteralPath $target -Force
+		}
+	' >/dev/null 2>&1 || return 1
+	[ -L "$link_path" ]
+}
+
+# Phase 1 keeps V2 shadow available but quarantines every V1 lifecycle before
+# firewall reconciliation, snapshot creation, cron edits, or process teardown.
+reset_case
+set_selector_only v1
+PROXYPOOL_TEST_ENFORCE_LEGACY_QUARANTINE=1 expect_failure run_start
+assert_contains 'gate:mutation init:start'
+assert_not_contains_fragment 'l2:'
+assert_no_backend_mutation
+assert_generation_count 0
+[ ! -e "$PERSISTENT_STATE_DIR" ] || fail 'quarantined V1 start created persistent state'
+
+for lifecycle in stop reload restart; do
+	reset_case
+	set_activated_backend v1
+	printf 'v1\n' >"$MARKER_FILE"
+	: >"$LEGACY_RUNNING_FILE"
+	set_selector_only v1
+	PROXYPOOL_TEST_ENFORCE_LEGACY_QUARANTINE=1 expect_failure run_action "$lifecycle"
+	assert_contains "gate:mutation init:$lifecycle"
+	assert_not_contains_fragment 'l2:'
+	assert_no_backend_mutation
+	assert_file_line "$MARKER_FILE" v1
+	[ -e "$LEGACY_RUNNING_FILE" ] || fail "quarantined V1 $lifecycle changed runtime evidence"
+done
+
+reset_case
+set_selector v2_shadow
+PROXYPOOL_TEST_ENFORCE_LEGACY_QUARANTINE=1 PROXYPOOL_TEST_REQUIRE_WAL=v2_shadow expect_success run_start
+assert_not_contains_fragment 'gate:'
+assert_contains_fragment 'procd:open:shadow-'
+assert_file_line "$MARKER_FILE" v2_shadow
+
+if [ "${PROXYPOOL_TEST_FOCUS-}" = legacy_quarantine ]; then
+	echo 'proxypool init legacy quarantine matrix: PASS'
+	exit 0
+fi
+
+# Firewall activation is a prerequisite for every mutation-capable admission
+# path.  Missing package evidence and stale live runtime both leave an existing
+# backend untouched; restart must check before its stop half.
+reset_case
+rm -f "$FIREWALL_SAFETY_TEMPLATE_FILE"
+set_selector_only v1
+expect_success run_start
+assert_no_backend_mutation
+
+reset_case
+set_selector_only v1
+PROXYPOOL_TEST_FIREWALL_RUNTIME=stale expect_success run_start
+assert_contains 'safety:activation-current'
+assert_contains 'l2:readiness'
+assert_contains 'safety:activation-runtime-current'
+assert_before 'safety:activation-current' 'l2:readiness'
+assert_before 'l2:readiness' 'safety:activation-runtime-current'
+assert_no_backend_mutation
+
+for authority_fault in contract_drift contract_mode; do
+	reset_case
+	set_selector_only v1
+	PROXYPOOL_TEST_FIREWALL_ACTIVATION="$authority_fault" expect_success run_start
+	assert_contains 'safety:activation-current'
+	assert_not_contains_fragment 'l2:readiness'
+	assert_not_contains_fragment 'safety:activation-runtime-current'
+	assert_no_backend_mutation
+done
+
+for metadata_fault in firewall_helper_owner firewall_helper_mode firewall_helper_links; do
+	reset_case
+	set_selector_only v1
+	PROXYPOOL_TEST_METADATA_FAULT="$metadata_fault" expect_success run_start
+	assert_not_contains_fragment 'safety:'
+	assert_not_contains_fragment 'l2:readiness'
+	assert_no_backend_mutation
+done
+
+reset_case
+set_selector_only v1
+PROXYPOOL_TEST_LAN_ISOLATION=failed expect_success run_start
+assert_contains 'safety:activation-current'
+assert_contains 'l2:readiness'
+assert_not_contains_fragment 'safety:activation-runtime-current'
+assert_no_backend_mutation
+
+reset_case
+printf 'v1\n' >"$MARKER_FILE"
+: >"$LEGACY_RUNNING_FILE"
+set_selector_only v1
+PROXYPOOL_TEST_LAN_ISOLATION=failed expect_failure run_reload
+assert_contains 'l2:readiness'
+assert_not_contains_fragment 'safety:activation-runtime-current'
+assert_no_backend_mutation
+[ -e "$LEGACY_RUNNING_FILE" ] || fail 'failed L2 admission stopped V1 during reload'
+
+reset_case
+printf 'v1\n' >"$MARKER_FILE"
+: >"$LEGACY_RUNNING_FILE"
+set_selector_only v1
+PROXYPOOL_TEST_FIREWALL_RUNTIME=stale expect_failure run_reload
+assert_contains 'safety:activation-runtime-current'
+assert_no_backend_mutation
+[ -e "$LEGACY_RUNNING_FILE" ] || fail 'blocked reload stopped the existing V1 backend'
+
+reset_case
+printf 'v1\n' >"$MARKER_FILE"
+: >"$LEGACY_RUNNING_FILE"
+set_selector_only v1
+PROXYPOOL_TEST_FIREWALL_RUNTIME=stale expect_failure run_restart
+assert_contains 'safety:activation-runtime-current'
+assert_no_backend_mutation
+[ -e "$LEGACY_RUNNING_FILE" ] || fail 'restart stopped V1 before checking firewall runtime authority'
+
+if [ "${PROXYPOOL_TEST_FOCUS-}" = activation_authority ]; then
+	echo 'proxypool init activation authority matrix: PASS'
+	exit 0
+fi
+
+# Follow-up security review matrix. Each case asserts a client-visible safety
+# outcome (persistent quarantine or zero cross-backend mutation), not merely
+# that a failure-injection fake was called.
+reset_case
+set_activated_backend v1
+printf 'v1\n' >"$MARKER_FILE"
+: >"$LEGACY_RUNNING_FILE"
+set_selector_only v1
+write_legacy_cron
+PROXYPOOL_TEST_LEASE_FAIL=flush PROXYPOOL_TEST_REQUIRE_WAL=v1 expect_failure run_stop
+assert_contains 'legacy:stop'
+assert_crontab_not_contains "$WATCHDOG_FILE"
+assert_crontab_not_contains "$TEST_TMP/lease"
+assert_file_line "$MARKER_FILE" v1
+assert_file_line "$CLEANUP_REQUIRED_FILE" v1
+assert_file_line "$QUARANTINE_FILE" v1
+
+reset_case
+set_activated_backend v1
+printf 'v1\n' >"$MARKER_FILE"
+: >"$LEGACY_RUNNING_FILE"
+set_selector_only v1
+write_legacy_cron
+PROXYPOOL_TEST_SED_FAIL=1 PROXYPOOL_TEST_REQUIRE_WAL=v1 expect_failure run_stop
+assert_not_contains_fragment 'legacy:stop'
+[ -e "$LEGACY_RUNNING_FILE" ] || fail 'first cron-edit failure stopped V1 before disabling its watchdog'
+assert_crontab_contains "$WATCHDOG_FILE"
+assert_crontab_contains "$TEST_TMP/lease"
+assert_file_line "$MARKER_FILE" v1
+assert_file_line "$CLEANUP_REQUIRED_FILE" v1
+assert_file_line "$QUARANTINE_FILE" v1
+
+reset_case
+set_activated_backend v1
+printf 'v1\n' >"$MARKER_FILE"
+: >"$LEGACY_RUNNING_FILE"
+set_selector_only v1
+write_legacy_cron
+PROXYPOOL_TEST_SED_FAIL=2 PROXYPOOL_TEST_REQUIRE_WAL=v1 expect_failure run_stop
+assert_not_contains_fragment 'legacy:stop'
+[ -e "$LEGACY_RUNNING_FILE" ] || fail 'second cron-edit failure stopped V1 before disabling its watchdog'
+assert_crontab_not_contains "$WATCHDOG_FILE"
+assert_crontab_contains "$TEST_TMP/lease"
+assert_file_line "$MARKER_FILE" v1
+assert_file_line "$CLEANUP_REQUIRED_FILE" v1
+assert_file_line "$QUARANTINE_FILE" v1
+
+reset_case
+set_activated_backend v1
+printf 'v1\n' >"$MARKER_FILE"
+: >"$LEGACY_RUNNING_FILE"
+set_selector_only v1
+write_legacy_cron
+PROXYPOOL_TEST_CRON_FAIL=restart PROXYPOOL_TEST_REQUIRE_WAL=v1 expect_failure run_stop
+assert_not_contains_fragment 'legacy:stop'
+[ -e "$LEGACY_RUNNING_FILE" ] || fail 'cron restart failure stopped V1 before the disabled schedule was loaded'
+assert_crontab_not_contains "$WATCHDOG_FILE"
+assert_crontab_not_contains "$TEST_TMP/lease"
+assert_file_line "$MARKER_FILE" v1
+assert_file_line "$CLEANUP_REQUIRED_FILE" v1
+assert_file_line "$QUARANTINE_FILE" v1
+
+# Existing persistent evidence is authority-bearing. A root process must not
+# repair and then trust a pre-positioned non-root-owned or over-broad object.
+for metadata_fault in state_owner state_mode activated_owner activated_mode activated_links; do
+	reset_case
+	set_activated_backend v1
+	set_selector_only v1
+	PROXYPOOL_TEST_METADATA_FAULT="$metadata_fault" expect_failure run_start
+	assert_no_backend_mutation
+	assert_file_line "$ACTIVATED_BACKEND_FILE" v1
+done
+
+for metadata_fault in cleanup_owner cleanup_mode cleanup_links; do
+	reset_case
+	set_activated_backend v1
+	printf 'v1\n' >"$CLEANUP_REQUIRED_FILE"
+	printf 'v1\n' >"$MARKER_FILE"
+	: >"$LEGACY_RUNNING_FILE"
+	set_selector_only v1
+	PROXYPOOL_TEST_METADATA_FAULT="$metadata_fault" expect_failure run_stop
+	assert_no_backend_mutation
+	assert_file_line "$CLEANUP_REQUIRED_FILE" v1
+	assert_file_line "$MARKER_FILE" v1
+done
+
+# Directory link counts are filesystem-dependent and must not be constrained
+# to one. Authority-bearing regular marker files, however, may not have a
+# second hard link that permits mutation through another pathname.
+reset_case
+set_activated_backend v1
+set_selector_only v1
+PROXYPOOL_TEST_METADATA_FAULT=state_links expect_success run_start
+assert_contains 'legacy:start'
+
+reset_case
+set_activated_backend v1
+set_selector_only v1
+hardlink_alias="$TEST_TMP/activated-backend-hardlink"
+if ln "$ACTIVATED_BACKEND_FILE" "$hardlink_alias" 2>/dev/null; then
+	expect_failure run_start
+	assert_no_backend_mutation
+	assert_file_line "$ACTIVATED_BACKEND_FILE" v1
+	rm -f "$hardlink_alias"
+else
+	echo 'SKIP: activated-backend hardlink assertion requires hardlink support'
+fi
+
+# Recovery is backend-specific. Opposite-backend evidence blocks before any
+# legacy/procd mutation and leaves the write-ahead log intact for inspection.
+reset_case
+set_activated_backend v1
+printf 'v1\n' >"$CLEANUP_REQUIRED_FILE"
+printf 'v1\n' >"$MARKER_FILE"
+: >"$LEGACY_RUNNING_FILE"
+printf 'old-shadow\n' >"$PROCD_RUNNING_FILE"
+set_selector_only v1
+expect_failure run_stop
+assert_no_backend_mutation
+assert_file_line "$CLEANUP_REQUIRED_FILE" v1
+assert_file_line "$MARKER_FILE" v1
+[ -s "$PROCD_RUNNING_FILE" ] || fail 'V1 recovery destroyed opposite procd evidence'
+
+reset_case
+set_activated_backend v2_shadow
+printf 'v2_shadow\n' >"$CLEANUP_REQUIRED_FILE"
+printf 'v2_shadow\n' >"$MARKER_FILE"
+printf 'old-shadow\n' >"$PROCD_RUNNING_FILE"
+mkdir "$TEST_TMP/legacy-run"
+set_selector_only v2_shadow
+expect_failure run_stop
+assert_no_backend_mutation
+assert_file_line "$CLEANUP_REQUIRED_FILE" v2_shadow
+assert_file_line "$MARKER_FILE" v2_shadow
+[ -d "$TEST_TMP/legacy-run" ] || fail 'V2 recovery destroyed opposite legacy evidence'
+[ -s "$PROCD_RUNNING_FILE" ] || fail 'blocked V2 recovery killed its procd instance'
+
+reset_case
+set_activated_backend v2_shadow
+printf 'v2_shadow\n' >"$CLEANUP_REQUIRED_FILE"
+printf 'v2_shadow\n' >"$MARKER_FILE"
+printf 'old-shadow\n' >"$PROCD_RUNNING_FILE"
+: >"$TEST_TMP/legacy-run"
+set_selector_only v2_shadow
+expect_failure run_stop
+assert_no_backend_mutation
+assert_file_line "$CLEANUP_REQUIRED_FILE" v2_shadow
+assert_file_line "$MARKER_FILE" v2_shadow
+[ -f "$TEST_TMP/legacy-run" ] || fail 'V2 recovery destroyed regular-file legacy evidence'
+[ -s "$PROCD_RUNNING_FILE" ] || fail 'regular-file legacy evidence did not block V2 recovery'
+
+reset_case
+set_activated_backend v2_shadow
+printf 'v2_shadow\n' >"$MARKER_FILE"
+printf 'old-shadow\n' >"$PROCD_RUNNING_FILE"
+set_selector_only v2_shadow
+if make_dangling_symlink "$TEST_TMP/legacy-run" "$TEST_TMP/missing-legacy-run-target"; then
+	expect_failure run_stop
+	assert_no_backend_mutation
+	assert_file_line "$MARKER_FILE" v2_shadow
+	[ -L "$TEST_TMP/legacy-run" ] || fail 'V2 stop destroyed dangling legacy runtime evidence'
+	[ -s "$PROCD_RUNNING_FILE" ] || fail 'dangling legacy evidence did not block V2 stop'
+else
+	echo 'SKIP: V2 dangling legacy runtime assertion requires symlink support'
+fi
+
+# This V1 comparison narrows the admission window by running after xl2tpd
+# preparation. Task 7.5 still needs a writer lock to close the remaining race
+# between the comparison and the actual legacy start command.
+reset_case
+PROXYPOOL_TEST_MUTATE_LEGACY_ON_XL2TPD_DISABLE=1 PROXYPOOL_TEST_REQUIRE_WAL=v1 expect_failure run_start
+assert_contains 'xl2tpd:disable'
+assert_not_contains_fragment 'legacy:start'
+assert_file_line "$ACTIVATED_BACKEND_FILE" v1
+assert_file_line "$CLEANUP_REQUIRED_FILE" v1
+assert_file_line "$QUARANTINE_FILE" v1
+
+if [ "${PROXYPOOL_TEST_FOCUS-}" = task6_followup ]; then
+	echo 'proxypool init Task6 follow-up matrix: PASS'
+	exit 0
+fi
 
 # Missing selector is compatibility-only: a genuine V1 file starts after an
 # explicit any-instance absence query.
@@ -440,7 +877,8 @@ case "$(uname -s)" in
 		;;
 	*) echo 'SKIP: persistent state mode assertion requires a POSIX filesystem' ;;
 esac
-assert_not_contains_fragment "$LEGACY_CONFIG_FILE"
+assert_not_contains "ctl:classify:$LEGACY_CONFIG_FILE"
+assert_not_contains_fragment "--config $LEGACY_CONFIG_FILE"
 
 # A fresh image selects V2 from its separate selector/config snapshot. The
 # daemon never consumes either live source path.
@@ -1434,9 +1872,10 @@ assert_file_line "$MARKER_FILE" v1
 assert_file_line "$CLEANUP_REQUIRED_FILE" v1
 assert_file_line "$QUARANTINE_FILE" v1
 
-# T: The classified V1 bytes remain owned until the final legacy call. Any
-# live-file mutation is detected immediately before stop/start/reload. If stop
-# already completed, runtime is cleared and ownership remains for recovery.
+# T: The classified V1 bytes are compared again at the tested pre-call
+# checkpoints. Task 7.5 must still add a writer lock to eliminate mutation in
+# the remaining compare-to-call window. If stop already completed, runtime is
+# cleared and ownership remains for recovery.
 reset_case
 set_selector_only v1
 PROXYPOOL_TEST_MUTATE_LEGACY_DURING_CLASSIFY=1 expect_failure run_start

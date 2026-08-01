@@ -13,6 +13,13 @@ LOG_FILE="/var/log/proxypool.log"
 LOCK_DIR="/var/lock/proxypool-fw.lock"
 # 锁超时（秒）：超过此时间的残留锁视为 stale 并强制清除
 LOCK_TIMEOUT=15
+LEGACY_GATE="${PROXYPOOL_LEGACY_GATE:-/usr/lib/proxypool/legacy-gate.sh}"
+
+legacy_quarantine() {
+    /bin/sh "$LEGACY_GATE" mutation "$1" >/dev/null 2>&1 || true
+    printf '%s\n' 'legacy_runtime_quarantined'
+    return 125
+}
 
 # 获取防火墙锁（mkdir 原子锁，POSIX 兼容）
 _acquire_lock() {
@@ -612,6 +619,19 @@ show() {
 }
 
 case "$1" in
+    show)
+        ;;
+    init|cleanup|rebuild|remove_client|add_client|update_client)
+        legacy_quarantine "firewall:$1"
+        exit $?
+        ;;
+    *)
+        echo "Usage: $0 {init|cleanup|rebuild|remove_client|add_client|update_client|show} [client_id]"
+        exit 1
+        ;;
+esac
+
+case "$1" in
     init)
         init
         ;;
@@ -633,8 +653,5 @@ case "$1" in
     show)
         show
         ;;
-    *)
-        echo "Usage: $0 {init|cleanup|rebuild|remove_client|add_client|update_client|show} [client_id]"
-        exit 1
-        ;;
+    *) exit 1 ;;
 esac

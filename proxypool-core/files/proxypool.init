@@ -26,6 +26,12 @@ LEGACY_CONFIG_FILE="${PROXYPOOL_LEGACY_CONFIG_FILE:-${PROXYPOOL_CONFIG_FILE:-/et
 V2_CONFIG_FILE="${PROXYPOOL_V2_CONFIG_FILE:-/etc/config/proxypool_v2}"
 SELECTOR_FILE="${PROXYPOOL_SELECTOR_FILE:-/etc/config/proxypool_runtime}"
 CLASSIFIER="${PROXYPOOL_CLASSIFIER:-/usr/bin/proxypoolctl}"
+LS_PROG="${PROXYPOOL_LS_PROG:-/bin/ls}"
+FIREWALL_SAFETY_TEMPLATE="${PROXYPOOL_FIREWALL_SAFETY_TEMPLATE:-/usr/lib/proxypool/proxypool-safety-uci-default}"
+FIREWALL_TRANSACTION_HELPER="${PROXYPOOL_FIREWALL_TRANSACTION_HELPER:-/usr/lib/proxypool/proxypool-firewall-transaction}"
+FIREWALL_TRANSACTION_DIR="${PROXYPOOL_FIREWALL_TRANSACTION_DIR:-/etc/proxypool/firewall-transaction}"
+LAN_ISOLATION_HELPER="${PROXYPOOL_LAN_ISOLATION:-/usr/lib/proxypool/lan-isolation.sh}"
+LEGACY_GATE="${PROXYPOOL_LEGACY_GATE:-/usr/lib/proxypool/legacy-gate.sh}"
 
 # Phase 1 deliberately blocks V1 <-> V2 transitions. V1 teardown currently
 # removes its fail-closed network rules, so a cross-backend switch is unsafe
@@ -48,8 +54,17 @@ PROXYPOOL_ACTIVATED_BACKEND=
 PROXYPOOL_RUNTIME_BACKEND=
 PROXYPOOL_NEEDS_ACTIVATION=0
 
+legacy_quarantine() {
+	/bin/sh "$LEGACY_GATE" mutation "$1" >/dev/null 2>&1 || true
+	printf '%s\n' 'legacy_runtime_quarantined'
+	return 125
+}
+
 legacy_start() {
 	local sys_pid result
+	legacy_quarantine 'init:legacy_start'
+	result=$?
+	[ "$result" -eq 0 ] || return "$result"
 
 	if "$XL2TPD_INIT" enabled 2>/dev/null; then
 		"$XL2TPD_INIT" stop 2>/dev/null
@@ -60,6 +75,7 @@ legacy_start() {
 		kill "$sys_pid" 2>/dev/null
 		sleep 1
 	fi
+	v1_snapshot_matches_live || return 1
 
 	echo "Starting ProxyPool V1..."
 	"$PROG" start
@@ -77,17 +93,30 @@ legacy_start() {
 
 legacy_stop() {
 	local result
+	legacy_quarantine 'init:legacy_stop'
+	result=$?
+	[ "$result" -eq 0 ] || return "$result"
+	# Disable every cron path that can resurrect V1 before its destructive
+	# teardown. A partial edit or failed cron reload leaves V1 running and lets
+	# the caller retain the cleanup WAL/quarantine for explicit recovery.
+	sed -i "\|$WATCHDOG_PROG|d" "$CRONTAB_ROOT" 2>/dev/null || return 1
+	sed -i "\|$LEASE_PROG|d" "$CRONTAB_ROOT" 2>/dev/null || return 1
+	"$CRON_INIT" restart 2>/dev/null || return 1
+
 	echo "Stopping ProxyPool V1..."
 	"$PROG" stop
 	result=$?
-	"$LEASE_PROG" flush 2>/dev/null
-	sed -i "\|$WATCHDOG_PROG|d" "$CRONTAB_ROOT" 2>/dev/null
-	sed -i "\|$LEASE_PROG|d" "$CRONTAB_ROOT" 2>/dev/null
-	"$CRON_INIT" restart 2>/dev/null
+	if ! "$LEASE_PROG" flush 2>/dev/null; then
+		[ "$result" -ne 0 ] || result=1
+	fi
 	return "$result"
 }
 
 legacy_reload() {
+	local result
+	legacy_quarantine 'init:legacy_reload'
+	result=$?
+	[ "$result" -eq 0 ] || return "$result"
 	echo "Reloading ProxyPool V1..."
 	"$PROG" reload
 }
@@ -138,12 +167,103 @@ read_runtime_backend() {
 	printf '%s' "$primary"
 }
 
+legacy_runtime_evidence_exists() {
+	[ -e "$LEGACY_RUN_DIR" ] || [ -L "$LEGACY_RUN_DIR" ]
+}
+
+firewall_activation_precheck() {
+	local journal_status
+	# Every packaged lifecycle requires the immutable phase-1 template and the
+	# runtime authority helper. Missing package evidence is corruption, never a
+	# source-only compatibility signal.
+	if [ ! -e "$FIREWALL_SAFETY_TEMPLATE" ] && [ ! -L "$FIREWALL_SAFETY_TEMPLATE" ]; then
+		return 1
+	fi
+	[ -f "$FIREWALL_SAFETY_TEMPLATE" ] && [ ! -L "$FIREWALL_SAFETY_TEMPLATE" ] || return 1
+	[ -f "$FIREWALL_TRANSACTION_HELPER" ] && [ ! -L "$FIREWALL_TRANSACTION_HELPER" ] &&
+		[ -x "$FIREWALL_TRANSACTION_HELPER" ] || return 1
+	persistent_path_secure "$FIREWALL_TRANSACTION_HELPER" '-rwxr-xr-x' 1 || return 1
+	[ -f "$LAN_ISOLATION_HELPER" ] && [ ! -L "$LAN_ISOLATION_HELPER" ] &&
+		[ -x "$LAN_ISOLATION_HELPER" ] || return 1
+	# A durable journal always outranks an older activation marker.  Only the
+	# helper's exact "absent" status (1) permits the hash-bound check; present,
+	# corrupt, linked, or indeterminate journal evidence defers the backend.
+	"$FIREWALL_TRANSACTION_HELPER" journal-present
+	journal_status=$?
+	[ "$journal_status" -eq 1 ] || return 1
+	[ ! -e "$FIREWALL_TRANSACTION_DIR" ] && [ ! -L "$FIREWALL_TRANSACTION_DIR" ] || return 1
+	# Authenticate the projection plus every nft/L2 contract byte and mode. This
+	# precheck is read-only and therefore may run before backend classification.
+	"$FIREWALL_TRANSACTION_HELPER" activation-current || return 1
+	return 0
+}
+
+firewall_safety_ready() {
+	# Repeat the read-only authority check at the mutation boundary so a journal
+	# or package drift appearing after early admission cannot be missed.
+	firewall_activation_precheck || return 1
+	# The singleton procd worker owns every bridge mutation.  Admission is
+	# strictly read-only and succeeds only after that worker has consumed all
+	# pending/in-flight work and no wireless cold-reboot boundary remains.
+	"$LAN_ISOLATION_HELPER" readiness || return 1
+	# Revalidate both authority bytes and the live nft schema at the admission
+	# boundary; this closes drift between the early precheck and backend start.
+	"$FIREWALL_TRANSACTION_HELPER" activation-runtime-current
+}
+
+restart() {
+	local result=0 admission
+	if ! firewall_activation_precheck; then
+		echo 'ProxyPool restart blocked: firewall safety activation is not current' >&2
+		return 1
+	fi
+	require_nonlegacy_lifecycle 'init:restart'
+	admission=$?
+	[ "$admission" -eq 0 ] || return "$admission"
+	# OpenWrt rc.common normally stops first and checks start admission later.
+	# That ordering can strand a running backend after safety authority was lost,
+	# so restart performs the shared gate before its destructive stop half.
+	if ! firewall_safety_ready; then
+		echo 'ProxyPool restart blocked: firewall/L2 safety activation is not current' >&2
+		return 1
+	fi
+	trap '' TERM
+	stop "$@" || result=$?
+	trap - TERM
+	[ "$result" -eq 0 ] || return "$result"
+	start "$@"
+}
+
+persistent_path_secure() {
+	local path="$1" expected_permissions="$2" expected_links="${3-}" metadata permissions links owner group remainder
+	metadata=$("$LS_PROG" -nd "$path" 2>/dev/null) || return 1
+	case "$metadata" in
+		""|*'
+'*) return 1 ;;
+	esac
+	IFS=' 	' read -r permissions links owner group remainder <<EOF
+$metadata
+EOF
+	[ "$permissions" = "$expected_permissions" ] || return 1
+	case "$links" in ""|*[!0-9]*) return 1 ;; esac
+	[ -z "$expected_links" ] || [ "$links" = "$expected_links" ] || return 1
+	[ "$owner" = 0 ] && [ "$group" = 0 ] || return 1
+}
+
 persistent_layout_valid() {
+	local marker
 	[ "${ACTIVATED_BACKEND_MARKER%/*}" = "$PERSISTENT_STATE_DIR" ] || return 1
 	[ "${CLEANUP_REQUIRED_MARKER%/*}" = "$PERSISTENT_STATE_DIR" ] || return 1
 	if [ -e "$PERSISTENT_STATE_DIR" ] || [ -L "$PERSISTENT_STATE_DIR" ]; then
 		[ -d "$PERSISTENT_STATE_DIR" ] && [ ! -L "$PERSISTENT_STATE_DIR" ] || return 1
+		persistent_path_secure "$PERSISTENT_STATE_DIR" 'drwx------' || return 1
 	fi
+	for marker in "$ACTIVATED_BACKEND_MARKER" "$CLEANUP_REQUIRED_MARKER"; do
+		if [ -e "$marker" ] || [ -L "$marker" ]; then
+			[ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+			persistent_path_secure "$marker" '-rw-------' 1 || return 1
+		fi
+	done
 	return 0
 }
 
@@ -186,6 +306,7 @@ ensure_persistent_state_dir() {
 	fi
 	[ -d "$PERSISTENT_STATE_DIR" ] && [ ! -L "$PERSISTENT_STATE_DIR" ] || return 1
 	chmod 700 "$PERSISTENT_STATE_DIR" || return 1
+	persistent_layout_valid
 }
 
 write_persistent_backend() {
@@ -193,6 +314,7 @@ write_persistent_backend() {
 	ensure_persistent_state_dir || return 1
 	write_line_atomically "$destination" "$backend" || return 1
 	chmod 600 "$destination" || return 1
+	persistent_layout_valid
 }
 
 write_activated_backend() {
@@ -310,6 +432,61 @@ $sentinel") printf '%s' missing ;;
 $sentinel") printf '%s' v1 ;;
 		"v2_shadow
 $sentinel") printf '%s' v2_shadow ;;
+		*) return 1 ;;
+	esac
+}
+
+# Read-only lifecycle admission. Existing ownership outranks the current
+# selector, so a V2 service can still be stopped after a bad configuration
+# edit, while any V1 ownership remains quarantined. No snapshots, journals,
+# firewall reconciliation, cron edits, or procd calls occur in this function.
+initial_backend_owner() {
+	local cleanup activated runtime quarantine selection owner= marker
+	cleanup=$(read_cleanup_required)
+	activated=$(read_activated_backend)
+	runtime=$(read_primary_backend)
+	quarantine=$(read_exact_backend_marker "$QUARANTINE_MARKER" 0)
+
+	for marker in "$cleanup" "$activated" "$runtime" "$quarantine"; do
+		case "$marker" in
+			corrupt) return 1 ;;
+			v1|v2_shadow)
+				if [ -n "$owner" ] && [ "$owner" != "$marker" ]; then
+					return 1
+				fi
+				owner=$marker
+				;;
+			"") ;;
+			*) return 1 ;;
+		esac
+	done
+	if [ -e "$TRANSITION_MARKER" ] || [ -L "$TRANSITION_MARKER" ]; then
+		return 1
+	fi
+	if [ -n "$owner" ]; then
+		printf '%s' "$owner"
+		return 0
+	fi
+
+	selection=$(capture_selector "$SELECTOR_FILE") || return 1
+	case "$selection" in
+		missing|v1) printf '%s' v1 ;;
+		v2_shadow) printf '%s' v2_shadow ;;
+		*) return 1 ;;
+	esac
+}
+
+require_nonlegacy_lifecycle() {
+	local scope=$1 owner result
+	owner=$(initial_backend_owner)
+	result=$?
+	[ "$result" -eq 0 ] || return "$result"
+	case "$owner" in
+		v2_shadow) return 0 ;;
+		v1)
+			legacy_quarantine "$scope"
+			return $?
+			;;
 		*) return 1 ;;
 	esac
 }
@@ -600,7 +777,21 @@ load_prepared_start() {
 }
 
 start_service() {
-	local previous result instance preflight_state backend
+	local previous result instance preflight_state backend admission
+	if ! firewall_activation_precheck; then
+		echo 'ProxyPool start deferred: firewall safety activation is not current' >&2
+		exit 0
+	fi
+	require_nonlegacy_lifecycle 'init:start'
+	admission=$?
+	[ "$admission" -eq 0 ] || exit "$admission"
+	if ! firewall_safety_ready; then
+		echo 'ProxyPool start deferred: firewall safety activation is not current' >&2
+		# rc.common would otherwise close/send an empty procd service-set after a
+		# normal return.  Exit the one-shot action before any backend or procd
+		# mutation; S19/runtime finalization makes a later start admissible.
+		exit 0
+	fi
 	PROXYPOOL_PENDING_ACTION=
 	PROXYPOOL_PENDING_INSTANCE=
 	PROXYPOOL_PENDING_SNAPSHOT=
@@ -621,7 +812,7 @@ start_service() {
 	fi
 	previous="$PROXYPOOL_RUNTIME_BACKEND"
 	backend="$PROXYPOOL_ACTIVATED_BACKEND"
-	if [ "$backend" = v2_shadow ] && [ -d "$LEGACY_RUN_DIR" ]; then
+	if [ "$backend" = v2_shadow ] && legacy_runtime_evidence_exists; then
 		echo 'ProxyPool fresh V2 start blocked: legacy runtime evidence exists' >&2
 		discard_desired_snapshot
 		exit 1
@@ -822,7 +1013,10 @@ service_started() {
 }
 
 stop_service() {
-	local activated cleanup runtime backend result recovery=0
+	local activated cleanup runtime backend result state recovery=0 admission
+	require_nonlegacy_lifecycle 'init:stop'
+	admission=$?
+	[ "$admission" -eq 0 ] || exit "$admission"
 	PROXYPOOL_STOP_CLEAN=0
 	PROXYPOOL_STOP_RESULT=0
 	PROXYPOOL_STOP_BACKEND=
@@ -846,10 +1040,18 @@ stop_service() {
 			backend="$activated"
 			recovery=1
 			if [ "$backend" = v1 ]; then
+				state=$(capture_procd_state)
+				[ "$state" = absent ] || {
+					echo 'ProxyPool V1 recovery blocked: conflicting procd evidence exists' >&2
+					exit 1
+				}
 				build_v1_snapshot || {
 					echo 'ProxyPool V1 recovery blocked: live config is not strict V1' >&2
 					exit 1
 				}
+			elif legacy_runtime_evidence_exists; then
+				echo 'ProxyPool V2 recovery blocked: conflicting legacy runtime evidence exists' >&2
+				exit 1
 			fi
 			;;
 		"")
@@ -863,11 +1065,23 @@ stop_service() {
 				exit 1
 			}
 			backend="$PROXYPOOL_ACTIVATED_BACKEND"
-			if [ "$backend" = v2_shadow ] && [ -d "$LEGACY_RUN_DIR" ]; then
-				discard_desired_snapshot
-				echo 'ProxyPool stop blocked: conflicting legacy runtime evidence exists' >&2
-				exit 1
-			fi
+			case "$backend" in
+				v1)
+					state=$(capture_procd_state)
+					[ "$state" = absent ] || {
+						discard_desired_snapshot
+						echo 'ProxyPool V1 stop blocked: conflicting procd evidence exists' >&2
+						exit 1
+					}
+					;;
+				v2_shadow)
+					if legacy_runtime_evidence_exists; then
+						discard_desired_snapshot
+						echo 'ProxyPool stop blocked: conflicting legacy runtime evidence exists' >&2
+						exit 1
+					fi
+					;;
+			esac
 			begin_backend_mutation || {
 				discard_desired_snapshot
 				echo 'ProxyPool stop blocked: persistent transaction evidence is unavailable' >&2
@@ -929,7 +1143,18 @@ service_stopped() {
 }
 
 reload_service() {
-	local previous state result backend
+	local previous state result backend admission
+	if ! firewall_activation_precheck; then
+		echo 'ProxyPool reload blocked: firewall safety activation is not current' >&2
+		return 1
+	fi
+	require_nonlegacy_lifecycle 'init:reload'
+	admission=$?
+	[ "$admission" -eq 0 ] || return "$admission"
+	if ! firewall_safety_ready; then
+		echo 'ProxyPool reload blocked: firewall/L2 safety activation is not current' >&2
+		return 1
+	fi
 	build_desired_snapshot || {
 		echo 'ProxyPool reload blocked: selector/config snapshot is invalid' >&2
 		return 1
@@ -941,7 +1166,7 @@ reload_service() {
 	fi
 	previous="$PROXYPOOL_RUNTIME_BACKEND"
 	backend="$PROXYPOOL_ACTIVATED_BACKEND"
-	if [ "$backend" = v2_shadow ] && [ -d "$LEGACY_RUN_DIR" ]; then
+	if [ "$backend" = v2_shadow ] && legacy_runtime_evidence_exists; then
 		echo 'ProxyPool reload blocked: conflicting legacy runtime evidence exists' >&2
 		discard_desired_snapshot
 		return 1

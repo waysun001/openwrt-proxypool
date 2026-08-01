@@ -1,0 +1,343 @@
+#!/bin/sh /etc/rc.common
+
+START=18
+STOP=89
+USE_PROCD=1
+
+GUARD_RESYNC="${PROXYPOOL_GUARD_RESYNC:-/usr/lib/proxypool/guard-resync.sh}"
+LAN_ISOLATION="${PROXYPOOL_LAN_ISOLATION:-/usr/lib/proxypool/lan-isolation.sh}"
+LAN_ISOLATION_WORKER="${PROXYPOOL_LAN_ISOLATION_WORKER:-/usr/lib/proxypool/lan-isolation-worker.sh}"
+TRANSACTION_HELPER="${PROXYPOOL_TRANSACTION_HELPER:-/usr/lib/proxypool/proxypool-firewall-transaction}"
+FW4_CHECK="${PROXYPOOL_FW4_CHECK:-/usr/lib/proxypool/proxypool-fw4-check-staged}"
+CONFIG_DIR="${PROXYPOOL_CONFIG_DIR:-/etc/config}"
+FW4_STATE="${PROXYPOOL_FW4_STATE:-/var/run/fw4.state}"
+FW4_LOCK="${PROXYPOOL_FW4_LOCK:-/var/run/fw4.lock}"
+FW4_MODE_PROBE="${PROXYPOOL_FW4_MODE_PROBE:-}"
+PENDING_DELTA_PROBE="${PROXYPOOL_PENDING_DELTA_PROBE:-}"
+NFTABLES_USER_DIR="${PROXYPOOL_NFTABLES_USER_DIR:-/etc/nftables.d}"
+UCI="${PROXYPOOL_UCI:-/sbin/uci}"
+NFT="${PROXYPOOL_NFT:-/usr/sbin/nft}"
+FLOCK="${PROXYPOOL_FLOCK:-flock}"
+SYNC="${PROXYPOOL_SYNC:-sync}"
+LS_PROG="${PROXYPOOL_LS_PROG:-/bin/ls}"
+QUARANTINE_HOLD="${PROXYPOOL_QUARANTINE_HOLD:-}"
+QUARANTINE_VALUE=proxypool-fw4-quarantine-v1
+
+validate_guard_environment() {
+	for guarded_path in "$CONFIG_DIR" "$FW4_STATE" "$FW4_LOCK" "$NFTABLES_USER_DIR"; do
+		case "$guarded_path" in
+			/*) : ;;
+			*) echo "ProxyPool guardian: unsafe relative path: $guarded_path" >&2; return 1 ;;
+		esac
+		[ "$guarded_path" != / ] || {
+			echo 'ProxyPool guardian: refusing filesystem-root path' >&2
+			return 1
+		}
+	done
+	[ "$(id -u)" -eq 0 ] || {
+		echo 'ProxyPool guardian: must run as root' >&2
+		return 1
+	}
+}
+
+reset_guardian() {
+	validate_guard_environment || return 1
+	[ -x "$GUARD_RESYNC" ] || {
+		echo "ProxyPool guardian reset helper is not executable: $GUARD_RESYNC" >&2
+		return 1
+	}
+	"$GUARD_RESYNC" reset-empty
+}
+
+reconcile_lan_isolation() {
+	mode=$1
+	[ -x "$LAN_ISOLATION" ] || {
+		echo "ProxyPool LAN isolation helper is not executable: $LAN_ISOLATION" >&2
+		return 1
+	}
+	"$LAN_ISOLATION" "$mode"
+}
+
+probe_cold_mode() {
+	if [ -n "$FW4_MODE_PROBE" ]; then
+		[ -x "$FW4_MODE_PROBE" ] || return 2
+		"$FW4_MODE_PROBE" cold
+		return
+	fi
+	[ ! -e "$FW4_STATE" ] && [ ! -L "$FW4_STATE" ] || return 1
+	[ -x "$NFT" ] || return 2
+	tables=$("$NFT" list tables 2>/dev/null) || return 2
+	if printf '%s\n' "$tables" |
+		grep -Eq '^[[:space:]]*table[[:space:]]+inet[[:space:]]+fw4[[:space:]]*$'; then
+		return 1
+	fi
+	return 0
+}
+
+prepare_quarantine() {
+	QUARANTINE_TEMP="$FW4_STATE.proxypool-quarantine.$$"
+	[ ! -e "$QUARANTINE_TEMP" ] && [ ! -L "$QUARANTINE_TEMP" ] || return 1
+	printf '%s\n' "$QUARANTINE_VALUE" >"$QUARANTINE_TEMP" || return 1
+	chmod 600 "$QUARANTINE_TEMP" || {
+		rm -f "$QUARANTINE_TEMP"
+		QUARANTINE_TEMP=
+		return 1
+	}
+	"$SYNC" || {
+		rm -f "$QUARANTINE_TEMP"
+		QUARANTINE_TEMP=
+		return 1
+	}
+	return 0
+}
+
+write_quarantine() {
+	[ ! -e "$FW4_STATE" ] && [ ! -L "$FW4_STATE" ] || return 1
+	prepare_quarantine || return 1
+	mv "$QUARANTINE_TEMP" "$FW4_STATE" || {
+		rm -f "$QUARANTINE_TEMP"
+		QUARANTINE_TEMP=
+		return 1
+	}
+	QUARANTINE_TEMP=
+	"$SYNC"
+}
+
+hold_fw4_inhibited() {
+	# rcS does not stop later init scripts merely because S18 returned failure.
+	# If a regular fw4.state blocker cannot be established, retain the official
+	# fw4 lock and do not return into S19.  This is an availability sacrifice by
+	# design: an unprovable boot must never start the local-WAN firewall.
+	echo 'ProxyPool guardian: cannot establish the S19 quarantine; fw4 remains locked' >&2
+	if [ -n "$QUARANTINE_HOLD" ]; then
+		[ -x "$QUARANTINE_HOLD" ] || return 1
+		"$QUARANTINE_HOLD"
+		return 1
+	fi
+	trap '' HUP INT TERM
+	while :; do
+		sleep 3600
+	done
+}
+
+hold_lan_boot_inhibited() {
+	# rcS continues with S19/S20 even when an init script returns non-zero.  A
+	# failed cold wireless/LAN proof therefore cannot return: netifd could read
+	# a pending UCI delta or restart the AP that was only stopped in RAM.
+	echo 'ProxyPool guardian: wireless/LAN cold proof failed; later boot stages remain blocked' >&2
+	if [ -n "$QUARANTINE_HOLD" ]; then
+		[ -x "$QUARANTINE_HOLD" ] || return 1
+		"$QUARANTINE_HOLD"
+		return 1
+	fi
+	trap '' HUP INT TERM
+	while :; do
+		sleep 3600
+	done
+}
+
+ensure_s19_inhibitor() {
+	# Pinned OpenWrt 23.05.3 /sbin/fw4 inhibits start only when `-f` succeeds.
+	# A FIFO, socket, device, broken symlink, or regular-target symlink therefore
+	# must be atomically replaced with our fully prepared regular sentinel.  A
+	# real directory or directory-target symlink has no proven BusyBox exact-path
+	# replacement, so it is never moved: the caller retains fw4's lock
+	# indefinitely instead of opening a crash gap.
+	[ -f "$FW4_STATE" ] && [ ! -L "$FW4_STATE" ] && return 0
+	if [ ! -e "$FW4_STATE" ] && [ ! -L "$FW4_STATE" ]; then
+		write_quarantine
+		return
+	fi
+	# BusyBox mv follows a directory-target symlink during its destination
+	# classification, so neither that case nor a real directory has a proven
+	# exact-path atomic replacement here.  Preserve it and retain the lock.
+	if [ -d "$FW4_STATE" ]; then
+		return 1
+	fi
+	prepare_quarantine || return 1
+	# Same-filesystem rename replaces every non-directory object atomically;
+	# SIGKILL/power loss observes either the old object or the regular blocker,
+	# never an absent exact path introduced by us.
+	mv -fT "$QUARANTINE_TEMP" "$FW4_STATE" || {
+		rm -f "$QUARANTINE_TEMP"
+		QUARANTINE_TEMP=
+		return 1
+	}
+	QUARANTINE_TEMP=
+	"$SYNC" || [ -f "$FW4_STATE" ]
+	[ -f "$FW4_STATE" ] && [ ! -L "$FW4_STATE" ]
+}
+
+establish_quarantine() {
+	state_was_absent=0
+	command -v "$FLOCK" >/dev/null 2>&1 || return 1
+	command -v "$SYNC" >/dev/null 2>&1 || return 1
+	exec 1000>"$FW4_LOCK" || return 1
+	"$FLOCK" -x 1000 || {
+		exec 1000>&-
+		return 1
+	}
+	if [ ! -e "$FW4_STATE" ] && [ ! -L "$FW4_STATE" ]; then
+		state_was_absent=1
+	fi
+	if [ "$state_was_absent" -eq 1 ] && probe_cold_mode; then
+		mode_proven=1
+	else
+		mode_proven=0
+	fi
+	# On an unknown/mismatched probe, an emergency sentinel still blocks
+	# independent S19.  It is never removed because mode_proven remains 0.
+	ensure_s19_inhibitor || hold_fw4_inhibited
+	exec 1000>&-
+	[ "$mode_proven" -eq 1 ]
+}
+
+probe_pending_deltas() {
+	if [ -n "$PENDING_DELTA_PROBE" ]; then
+		[ -x "$PENDING_DELTA_PROBE" ] || return 2
+		"$PENDING_DELTA_PROBE"
+		return
+	fi
+	[ -x "$UCI" ] || return 2
+	for package in firewall dhcp network wireless; do
+		changes=$("$UCI" -q changes "$package" 2>/dev/null) || return 2
+		[ -z "$changes" ] || return 1
+	done
+	return 0
+}
+
+empty_user_nft_dir() {
+	case "$NFTABLES_USER_DIR" in
+		/*) : ;;
+		*) return 1 ;;
+	esac
+	if [ -e "$NFTABLES_USER_DIR" ] || [ -L "$NFTABLES_USER_DIR" ]; then
+		[ -d "$NFTABLES_USER_DIR" ] && [ ! -L "$NFTABLES_USER_DIR" ] || return 1
+	fi
+	for user_nft in "$NFTABLES_USER_DIR"/*.nft; do
+		[ ! -e "$user_nft" ] && [ ! -L "$user_nft" ] || return 1
+	done
+}
+
+quarantine_metadata_valid() {
+	[ -f "$FW4_STATE" ] && [ ! -L "$FW4_STATE" ] || return 1
+	metadata=$("$LS_PROG" -nd "$FW4_STATE" 2>/dev/null) || return 1
+	case "$metadata" in
+		""|*'
+'*) return 1 ;;
+	esac
+	IFS=' 	' read -r permissions links owner group remainder <<EOF
+$metadata
+EOF
+	[ "$permissions" = '-rw-------' ] && [ "$links" = 1 ] &&
+		[ "$owner" = 0 ] && [ "$group" = 0 ] || return 1
+	[ "$(wc -c <"$FW4_STATE" 2>/dev/null)" -eq 28 ] || return 1
+	IFS= read -r value <"$FW4_STATE" || return 1
+	[ "$value" = "$QUARANTINE_VALUE" ]
+}
+
+release_quarantine() {
+	command -v "$FLOCK" >/dev/null 2>&1 || return 1
+	command -v "$SYNC" >/dev/null 2>&1 || return 1
+	[ -x "$LS_PROG" ] || return 1
+	exec 1000>"$FW4_LOCK" || return 1
+	"$FLOCK" -x 1000 || {
+		exec 1000>&-
+		return 1
+	}
+	quarantine_metadata_valid || {
+		exec 1000>&-
+		return 1
+	}
+	# State is intentionally the sentinel here, so prove table absence directly.
+	tables=$("$NFT" list tables 2>/dev/null) || {
+		exec 1000>&-
+		return 1
+	}
+	if printf '%s\n' "$tables" |
+		grep -Eq '^[[:space:]]*table[[:space:]]+inet[[:space:]]+fw4[[:space:]]*$'; then
+		exec 1000>&-
+		return 1
+	fi
+	rm -f "$FW4_STATE" || {
+		exec 1000>&-
+		return 1
+	}
+	"$SYNC" || {
+		exec 1000>&-
+		return 1
+	}
+	exec 1000>&-
+}
+
+boot() {
+	validate_guard_environment || exit 1
+	quarantine_ready=1
+	establish_quarantine || quarantine_ready=0
+
+	# Even a failed/unknown cold-mode proof must install the independent empty
+	# guardian.  The existing state or emergency sentinel keeps S19 inhibited.
+	reset_guardian || exit 1
+	if ! reconcile_lan_isolation boot; then
+		hold_lan_boot_inhibited
+		exit 1
+	fi
+	# S18 cannot wait for netifd (S20).  Publish work and register one procd
+	# child before allowing S19; the marker blocks readiness until that child
+	# proves the complete bridge topology after it appears.
+	start || exit 1
+	[ "$quarantine_ready" -eq 1 ] || exit 1
+
+	[ -x "$TRANSACTION_HELPER" ] || exit 1
+	"$TRANSACTION_HELPER" recover-only || exit 1
+	if ! probe_pending_deltas; then
+		hold_lan_boot_inhibited
+		exit 1
+	fi
+	empty_user_nft_dir || exit 1
+	[ -x "$FW4_CHECK" ] || exit 1
+	"$FW4_CHECK" "$CONFIG_DIR" || exit 1
+	release_quarantine || exit 1
+}
+
+start_service() {
+	# default_postinst may invoke `start` during a live opkg operation.  This
+	# path only publishes fail-closed LAN evidence and registers the serialized
+	# worker; only boot() may mutate the S19 quarantine or recover a firewall WAL.
+	reconcile_lan_isolation request || return 1
+	[ -f "$LAN_ISOLATION_WORKER" ] && [ ! -L "$LAN_ISOLATION_WORKER" ] &&
+		[ -x "$LAN_ISOLATION_WORKER" ] || {
+		echo "ProxyPool LAN isolation worker is missing or unsafe: $LAN_ISOLATION_WORKER" >&2
+		return 1
+	}
+	procd_open_instance lan-reconciler
+	procd_set_param command "$LAN_ISOLATION_WORKER"
+	procd_set_param respawn 3600 5 0
+	procd_set_param term_timeout 5
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	# procd hashes `file` inputs.  A live package upgrade therefore replaces an
+	# already-running old shell with the worker/helper bytes just installed.
+	procd_set_param file "$LAN_ISOLATION_WORKER" "$LAN_ISOLATION"
+	procd_close_instance
+}
+
+reload_service() {
+	reset_guardian || exit 1
+	# Wireless persistence keeps its existing cold-reboot gate.  Bridge state is
+	# only mutated by the singleton worker, never by a concurrent reload thread.
+	reconcile_lan_isolation configure || exit 1
+	reconcile_lan_isolation request || exit 1
+}
+
+stop_service() {
+	# Stopping ProxyPool revokes every tuple but leaves the static fail-closed
+	# guardian installed.  Publish pending LAN state before rc.common kills the
+	# worker so no lifecycle check can claim L2 convergence while it is absent.
+	reset_guardian || exit 1
+	reconcile_lan_isolation request || exit 1
+}
+
+service_triggers() {
+	procd_add_reload_trigger firewall network wireless
+}

@@ -6,7 +6,14 @@
 LOG_FILE="/var/log/proxypool.log"
 RUN_DIR="/var/run/proxypool"
 WD_DIR="$RUN_DIR/watchdog"
+LEGACY_GATE="${PROXYPOOL_LEGACY_GATE:-/usr/lib/proxypool/legacy-gate.sh}"
 COOLDOWN=60  # 每个客户端最少间隔60秒才能再次重启（配合 cron 每分钟运行）
+
+legacy_quarantine() {
+    /bin/sh "$LEGACY_GATE" mutation "$1" >/dev/null 2>&1 || true
+    printf '%s\n' 'legacy_runtime_quarantined'
+    return 125
+}
 
 log_info() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [watchdog] $*" >> "$LOG_FILE"
@@ -191,7 +198,8 @@ run() {
 
 case "$1" in
     run)
-        run
+        legacy_quarantine "watchdog:run"
+        exit $?
         ;;
     *)
         echo "Usage: $0 run"

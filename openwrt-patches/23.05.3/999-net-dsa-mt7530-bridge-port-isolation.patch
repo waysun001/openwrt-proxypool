@@ -1,0 +1,209 @@
+From: ProxyPool maintainers <noreply@proxypool.local>
+Date: Sat, 1 Aug 2026 00:00:01 +0800
+Subject: [PATCH] net: dsa: mt7530: make MT7531 client bridging fail closed
+
+Adapt upstream commits c25c961fc7f36682f0a530150f1b7453ebc344cd and
+3d49ee2127c26fd2c77944fd2e3168c057f99439 to the final MT7530 API produced
+by the OpenWrt 23.05.3 Linux 5.15.150 patch stack.
+
+Remove a pair of ports from the MT7530/MT7531 port matrix when both ports
+have BR_ISOLATED set. The CPU port remains in every user-port matrix, so
+isolated clients can still reach the router while peer-to-peer forwarding is
+blocked in the switch silicon.
+
+ProxyPool additionally keeps MT7531 bridge forwarding on the CPU path. The
+Linux bridge creates a port before userspace can set BR_ISOLATED, so an
+offloaded bridge otherwise has an unavoidable enslave-to-flag window. Refuse
+MT7531 bridge offload by default and expose a read-only module parameter as
+runtime proof. The GL-MT6000 has a separate WAN MAC; its five MT7531 user
+ports are LAN-only, and legitimate client traffic already requires the CPU.
+
+--- a/drivers/net/dsa/mt7530.c
++++ b/drivers/net/dsa/mt7530.c
+@@ -23,6 +23,12 @@
+ 
+ #include "mt7530.h"
+ 
++static bool proxypool_mt7531_cpu_only_bridge = true;
++module_param_named(proxypool_cpu_only_bridge,
++		   proxypool_mt7531_cpu_only_bridge, bool, 0444);
++MODULE_PARM_DESC(proxypool_cpu_only_bridge,
++		 "Keep MT7531 bridge forwarding on the fail-closed CPU path");
++
+ static struct mt753x_pcs *pcs_to_mt753x_pcs(struct phylink_pcs *pcs)
+ {
+ 	return container_of(pcs, struct mt753x_pcs, pcs);
+@@ -1159,13 +1165,53 @@ mt7530_stp_state_set(struct dsa_switch *
+ 		   FID_PST(FID_BRIDGED, stp_state));
+ }
+ 
++static void mt7530_update_port_member(struct mt7530_priv *priv, int port,
++				      const struct net_device *bridge,
++				      bool join)
++	__must_hold(&priv->reg_mutex)
++{
++	struct dsa_port *dp = dsa_to_port(priv->ds, port), *other_dp;
++	struct mt7530_port *p = &priv->ports[port], *other_p;
++	struct dsa_port *cpu_dp = dp->cpu_dp;
++	u32 port_bitmap = BIT(cpu_dp->index);
++
++	dsa_switch_for_each_user_port(other_dp, priv->ds) {
++		int other_port = other_dp->index;
++		bool isolated;
++
++		if (dp == other_dp)
++			continue;
++
++		if (other_dp->bridge_dev != bridge)
++			continue;
++
++		other_p = &priv->ports[other_port];
++		isolated = p->isolated && other_p->isolated;
++
++		if (join && !isolated) {
++			other_p->pm |= PCR_MATRIX(BIT(port));
++			port_bitmap |= BIT(other_port);
++		} else {
++			other_p->pm &= ~PCR_MATRIX(BIT(port));
++		}
++
++		if (other_p->enable)
++			mt7530_rmw(priv, MT7530_PCR_P(other_port),
++				   PCR_MATRIX_MASK, other_p->pm);
++	}
++
++	p->pm = PCR_MATRIX(port_bitmap);
++	if (p->enable)
++		mt7530_rmw(priv, MT7530_PCR_P(port), PCR_MATRIX_MASK, p->pm);
++}
++
+ static int
+ mt7530_port_pre_bridge_flags(struct dsa_switch *ds, int port,
+ 			     struct switchdev_brport_flags flags,
+ 			     struct netlink_ext_ack *extack)
+ {
+ 	if (flags.mask & ~(BR_LEARNING | BR_FLOOD | BR_MCAST_FLOOD |
+-			   BR_BCAST_FLOOD))
++			   BR_BCAST_FLOOD | BR_ISOLATED))
+ 		return -EINVAL;
+ 
+ 	return 0;
+@@ -1194,6 +1240,16 @@ mt7530_port_bridge_flags(struct dsa_swit
+ 		mt7530_rmw(priv, MT7530_MFC, BC_FFP(BIT(port)),
+ 			   flags.val & BR_BCAST_FLOOD ? BC_FFP(BIT(port)) : 0);
+ 
++	if (flags.mask & BR_ISOLATED) {
++		struct dsa_port *dp = dsa_to_port(ds, port);
++
++		priv->ports[port].isolated = !!(flags.val & BR_ISOLATED);
++
++		mutex_lock(&priv->reg_mutex);
++		mt7530_update_port_member(priv, port, dp->bridge_dev, true);
++		mutex_unlock(&priv->reg_mutex);
++	}
++
+ 	return 0;
+ }
+ 
+@@ -1201,39 +1257,14 @@ static int
+ mt7530_port_bridge_join(struct dsa_switch *ds, int port,
+ 			struct net_device *bridge)
+ {
+-	struct dsa_port *dp = dsa_to_port(ds, port), *other_dp;
+-	struct dsa_port *cpu_dp = dp->cpu_dp;
+-	u32 port_bitmap = BIT(cpu_dp->index);
+ 	struct mt7530_priv *priv = ds->priv;
++
++	if (priv->id == ID_MT7531 && proxypool_mt7531_cpu_only_bridge)
++		return -EOPNOTSUPP;
+ 
+ 	mutex_lock(&priv->reg_mutex);
+ 
+-	dsa_switch_for_each_user_port(other_dp, ds) {
+-		int other_port = other_dp->index;
+-
+-		if (dp == other_dp)
+-			continue;
+-
+-		/* Add this port to the port matrix of the other ports in the
+-		 * same bridge. If the port is disabled, port matrix is kept
+-		 * and not being setup until the port becomes enabled.
+-		 */
+-		if (other_dp->bridge_dev != bridge)
+-			continue;
+-
+-		if (priv->ports[other_port].enable)
+-			mt7530_set(priv, MT7530_PCR_P(other_port),
+-				   PCR_MATRIX(BIT(port)));
+-		priv->ports[other_port].pm |= PCR_MATRIX(BIT(port));
+-
+-		port_bitmap |= BIT(other_port);
+-	}
+-
+-	/* Add the all other ports to this port matrix. */
+-	if (priv->ports[port].enable)
+-		mt7530_rmw(priv, MT7530_PCR_P(port),
+-			   PCR_MATRIX_MASK, PCR_MATRIX(port_bitmap));
+-	priv->ports[port].pm |= PCR_MATRIX(port_bitmap);
++	mt7530_update_port_member(priv, port, bridge, true);
+ 
+ 	/* Set to fallback mode for independent VLAN learning */
+ 	mt7530_rmw(priv, MT7530_PCR_P(port), PCR_PORT_VLAN_MASK,
+@@ -1334,38 +1365,11 @@ static void
+ mt7530_port_bridge_leave(struct dsa_switch *ds, int port,
+ 			 struct net_device *bridge)
+ {
+-	struct dsa_port *dp = dsa_to_port(ds, port), *other_dp;
+-	struct dsa_port *cpu_dp = dp->cpu_dp;
+ 	struct mt7530_priv *priv = ds->priv;
+ 
+ 	mutex_lock(&priv->reg_mutex);
+ 
+-	dsa_switch_for_each_user_port(other_dp, ds) {
+-		int other_port = other_dp->index;
+-
+-		if (dp == other_dp)
+-			continue;
+-
+-		/* Remove this port from the port matrix of the other ports
+-		 * in the same bridge. If the port is disabled, port matrix
+-		 * is kept and not being setup until the port becomes enabled.
+-		 */
+-		if (other_dp->bridge_dev != bridge)
+-			continue;
+-
+-		if (priv->ports[other_port].enable)
+-			mt7530_clear(priv, MT7530_PCR_P(other_port),
+-				     PCR_MATRIX(BIT(port)));
+-		priv->ports[other_port].pm &= ~PCR_MATRIX(BIT(port));
+-	}
+-
+-	/* Set the cpu port to be the only one in the port matrix of
+-	 * this port.
+-	 */
+-	if (priv->ports[port].enable)
+-		mt7530_rmw(priv, MT7530_PCR_P(port), PCR_MATRIX_MASK,
+-			   PCR_MATRIX(BIT(cpu_dp->index)));
+-	priv->ports[port].pm = PCR_MATRIX(BIT(cpu_dp->index));
++	mt7530_update_port_member(priv, port, bridge, false);
+ 
+ 	/* When a port is removed from the bridge, the port would be set up
+ 	 * back to the default as is at initial boot which is a VLAN-unaware
+--- a/drivers/net/dsa/mt7530.h
++++ b/drivers/net/dsa/mt7530.h
+@@ -661,6 +661,7 @@ struct mt7530_fdb {
+ /* struct mt7530_port -	This is the main data structure for holding the state
+  *			of the port.
+  * @enable:	The status used for show port is enabled or not.
++ * @isolated:	The status used to show the port is isolated or not.
+  * @pm:		The matrix used to show all connections with the port.
+  * @pvid:	The VLAN specified is to be considered a PVID at ingress.  Any
+  *		untagged frames will be assigned to the related VLAN.
+@@ -668,6 +669,7 @@ struct mt7530_fdb {
+  */
+ struct mt7530_port {
+ 	bool enable;
++	bool isolated;
+ 	u32 pm;
+ 	u16 pvid;
+ 	struct phylink_pcs *sgmii_pcs;

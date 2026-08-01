@@ -1,31 +1,61 @@
 #!/bin/sh
-# 首次启动时自动开启无线并设置 SSID
-# GL-MT6000: radio0 = 2.4GHz, radio1 = 5GHz
+set -eu
 
-# 如果 wireless 配置尚未生成，主动触发
-[ -f /etc/config/wireless ] || wifi config 2>/dev/null
+# Generate the target's stock wireless configuration if it is absent, but do
+# not enable a radio or create an unauthenticated network.  The administrator
+# may configure credentials later; every LAN AP is pre-armed with both hostapd
+# station isolation and netifd bridge-port isolation before it can be admitted.
 
-# 仍不存在则返回失败，OpenWrt 会保留脚本下次启动重试
-[ -f /etc/config/wireless ] || exit 1
+WIRELESS_CONFIG="${PROXYPOOL_WIRELESS_CONFIG:-/etc/config/wireless}"
+WIFI="${PROXYPOOL_WIFI:-/sbin/wifi}"
+LAN_ISOLATION="${PROXYPOOL_LAN_ISOLATION:-/usr/lib/proxypool/lan-isolation.sh}"
+STAT="${PROXYPOOL_STAT:-/bin/stat}"
+CHMOD="${PROXYPOOL_CHMOD:-/bin/chmod}"
 
-# 检查是否已配置过（避免重复执行覆盖用户修改）
-CURRENT_SSID=$(uci -q get wireless.default_radio0.ssid)
-[ "$CURRENT_SSID" = "SmartLink_2.4G" ] && exit 0
+fail() {
+	echo "ProxyPool wireless default: $*" >&2
+	exit 1
+}
 
-# 启用 2.4GHz 和 5GHz 无线
-uci set wireless.radio0.disabled='0'
-uci set wireless.default_radio0.ssid='SmartLink_2.4G'
-uci set wireless.default_radio0.encryption='none'
-uci -q delete wireless.default_radio0.key
+case "$WIRELESS_CONFIG" in
+	/*) : ;;
+	*) fail "unsafe relative wireless config path: $WIRELESS_CONFIG" ;;
+esac
+[ "$WIRELESS_CONFIG" != / ] || fail 'refusing filesystem-root wireless config path'
 
-uci set wireless.radio1.disabled='0'
-uci set wireless.default_radio1.ssid='SmartLink_5G'
-uci set wireless.default_radio1.encryption='none'
-uci -q delete wireless.default_radio1.key
+if [ ! -e "$WIRELESS_CONFIG" ] && [ ! -L "$WIRELESS_CONFIG" ]; then
+	[ -x "$WIFI" ] || fail "wifi is not executable: $WIFI"
+	"$WIFI" config 2>/dev/null || fail 'cannot generate the stock wireless config'
+fi
 
-uci commit wireless
+[ -f "$WIRELESS_CONFIG" ] && [ ! -L "$WIRELESS_CONFIG" ] ||
+	fail 'wireless config is missing, linked, or not a regular file'
+[ -x "$STAT" ] || fail "stat is not executable: $STAT"
+metadata=$("$STAT" -c '%a %u %h' "$WIRELESS_CONFIG" 2>/dev/null) ||
+	fail 'cannot inspect wireless config ownership'
+case "$metadata" in
+	""|*'
+'*) fail 'malformed wireless config ownership metadata' ;;
+esac
+mode=${metadata%% *}
+rest=${metadata#* }
+owner=${rest%% *}
+links=${rest#* }
+[ "$owner" = 0 ] || fail 'wireless config is not root-owned'
+[ "$links" = 1 ] || fail 'wireless config has an unsafe hard-link alias'
 
-# 重启无线
-wifi reload 2>/dev/null || wifi up 2>/dev/null
+# `wifi config` uses touch under OpenWrt 23.05, so a normal first-boot umask
+# creates 0644.  Credentials must be private before the isolation helper ever
+# copies the file into its transaction stage.  Re-apply this on upgrades too.
+[ -x "$CHMOD" ] || fail "chmod is not executable: $CHMOD"
+"$CHMOD" 600 "$WIRELESS_CONFIG" || fail 'cannot make wireless config root-only'
+metadata=$("$STAT" -c '%a %u %h' "$WIRELESS_CONFIG" 2>/dev/null) ||
+	fail 'cannot verify wireless config permissions'
+[ "$metadata" = '600 0 1' ] || fail 'wireless config did not converge to private single-link root ownership'
 
-exit 0
+[ -x "$LAN_ISOLATION" ] || fail "LAN isolation helper is not executable: $LAN_ISOLATION"
+
+# /etc/uci-defaults runs at S10, before netifd registers network.wireless.
+# `boot` permits only that cold-start object-absent proof; a runtime configure
+# must always obtain the complete radio status from netifd.
+"$LAN_ISOLATION" boot

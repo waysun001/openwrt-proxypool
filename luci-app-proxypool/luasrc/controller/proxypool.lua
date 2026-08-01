@@ -1,6 +1,52 @@
 -- 智联盒子 LuCI Controller
 module("luci.controller.proxypool", package.seeall)
 
+local LEGACY_GATE = "/usr/lib/proxypool/legacy-gate.sh"
+local LEGACY_QUARANTINE_REASON = "legacy_runtime_quarantined"
+
+-- Explicit security boundary: a newly added write action is not admitted by
+-- falling through to a permissive default.
+local LEGACY_MUTATION_ACTIONS = {
+    ["save_client"] = true,
+    ["delete_client"] = true,
+    ["toggle_client"] = true,
+    ["start_client"] = true,
+    ["stop_client"] = true,
+    ["save_remark"] = true,
+    ["restart_client"] = true,
+    ["set_dhcp_lease"] = true,
+    ["reload"] = true,
+    ["probe_all"] = true,
+    ["clear_log"] = true,
+    ["batch_import"] = true,
+    ["batch_action"] = true
+}
+
+local function legacy_gate(scope)
+    local sys = require "luci.sys"
+    local safe_scope = tostring(scope or "unspecified"):gsub("[^%w_%.:%-]", "_")
+    -- The controller denies independently of helper status, so missing or
+    -- damaged package payload cannot turn quarantine into admission.
+    sys.call("/bin/sh " .. LEGACY_GATE .. " mutation " .. safe_scope .. " >/dev/null 2>&1")
+    return false, LEGACY_QUARANTINE_REASON
+end
+
+local function reject_legacy_api(action)
+    local http = require "luci.http"
+    legacy_gate("luci:api:" .. tostring(action or "unspecified"))
+    http.status(409, "Conflict")
+    http.prepare_content("application/json")
+    http.write('{"error":"' .. LEGACY_QUARANTINE_REASON .. '"}')
+end
+
+local function reject_legacy_page(scope)
+    local http = require "luci.http"
+    legacy_gate("luci:" .. tostring(scope or "unspecified"))
+    http.status(409, "Conflict")
+    http.prepare_content("text/plain; charset=utf-8")
+    http.write(LEGACY_QUARANTINE_REASON)
+end
+
 function index()
     -- 面板入口改为 call 处理：过期时渲染 locked 页面（一直"正在加载中"）
     entry({"admin", "services", "proxypool"}, call("main_page"), _("智联盒子"), 1).dependent = false
@@ -54,6 +100,11 @@ end
 
 -- 面板入口：未过期渲染正常面板，过期渲染锁定页（一直加载中）
 function main_page()
+    local http = require "luci.http"
+    if http.formvalue("save") then
+        return reject_legacy_page("main_page:save")
+    end
+
     local tmpl = require "luci.template"
     if lease_expired() then
         tmpl.render("proxypool/locked", {})
@@ -65,26 +116,11 @@ end
 -- 使用期限设置页（/sz）：显示当前状态，保存时重置起点并续期
 function sz_page()
     local http = require "luci.http"
-    local uci = require "luci.model.uci".cursor()
     local tmpl = require "luci.template"
 
     local msg_type, msg_text = nil, nil
     if http.formvalue("save") then
-        local raw = http.formvalue("days") or ""
-        local d = tonumber(raw)
-        if d == nil or d < 0 or d ~= math.floor(d) then
-            msg_type, msg_text = "error", "天数无效，请输入 ≥ 0 的整数"
-        else
-            uci:set("proxypool", "global", "lease_days", tostring(d))
-            uci:commit("proxypool")
-            -- 续期：累计清零（同时清空实时暂存，从现在重新计时）
-            os.execute("/usr/lib/proxypool/lease.sh reset >/dev/null 2>&1")
-            if d == 0 then
-                msg_type, msg_text = "ok", "已设置为永久解锁（不再到期）"
-            else
-                msg_type, msg_text = "ok", "已设置使用天数为 " .. d .. " 天，并从现在重新计时"
-            end
-        end
+        return reject_legacy_page("sz_page:save")
     end
 
     local expired, info = lease_info()
@@ -136,6 +172,7 @@ end
 
 local STATUS_RUN_DIR = "/var/run/proxypool"
 local ARRAY_MT = { __jsontype = "array" }
+local DNS_PATH_UNAVAILABLE = "dns_path_unavailable"
 
 -- 强制 table 序列化为 JSON array（即使为空也输出 [] 而非 {}）
 local function as_array(t)
@@ -215,6 +252,54 @@ local function _parse_neigh(output)
         end
     end
     return t
+end
+
+-- Phase 1 has no safe hostname bootstrap resolver.  Only a canonical IPv4
+-- literal avoids DNS; leading-zero and alternate textual forms are rejected
+-- so the status API never guesses how a downstream resolver will interpret it.
+local function _strict_ipv4_literal(value)
+    if type(value) ~= "string" or not value:match("^%d+%.%d+%.%d+%.%d+$") then
+        return false
+    end
+
+    local count = 0
+    for part in value:gmatch("[^.]+") do
+        count = count + 1
+        if (part ~= "0" and part:match("^0")) or #part > 3 then
+            return false
+        end
+        local octet = tonumber(part)
+        if not octet or octet < 0 or octet > 255 then
+            return false
+        end
+    end
+    return count == 4
+end
+
+local function _endpoint_resolution_status(server)
+    if not server or server == "" then
+        return "missing_endpoint"
+    elseif _strict_ipv4_literal(server) then
+        return "literal_ipv4"
+    end
+    return DNS_PATH_UNAVAILABLE
+end
+
+-- Resolve by section type and interface ownership, never by a conventional
+-- UCI section name.  Renamed sections are valid; missing or duplicate LAN
+-- DHCP sections are ambiguous and must not be guessed.
+local function _find_unique_lan_dhcp_section(uci_c)
+    local match_count = 0
+    local match_name = nil
+    uci_c:foreach("dhcp", "dhcp", function(section)
+        if section.interface == "lan" then
+            match_count = match_count + 1
+            match_name = section[".name"]
+        end
+    end)
+    if match_count ~= 1 then return nil end
+    if type(match_name) ~= "string" or match_name == "" then return nil end
+    return match_name
 end
 
 -- 生成完整状态 JSON
@@ -311,9 +396,6 @@ local function generate_status()
             local result = _read_cmd("/usr/lib/proxypool/iplocation.sh " .. safe .. " 2>/dev/null")
             result = result and result:match("^%s*(.-)%s*$") or ""
             if result ~= "" then
-                os.execute("mkdir -p '" .. STATUS_RUN_DIR .. "/location_cache' 2>/dev/null")
-                local wf = io.open(cache_file, "w")
-                if wf then wf:write(result); wf:close() end
                 loc_memo[server] = result
                 return result
             end
@@ -430,16 +512,16 @@ local function generate_status()
                 end
             end
             if pending_expired then
-                os.remove(pending_file)
+                pending_op = nil
             elseif pending_op == "stopping" then
                 if status == "disconnected" or status == "disabled" then
-                    os.remove(pending_file)  -- 操作已完成
+                    pending_op = nil
                 else
                     status = "disconnecting"
                 end
             elseif pending_op == "starting" then
                 if status == "connected" then
-                    os.remove(pending_file)  -- 操作已完成
+                    pending_op = nil
                 else
                     status = "connecting"
                 end
@@ -472,6 +554,7 @@ local function generate_status()
             name = s.name or cid,
             type = ctype,
             server = server,
+            endpoint_resolution = _endpoint_resolution_status(server),
             port = s.port or "",
             username = s.username or "",
             password = s.password or "",
@@ -522,6 +605,8 @@ local function generate_status()
         timestamp = os.time(),
         datetime = os.date("%Y-%m-%d %H:%M:%S"),
         global_enabled = global_enabled,
+        dns_path_status = DNS_PATH_UNAVAILABLE,
+        internet_ready = false,
         summary = {
             total = total,
             enabled = enabled_count,
@@ -542,11 +627,20 @@ function api_handler()
 
     local action = http.formvalue("action") or ""
 
+    if LEGACY_MUTATION_ACTIONS[action] then
+        return reject_legacy_api(action)
+    end
+
+    local function reject_dns_unavailable()
+        http.prepare_content("application/json")
+        http.write('{"success":false,"dns_path_status":"dns_path_unavailable","internet_ready":false,"error":"dns_path_unavailable"}')
+    end
+
     if action == "status" then
         -- 使用期限到期：不返回任何客户端数据，前端保持"正在加载中"
         if lease_expired() then
             http.prepare_content("application/json")
-            http.write('{"locked":true}')
+            http.write('{"locked":true,"dns_path_status":"dns_path_unavailable","internet_ready":false}')
             return
         end
         http.prepare_content("application/json")
@@ -555,13 +649,7 @@ function api_handler()
             http.write(result)
         else
             -- generate_status 出错：返回兜底 JSON + 记录日志
-            local err_msg = not ok and tostring(result) or "generate_status returned nil"
-            local log_f = io.open("/var/log/proxypool.log", "a")
-            if log_f then
-                log_f:write("[" .. os.date("%Y-%m-%d %H:%M:%S") .. "] Lua status error: " .. err_msg .. "\n")
-                log_f:close()
-            end
-            http.write('{"timestamp":0,"datetime":"","global_enabled":1,"summary":{"total":0,"enabled":0,"connected":0,"disconnected":0},"clients":[],"devices":[],"error":"Lua status generation failed"}')
+            http.write('{"timestamp":0,"datetime":"","global_enabled":1,"dns_path_status":"dns_path_unavailable","internet_ready":false,"summary":{"total":0,"enabled":0,"connected":0,"disconnected":0},"clients":[],"devices":[],"error":"Lua status generation failed"}')
         end
         -- probe_all 已从 status 端点移除：每次轮询都 fork 50+ 探测进程会导致 CGI worker 饱和
         -- 探测改为独立触发（见 probe_all action），前端按需调度
@@ -602,6 +690,9 @@ function api_handler()
         if client and data then
             local d = json.parse(data)
             if d then
+                if tostring(d.enabled or "0") == "1" then
+                    reject_dns_unavailable(); return
+                end
                 -- 去除连接字段首尾空格（防止复制粘贴带入空格导致连接失败）
                 local function trim(s)
                     if type(s) ~= "string" then return s end
@@ -682,6 +773,9 @@ function api_handler()
         local client = sanitize_client(http.formvalue("client"))
         local enabled = http.formvalue("enabled")
         if client and enabled then
+            if enabled == "1" then
+                reject_dns_unavailable(); return
+            end
             uci:set("proxypool", client, "enabled", enabled == "1" and "1" or "0")
             uci:commit("proxypool")
             -- 异步切换：立即返回，后台 start/stop（不阻塞请求）。
@@ -697,12 +791,7 @@ function api_handler()
     elseif action == "start_client" then
         local client = sanitize_client(http.formvalue("client"))
         if client then
-            -- 异步启动：立即返回，后台拨号（L2TP 拨通需数秒，不再阻塞请求）。
-            -- 写 starting 标记，status API 在拨通前返回 connecting 过渡态。
-            set_pending_op(client, "starting")
-            os.execute("setsid /usr/lib/proxypool/proxypool.sh start_client " .. client .. " >/dev/null 2>&1 &")
-            http.prepare_content("application/json")
-            http.write('{"success": true}')
+            reject_dns_unavailable(); return
         else
             http.prepare_content("application/json")
             http.write('{"error": "Invalid client ID"}')
@@ -742,39 +831,48 @@ function api_handler()
     elseif action == "restart_client" then
         local client = sanitize_client(http.formvalue("client"))
         if client then
-            -- 异步重启：立即返回，后台 stop + start（不阻塞请求）。
-            set_pending_op(client, "starting")
-            os.execute("setsid /usr/lib/proxypool/proxypool.sh restart_client " .. client .. " >/dev/null 2>&1 &")
-            http.prepare_content("application/json")
-            http.write('{"success": true}')
+            reject_dns_unavailable(); return
         else
             http.prepare_content("application/json")
             http.write('{"error": "Invalid client ID"}')
         end
 
     elseif action == "get_dhcp_lease" then
-        local leasetime = uci:get("dhcp", "lan", "leasetime") or "7d"
         http.prepare_content("application/json")
-        http.write(json.stringify({leasetime = leasetime}))
+        local dhcp_section = _find_unique_lan_dhcp_section(uci)
+        if not dhcp_section then
+            http.write('{"success":false,"dns_path_status":"dns_path_unavailable","internet_ready":false,"error":"DHCP LAN section missing or ambiguous"}')
+        else
+            local leasetime = uci:get("dhcp", dhcp_section, "leasetime") or "7d"
+            http.write(json.stringify({success = true, leasetime = leasetime}))
+        end
 
     elseif action == "set_dhcp_lease" then
         local leasetime = http.formvalue("leasetime") or "7d"
         -- 验证格式（允许数字+d 或 infinite）
+        http.prepare_content("application/json")
         if leasetime:match("^%d+d$") or leasetime == "infinite" then
-            uci:set("dhcp", "lan", "leasetime", leasetime)
-            uci:commit("dhcp")
-            sys.exec("/etc/init.d/dnsmasq restart >/dev/null 2>&1")
-            http.prepare_content("application/json")
-            http.write('{"success": true}')
+            local dhcp_section = _find_unique_lan_dhcp_section(uci)
+            if not dhcp_section then
+                http.write('{"success":false,"dns_path_status":"dns_path_unavailable","internet_ready":false,"error":"DHCP LAN section missing or ambiguous"}')
+            elseif not uci:set("dhcp", dhcp_section, "leasetime", leasetime) then
+                http.write('{"success":false,"dns_path_status":"dns_path_unavailable","internet_ready":false,"error":"DHCP lease update failed"}')
+            elseif not uci:commit("dhcp") then
+                uci:revert("dhcp")
+                http.write('{"success":false,"dns_path_status":"dns_path_unavailable","internet_ready":false,"error":"DHCP commit failed"}')
+            elseif sys.call("/usr/lib/proxypool/dns-manager.sh enforce-unavailable >/dev/null 2>&1") ~= 0 then
+                http.write('{"success":false,"dns_path_status":"dns_path_unavailable","internet_ready":false,"error":"DNS fail-closed verification failed"}')
+            else
+                -- success means the lease setting was applied and dnsmasq was
+                -- safely converged; Phase 1 Internet DNS remains unavailable.
+                http.write('{"success":true,"dns_path_status":"dns_path_unavailable","internet_ready":false}')
+            end
         else
-            http.prepare_content("application/json")
             http.write('{"error": "Invalid leasetime format"}')
         end
 
     elseif action == "reload" then
-        sys.exec("/usr/lib/proxypool/proxypool.sh reload 2>/dev/null")
-        http.prepare_content("application/json")
-        http.write('{"success": true}')
+        reject_dns_unavailable(); return
 
     elseif action == "probe_all" then
         -- 后台探测：setsid 创建新会话，脱离 uhttpd CGI 进程组（防止被杀）
@@ -819,6 +917,11 @@ function api_handler()
         if raw then
             local items = json.parse(raw)
             if items and type(items) == "table" then
+                for _, d in ipairs(items) do
+                    if sanitize_client(d.id) and tostring(d.enabled or "1") == "1" then
+                        reject_dns_unavailable(); return
+                    end
+                end
                 local imported = 0
                 local enabled_ids = {}
                 for _, d in ipairs(items) do
@@ -882,6 +985,10 @@ function api_handler()
                 end
                 local id_str = table.concat(clean_ids, " ")
                 local processed = #clean_ids
+
+                if processed > 0 and (batch_action == "enable" or batch_action == "connect") then
+                    reject_dns_unavailable(); return
+                end
 
                 if batch_action == "enable" then
                     for _, clean in ipairs(clean_ids) do

@@ -130,32 +130,35 @@
             .then(function(data) {
                 if (data && data.summary) {
                     var el;
+                    var dnsUnavailable = data.internet_ready === false;
                     el = document.getElementById('pp-stat-total');
                     if (el) el.textContent = data.summary.total;
                     el = document.getElementById('pp-stat-connected');
-                    if (el) el.textContent = data.summary.connected;
+                    if (el) el.textContent = dnsUnavailable ? 0 : data.summary.connected;
                     el = document.getElementById('pp-stat-disconnected');
-                    if (el) el.textContent = data.summary.disconnected;
+                    if (el) el.textContent = dnsUnavailable ? data.summary.enabled : data.summary.disconnected;
                 }
-                if (data) renderWan(data.network);
+                if (data) renderWan(data.network, data.internet_ready, data.dns_path_status);
             })
             .catch(function() {});
     }
 
     // 渲染顶部 WAN 联网状态。主页轮询走 main.htm，通过 window.ppUpdateWanStatus 复用此函数。
-    function renderWan(network) {
+    function renderWan(network, internetReady, dnsPathStatus) {
         var el = document.getElementById('pp-stat-wan');
         var wrap = document.getElementById('pp-wan-wrap');
         if (!el) return;
         if (!network) { el.textContent = '检测中'; return; }
 
-        var online = !!network.online;
+        var dnsUnavailable = internetReady === false && dnsPathStatus === 'dns_path_unavailable';
+        var online = !!network.online && !dnsUnavailable;
         var wans = network.wans || [];
         var detail = wans.map(function(w) {
             return w.name + (w.up ? '✓' : '✗');
         }).join(' ');
 
-        el.textContent = (online ? '有网' : '无网') + (detail ? ' ' + detail : '');
+        el.textContent = (dnsUnavailable ? 'DNS路径不可用' : (online ? '有网' : '无网')) +
+            (detail ? ' ' + detail : '');
         if (wrap) {
             wrap.classList.remove('wan-online', 'wan-offline');
             wrap.classList.add(online ? 'wan-online' : 'wan-offline');
