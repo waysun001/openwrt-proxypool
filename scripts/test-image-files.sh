@@ -79,12 +79,17 @@ grep -Fq "option runtime_backend 'v2_shadow'" "$UPGRADED_V1/etc/config/proxypool
 # override the safer phase-1 ROM default when restored from the keep archive.
 V2_KEEP_BACKUP="$TEST_TMP/v2-keep-backup"
 UPGRADED_V2="$TEST_TMP/upgraded-v2"
-mkdir -p "$V2_KEEP_BACKUP/etc/config" "$UPGRADED_V2"
+mkdir -p "$V2_KEEP_BACKUP/etc/config" "$V2_KEEP_BACKUP/etc/proxypool" "$UPGRADED_V2"
 printf "config global 'global'\n\toption runtime_backend 'v2_shadow'\n" >"$V2_KEEP_BACKUP/etc/config/proxypool_runtime"
+printf 'v2_shadow\n' >"$V2_KEEP_BACKUP/etc/proxypool/activated-backend"
 cp -a "$ROM/." "$UPGRADED_V2/"
 cp -a "$V2_KEEP_BACKUP/." "$UPGRADED_V2/"
 grep -Fq "option runtime_backend 'v2_shadow'" "$UPGRADED_V2/etc/config/proxypool_runtime" || {
 	echo 'preserved V2 selector did not override the ROM default' >&2
+	exit 1
+}
+[ "$(cat "$UPGRADED_V2/etc/proxypool/activated-backend")" = v2_shadow ] || {
+	echo 'preserved V2 selector lost its activated backend ownership' >&2
 	exit 1
 }
 

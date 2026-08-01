@@ -18,6 +18,9 @@ TRANSITION_MARKER="${PROXYPOOL_TRANSITION_MARKER:-/var/run/proxypool.transition}
 ACTIVE_SNAPSHOT_MARKER="${PROXYPOOL_ACTIVE_SNAPSHOT_MARKER:-/var/run/proxypool.config-snapshot}"
 LEGACY_RUN_DIR="${PROXYPOOL_LEGACY_RUN_DIR:-/var/run/proxypool}"
 SNAPSHOT_ROOT="${PROXYPOOL_SNAPSHOT_ROOT:-/var/run/proxypool-config}"
+PERSISTENT_STATE_DIR="${PROXYPOOL_PERSISTENT_STATE_DIR:-/etc/proxypool}"
+ACTIVATED_BACKEND_MARKER="${PROXYPOOL_ACTIVATED_BACKEND_MARKER:-$PERSISTENT_STATE_DIR/activated-backend}"
+CLEANUP_REQUIRED_MARKER="${PROXYPOOL_CLEANUP_REQUIRED_MARKER:-$PERSISTENT_STATE_DIR/cleanup-required}"
 
 LEGACY_CONFIG_FILE="${PROXYPOOL_LEGACY_CONFIG_FILE:-${PROXYPOOL_CONFIG_FILE:-/etc/config/proxypool}}"
 V2_CONFIG_FILE="${PROXYPOOL_V2_CONFIG_FILE:-/etc/config/proxypool_v2}"
@@ -35,11 +38,15 @@ PROXYPOOL_PENDING_OLD_SNAPSHOT=
 PROXYPOOL_START_RESULT=0
 PROXYPOOL_STOP_CLEAN=0
 PROXYPOOL_STOP_RESULT=0
+PROXYPOOL_STOP_BACKEND=
 
 PROXYPOOL_DESIRED_BACKEND=
 PROXYPOOL_DESIRED_CLASS=
 PROXYPOOL_DESIRED_ENABLED=
 PROXYPOOL_DESIRED_SNAPSHOT=
+PROXYPOOL_ACTIVATED_BACKEND=
+PROXYPOOL_RUNTIME_BACKEND=
+PROXYPOOL_NEEDS_ACTIVATION=0
 
 legacy_start() {
 	local sys_pid result
@@ -131,6 +138,31 @@ read_runtime_backend() {
 	printf '%s' "$primary"
 }
 
+persistent_layout_valid() {
+	[ "${ACTIVATED_BACKEND_MARKER%/*}" = "$PERSISTENT_STATE_DIR" ] || return 1
+	[ "${CLEANUP_REQUIRED_MARKER%/*}" = "$PERSISTENT_STATE_DIR" ] || return 1
+	if [ -e "$PERSISTENT_STATE_DIR" ] || [ -L "$PERSISTENT_STATE_DIR" ]; then
+		[ -d "$PERSISTENT_STATE_DIR" ] && [ ! -L "$PERSISTENT_STATE_DIR" ] || return 1
+	fi
+	return 0
+}
+
+read_activated_backend() {
+	persistent_layout_valid || {
+		printf '%s' corrupt
+		return 0
+	}
+	read_exact_backend_marker "$ACTIVATED_BACKEND_MARKER" 1
+}
+
+read_cleanup_required() {
+	persistent_layout_valid || {
+		printf '%s' corrupt
+		return 0
+	}
+	read_exact_backend_marker "$CLEANUP_REQUIRED_MARKER" 1
+}
+
 write_line_atomically() {
 	local destination="$1" value="$2" temporary
 	if [ -e "$destination" ] || [ -L "$destination" ]; then
@@ -145,6 +177,38 @@ write_line_atomically() {
 		rm -f "$temporary"
 		return 1
 	}
+}
+
+ensure_persistent_state_dir() {
+	persistent_layout_valid || return 1
+	if [ ! -e "$PERSISTENT_STATE_DIR" ]; then
+		mkdir -p "$PERSISTENT_STATE_DIR" || return 1
+	fi
+	[ -d "$PERSISTENT_STATE_DIR" ] && [ ! -L "$PERSISTENT_STATE_DIR" ] || return 1
+	chmod 700 "$PERSISTENT_STATE_DIR" || return 1
+}
+
+write_persistent_backend() {
+	local destination="$1" backend="$2"
+	ensure_persistent_state_dir || return 1
+	write_line_atomically "$destination" "$backend" || return 1
+	chmod 600 "$destination" || return 1
+}
+
+write_activated_backend() {
+	write_persistent_backend "$ACTIVATED_BACKEND_MARKER" "$1"
+}
+
+write_cleanup_required() {
+	write_persistent_backend "$CLEANUP_REQUIRED_MARKER" "$1"
+}
+
+clear_cleanup_required() {
+	local recorded
+	recorded=$(read_cleanup_required)
+	[ "$recorded" = "$1" ] || return 1
+	rm -f "$CLEANUP_REQUIRED_MARKER" || return 1
+	[ ! -e "$CLEANUP_REQUIRED_MARKER" ] && [ ! -L "$CLEANUP_REQUIRED_MARKER" ]
 }
 
 write_runtime_backend() {
@@ -313,6 +377,8 @@ capture_procd_state() {
 		return 0
 	}
 	case "$output" in
+		"running
+$sentinel") [ -n "$instance" ] && printf '%s' running || printf '%s' unknown ;;
 		"present
 $sentinel") printf '%s' present ;;
 		"absent
@@ -407,6 +473,105 @@ build_desired_snapshot() {
 	PROXYPOOL_DESIRED_SNAPSHOT="$snapshot"
 }
 
+build_v1_snapshot() {
+	local snapshot classification enabled
+	PROXYPOOL_DESIRED_BACKEND=
+	PROXYPOOL_DESIRED_CLASS=
+	PROXYPOOL_DESIRED_ENABLED=
+	PROXYPOOL_DESIRED_SNAPSHOT=
+	snapshot=$(new_snapshot_dir) || return 1
+	PROXYPOOL_DESIRED_SNAPSHOT="$snapshot"
+	chmod 700 "$snapshot" || {
+		discard_desired_snapshot
+		return 1
+	}
+	[ -f "$LEGACY_CONFIG_FILE" ] && [ ! -L "$LEGACY_CONFIG_FILE" ] || {
+		discard_desired_snapshot
+		return 1
+	}
+	(umask 077 && cp "$LEGACY_CONFIG_FILE" "$snapshot/proxypool") || {
+		discard_desired_snapshot
+		return 1
+	}
+	chmod 600 "$snapshot/proxypool" || {
+		discard_desired_snapshot
+		return 1
+	}
+	classification=$(capture_classification "$snapshot/proxypool") || {
+		discard_desired_snapshot
+		return 1
+	}
+	[ "$classification" = v1 ] || {
+		discard_desired_snapshot
+		return 1
+	}
+	enabled=$(capture_enabled "$snapshot/proxypool") || {
+		discard_desired_snapshot
+		return 1
+	}
+	PROXYPOOL_DESIRED_BACKEND=v1
+	PROXYPOOL_DESIRED_CLASS=v1
+	PROXYPOOL_DESIRED_ENABLED="$enabled"
+	PROXYPOOL_DESIRED_SNAPSHOT="$snapshot"
+}
+
+v1_snapshot_matches_live() {
+	[ "$PROXYPOOL_DESIRED_BACKEND" = v1 ] || return 1
+	is_managed_snapshot_path "$PROXYPOOL_DESIRED_SNAPSHOT" || return 1
+	[ -f "$PROXYPOOL_DESIRED_SNAPSHOT/proxypool" ] && [ ! -L "$PROXYPOOL_DESIRED_SNAPSHOT/proxypool" ] || return 1
+	[ -f "$LEGACY_CONFIG_FILE" ] && [ ! -L "$LEGACY_CONFIG_FILE" ] || return 1
+	cmp -s "$PROXYPOOL_DESIRED_SNAPSHOT/proxypool" "$LEGACY_CONFIG_FILE"
+}
+
+inspect_normal_backend_evidence() {
+	local cleanup activated runtime
+	PROXYPOOL_ACTIVATED_BACKEND=
+	PROXYPOOL_RUNTIME_BACKEND=
+	PROXYPOOL_NEEDS_ACTIVATION=0
+	cleanup=$(read_cleanup_required)
+	[ -z "$cleanup" ] || return 1
+	activated=$(read_activated_backend)
+	runtime=$(read_runtime_backend)
+	[ "$activated" != corrupt ] && [ "$runtime" != corrupt ] || return 1
+	case "$activated" in
+		"")
+			[ "$PROXYPOOL_DESIRED_BACKEND" = v1 ] || return 1
+			PROXYPOOL_NEEDS_ACTIVATION=1
+			;;
+		v1|v2_shadow)
+			[ "$activated" = "$PROXYPOOL_DESIRED_BACKEND" ] || return 1
+			;;
+		*) return 1 ;;
+	esac
+	if [ -n "$runtime" ]; then
+		[ "$runtime" = "$PROXYPOOL_DESIRED_BACKEND" ] || return 1
+	fi
+	PROXYPOOL_ACTIVATED_BACKEND="${activated:-$PROXYPOOL_DESIRED_BACKEND}"
+	PROXYPOOL_RUNTIME_BACKEND="$runtime"
+	return 0
+}
+
+reserve_desired_activation() {
+	if [ "$PROXYPOOL_NEEDS_ACTIVATION" = 1 ]; then
+		[ "$PROXYPOOL_DESIRED_BACKEND" = v1 ] || return 1
+		write_activated_backend v1 || return 1
+		PROXYPOOL_ACTIVATED_BACKEND=v1
+		PROXYPOOL_NEEDS_ACTIVATION=0
+	fi
+	return 0
+}
+
+begin_backend_mutation() {
+	reserve_desired_activation || return 1
+	write_cleanup_required "$PROXYPOOL_ACTIVATED_BACKEND"
+}
+
+finish_confirmed_cleanup() {
+	local backend="$1"
+	clear_backend_evidence_and_snapshots || return 1
+	clear_cleanup_required "$backend"
+}
+
 shadow_instance_for_snapshot() {
 	local snapshot="$1" suffix
 	suffix=${snapshot##*.}
@@ -435,14 +600,13 @@ load_prepared_start() {
 }
 
 start_service() {
-	local previous result instance preflight_state
+	local previous result instance preflight_state backend
 	PROXYPOOL_PENDING_ACTION=
 	PROXYPOOL_PENDING_INSTANCE=
 	PROXYPOOL_PENDING_SNAPSHOT=
 	PROXYPOOL_PENDING_OLD_SNAPSHOT=
 	PROXYPOOL_START_RESULT=0
 
-	previous=$(read_runtime_backend)
 	if ! load_prepared_start && ! build_desired_snapshot; then
 		echo 'ProxyPool start blocked: selector/config snapshot is invalid' >&2
 		# rc.common always sends the open service-set even when this function
@@ -450,27 +614,14 @@ start_service() {
 		# abort before that send and keep the existing procd state untouched.
 		exit 1
 	fi
-
-	case "$previous" in
-		corrupt)
-			echo 'ProxyPool start blocked: runtime evidence is incomplete' >&2
-			discard_desired_snapshot
-			exit 1
-			;;
-		v1|v2_shadow)
-			if [ "$previous" != "$PROXYPOOL_DESIRED_BACKEND" ]; then
-				echo "ProxyPool cross-backend transition blocked: actual=$previous desired=$PROXYPOOL_DESIRED_BACKEND" >&2
-				discard_desired_snapshot
-				exit 1
-			fi
-			;;
-		"") ;;
-		*)
-			discard_desired_snapshot
-			exit 1
-			;;
-	esac
-	if [ -z "$previous" ] && [ "$PROXYPOOL_DESIRED_BACKEND" = v2_shadow ] && [ -d "$LEGACY_RUN_DIR" ]; then
+	if ! inspect_normal_backend_evidence; then
+		echo 'ProxyPool start blocked: persistent or runtime evidence is inconsistent' >&2
+		discard_desired_snapshot
+		exit 1
+	fi
+	previous="$PROXYPOOL_RUNTIME_BACKEND"
+	backend="$PROXYPOOL_ACTIVATED_BACKEND"
+	if [ "$backend" = v2_shadow ] && [ -d "$LEGACY_RUN_DIR" ]; then
 		echo 'ProxyPool fresh V2 start blocked: legacy runtime evidence exists' >&2
 		discard_desired_snapshot
 		exit 1
@@ -496,31 +647,55 @@ start_service() {
 		discard_desired_snapshot
 		exit 1
 	fi
+	if [ "$PROXYPOOL_DESIRED_ENABLED" = 0 ] && [ "$PROXYPOOL_NEEDS_ACTIVATION" = 1 ] &&
+		[ -z "$previous" ] && [ ! -d "$LEGACY_RUN_DIR" ]; then
+		reserve_desired_activation || {
+			discard_desired_snapshot
+			exit 1
+		}
+		discard_desired_snapshot
+		# Exiting the one-shot action with success prevents rc.common from
+		# sending an empty service-set for a backend that never ran.
+		exit 0
+	fi
+	if ! begin_backend_mutation; then
+		echo 'ProxyPool start blocked: persistent transaction evidence is unavailable' >&2
+		discard_desired_snapshot
+		exit 1
+	fi
+	backend="$PROXYPOOL_ACTIVATED_BACKEND"
+	if [ "$backend" = v1 ] && ! v1_snapshot_matches_live; then
+		discard_desired_snapshot
+		clear_cleanup_required v1 || true
+		echo 'ProxyPool V1 start blocked: live config changed during admission' >&2
+		exit 1
+	fi
 
 	if [ "$PROXYPOOL_DESIRED_ENABLED" = 0 ]; then
-		discard_desired_snapshot
-		if [ "$previous" = v1 ] || { [ -z "$previous" ] && [ "$PROXYPOOL_DESIRED_BACKEND" = v1 ] && [ -d "$LEGACY_RUN_DIR" ]; }; then
-			if ! legacy_stop; then
-				PROXYPOOL_PENDING_ACTION=preserve_v1
-				PROXYPOOL_START_RESULT=1
-				return 1
+		if [ "$backend" = v1 ] && { [ "$previous" = v1 ] || [ -d "$LEGACY_RUN_DIR" ]; }; then
+			if ! v1_snapshot_matches_live || ! legacy_stop; then
+				record_v1_cleanup_required
+				discard_desired_snapshot
+				exit 1
 			fi
 		fi
+		discard_desired_snapshot
 		PROXYPOOL_PENDING_ACTION=disable
 		return 0
 	fi
 
 	case "$PROXYPOOL_DESIRED_BACKEND" in
 		v1)
-			discard_desired_snapshot
 			if [ "$previous" = v1 ] || { [ -z "$previous" ] && [ -d "$LEGACY_RUN_DIR" ]; }; then
-				if ! legacy_stop; then
-					PROXYPOOL_PENDING_ACTION=preserve_v1
-					PROXYPOOL_START_RESULT=1
-					return 1
+				if ! v1_snapshot_matches_live || ! legacy_stop; then
+					record_v1_cleanup_required
+					discard_desired_snapshot
+					exit 1
 				fi
 			fi
 			PROXYPOOL_PENDING_ACTION=start_v1
+			PROXYPOOL_PENDING_SNAPSHOT="$PROXYPOOL_DESIRED_SNAPSHOT"
+			PROXYPOOL_DESIRED_SNAPSHOT=
 			;;
 		v2_shadow)
 			PROXYPOOL_PENDING_OLD_SNAPSHOT=$(read_active_snapshot_pointer)
@@ -545,6 +720,7 @@ service_started() {
 	local instance="$PROXYPOOL_PENDING_INSTANCE"
 	local snapshot="$PROXYPOOL_PENDING_SNAPSHOT"
 	local old_snapshot="$PROXYPOOL_PENDING_OLD_SNAPSHOT"
+	local backend="$PROXYPOOL_ACTIVATED_BACKEND"
 	PROXYPOOL_PENDING_ACTION=
 	PROXYPOOL_PENDING_INSTANCE=
 	PROXYPOOL_PENDING_SNAPSHOT=
@@ -557,7 +733,11 @@ service_started() {
 		# malformed status query leaves all existing markers untouched.
 		state=$(capture_procd_state)
 		[ "$state" = absent ] || return "$result"
-		[ -z "$snapshot" ] || discard_managed_snapshot "$snapshot" || true
+		if [ "$pending" = start_v2 ]; then
+			finish_confirmed_cleanup v2_shadow || true
+		else
+			[ -z "$snapshot" ] || discard_managed_snapshot "$snapshot" || true
+		fi
 		return "$result"
 	fi
 
@@ -565,43 +745,64 @@ service_started() {
 		disable)
 		state=$(capture_procd_state)
 		[ "$state" = absent ] || return 1
-		clear_backend_evidence_and_snapshots || return 1
+		finish_confirmed_cleanup "$backend" || return 1
 		;;
 		start_v1)
 		state=$(capture_procd_state)
 		[ "$state" = absent ] || return 1
+		PROXYPOOL_DESIRED_BACKEND=v1
+		PROXYPOOL_DESIRED_SNAPSHOT="$snapshot"
+		if ! v1_snapshot_matches_live; then
+			discard_desired_snapshot
+			finish_confirmed_cleanup v1 || true
+			return 1
+		fi
 		if legacy_start; then result=0; else result=$?; fi
 		if [ "$result" -ne 0 ]; then
+			if ! v1_snapshot_matches_live; then
+				record_v1_cleanup_required
+				discard_desired_snapshot
+				return "$result"
+			fi
 			if legacy_stop; then rollback_result=0; else rollback_result=$?; fi
 			if [ "$rollback_result" -ne 0 ]; then
 				record_v1_cleanup_required
+				discard_desired_snapshot
+				return "$result"
 			fi
+			discard_desired_snapshot
+			finish_confirmed_cleanup v1 || true
 			return "$result"
 		fi
 		if ! write_runtime_backend v1; then
-			if ! legacy_stop; then
+			if ! v1_snapshot_matches_live || ! legacy_stop; then
 				record_v1_cleanup_required
+				discard_desired_snapshot
+				return 1
 			fi
+			discard_desired_snapshot
+			finish_confirmed_cleanup v1 || true
 			return 1
 		fi
-		rm -f "$QUARANTINE_MARKER" "$TRANSITION_MARKER" "$ACTIVE_SNAPSHOT_MARKER"
+		discard_desired_snapshot
+		rm -f "$QUARANTINE_MARKER" "$TRANSITION_MARKER" "$ACTIVE_SNAPSHOT_MARKER" || return 1
+		clear_cleanup_required v1 || return 1
 		;;
 		start_v2)
 			state=$(capture_procd_state "$instance")
-			if [ "$state" != present ]; then
-				if [ "$state" = absent ]; then
-					state=$(capture_procd_state)
-					if [ "$state" = absent ]; then
-						discard_managed_snapshot "$snapshot" || true
-					fi
-				fi
+			if [ "$state" != running ]; then
+				[ "$state" != unknown ] || return 1
+				procd_kill proxypool || true
+				state=$(capture_procd_state)
+				[ "$state" = absent ] || return 1
+				finish_confirmed_cleanup v2_shadow || true
 				return 1
 			fi
 			if ! write_runtime_backend v2_shadow; then
 				procd_kill proxypool || true
 				state=$(capture_procd_state)
 				if [ "$state" = absent ]; then
-					discard_managed_snapshot "$snapshot" || true
+					finish_confirmed_cleanup v2_shadow || true
 				fi
 				return 1
 			fi
@@ -610,7 +811,8 @@ service_started() {
 					discard_managed_snapshot "$old_snapshot" || true
 				fi
 			fi
-			rm -f "$QUARANTINE_MARKER" "$TRANSITION_MARKER"
+			rm -f "$QUARANTINE_MARKER" "$TRANSITION_MARKER" || return 1
+			clear_cleanup_required v2_shadow || return 1
 		;;
 		*)
 			return 1
@@ -620,95 +822,127 @@ service_started() {
 }
 
 stop_service() {
-	local previous result
+	local activated cleanup runtime backend result recovery=0
 	PROXYPOOL_STOP_CLEAN=0
 	PROXYPOOL_STOP_RESULT=0
-	previous=$(read_runtime_backend)
-	case "$previous" in
+	PROXYPOOL_STOP_BACKEND=
+	cleanup=$(read_cleanup_required)
+	activated=$(read_activated_backend)
+	case "$cleanup" in
+		corrupt)
+			echo 'ProxyPool stop blocked: cleanup evidence is invalid' >&2
+			exit 1
+			;;
+		v1|v2_shadow)
+			[ "$activated" = "$cleanup" ] || {
+				echo 'ProxyPool stop blocked: cleanup ownership is inconsistent' >&2
+				exit 1
+			}
+			runtime=$(read_primary_backend)
+			[ "$runtime" != corrupt ] && { [ -z "$runtime" ] || [ "$runtime" = "$activated" ]; } || {
+				echo 'ProxyPool stop blocked: runtime ownership is inconsistent' >&2
+				exit 1
+			}
+			backend="$activated"
+			recovery=1
+			if [ "$backend" = v1 ]; then
+				build_v1_snapshot || {
+					echo 'ProxyPool V1 recovery blocked: live config is not strict V1' >&2
+					exit 1
+				}
+			fi
+			;;
+		"")
+			build_desired_snapshot || {
+				echo 'ProxyPool stop blocked: selector/config snapshot is invalid' >&2
+				exit 1
+			}
+			inspect_normal_backend_evidence || {
+				discard_desired_snapshot
+				echo 'ProxyPool stop blocked: persistent or runtime evidence is inconsistent' >&2
+				exit 1
+			}
+			backend="$PROXYPOOL_ACTIVATED_BACKEND"
+			if [ "$backend" = v2_shadow ] && [ -d "$LEGACY_RUN_DIR" ]; then
+				discard_desired_snapshot
+				echo 'ProxyPool stop blocked: conflicting legacy runtime evidence exists' >&2
+				exit 1
+			fi
+			begin_backend_mutation || {
+				discard_desired_snapshot
+				echo 'ProxyPool stop blocked: persistent transaction evidence is unavailable' >&2
+				exit 1
+			}
+			;;
+		*)
+			echo 'ProxyPool stop blocked: cleanup evidence is invalid' >&2
+			exit 1
+			;;
+	esac
+	PROXYPOOL_STOP_BACKEND="$backend"
+	case "$backend" in
 		v1)
+			if ! v1_snapshot_matches_live; then
+				discard_desired_snapshot
+				[ "$recovery" = 1 ] || clear_cleanup_required v1 || true
+				echo 'ProxyPool V1 stop blocked: live config changed during admission' >&2
+				exit 1
+			fi
 			if legacy_stop; then
 				:
 			else
 				result=$?
+				record_v1_cleanup_required
+				discard_desired_snapshot
 				PROXYPOOL_STOP_RESULT="$result"
 				return "$result"
 			fi
+			discard_desired_snapshot
 			;;
 		v2_shadow)
 			# rc.common performs the procd teardown after this hook.
-			;;
-		"")
-			if [ -d "$LEGACY_RUN_DIR" ]; then
-				if ! build_desired_snapshot; then
-					PROXYPOOL_STOP_RESULT=1
-					return 1
-				fi
-				if [ "$PROXYPOOL_DESIRED_BACKEND" != v1 ]; then
-					discard_desired_snapshot
-					PROXYPOOL_STOP_RESULT=1
-					return 1
-				fi
-				discard_desired_snapshot
-				if legacy_stop; then
-					:
-				else
-					result=$?
-					PROXYPOOL_STOP_RESULT="$result"
-					return "$result"
-				fi
-			fi
+			discard_desired_snapshot
 			;;
 		*)
-			echo 'ProxyPool stop cannot certify damaged runtime evidence' >&2
-			PROXYPOOL_STOP_RESULT=1
-			return 1
+			exit 1
 			;;
 	esac
 	PROXYPOOL_STOP_CLEAN=1
 }
 
 service_stopped() {
-	local state result="$PROXYPOOL_STOP_RESULT"
+	local state result="$PROXYPOOL_STOP_RESULT" backend="$PROXYPOOL_STOP_BACKEND"
 	if [ "$PROXYPOOL_STOP_CLEAN" = 1 ]; then
 		state=$(capture_procd_state)
 		if [ "$state" = absent ]; then
-			if ! clear_backend_evidence_and_snapshots && [ "$result" -eq 0 ]; then
+			if ! finish_confirmed_cleanup "$backend" && [ "$result" -eq 0 ]; then
 				result=1
 			fi
+		elif [ "$result" -eq 0 ]; then
+			result=1
 		fi
 	fi
 	PROXYPOOL_STOP_CLEAN=0
 	PROXYPOOL_STOP_RESULT=0
+	PROXYPOOL_STOP_BACKEND=
 	return "$result"
 }
 
 reload_service() {
-	local previous state result
+	local previous state result backend
 	build_desired_snapshot || {
 		echo 'ProxyPool reload blocked: selector/config snapshot is invalid' >&2
 		return 1
 	}
-	previous=$(read_runtime_backend)
-	case "$previous" in
-		v1|v2_shadow) ;;
-		"")
-			PROXYPOOL_START_PREPARED=1
-			PROXYPOOL_START_BACKEND="$PROXYPOOL_DESIRED_BACKEND"
-			PROXYPOOL_START_CLASS="$PROXYPOOL_DESIRED_CLASS"
-			PROXYPOOL_START_ENABLED="$PROXYPOOL_DESIRED_ENABLED"
-			PROXYPOOL_START_SNAPSHOT="$PROXYPOOL_DESIRED_SNAPSHOT"
-			PROXYPOOL_DESIRED_SNAPSHOT=
-			start
-			return
-			;;
-		*)
-			echo 'ProxyPool reload blocked: runtime evidence is incomplete' >&2
-			discard_desired_snapshot
-			return 1
-			;;
-	esac
-	if [ "$previous" != "$PROXYPOOL_DESIRED_BACKEND" ]; then
-		echo "ProxyPool cross-backend transition blocked: actual=$previous desired=$PROXYPOOL_DESIRED_BACKEND" >&2
+	if ! inspect_normal_backend_evidence; then
+		echo 'ProxyPool reload blocked: persistent or runtime evidence is inconsistent' >&2
+		discard_desired_snapshot
+		return 1
+	fi
+	previous="$PROXYPOOL_RUNTIME_BACKEND"
+	backend="$PROXYPOOL_ACTIVATED_BACKEND"
+	if [ "$backend" = v2_shadow ] && [ -d "$LEGACY_RUN_DIR" ]; then
+		echo 'ProxyPool reload blocked: conflicting legacy runtime evidence exists' >&2
 		discard_desired_snapshot
 		return 1
 	fi
@@ -723,23 +957,71 @@ reload_service() {
 		discard_desired_snapshot
 		return 1
 	fi
+	if [ -z "$previous" ]; then
+		PROXYPOOL_START_PREPARED=1
+		PROXYPOOL_START_BACKEND="$PROXYPOOL_DESIRED_BACKEND"
+		PROXYPOOL_START_CLASS="$PROXYPOOL_DESIRED_CLASS"
+		PROXYPOOL_START_ENABLED="$PROXYPOOL_DESIRED_ENABLED"
+		PROXYPOOL_START_SNAPSHOT="$PROXYPOOL_DESIRED_SNAPSHOT"
+		PROXYPOOL_DESIRED_SNAPSHOT=
+		start
+		return
+	fi
 
 	if [ "$PROXYPOOL_DESIRED_ENABLED" = 0 ]; then
-		discard_desired_snapshot
-		case "$previous" in
-			v1) legacy_stop || return 1 ;;
-			v2_shadow) procd_kill proxypool || true ;;
+		begin_backend_mutation || {
+			discard_desired_snapshot
+			return 1
+		}
+		case "$backend" in
+			v1)
+				if ! v1_snapshot_matches_live; then
+					discard_desired_snapshot
+					clear_cleanup_required v1 || true
+					return 1
+				fi
+				if ! legacy_stop; then
+					record_v1_cleanup_required
+					discard_desired_snapshot
+					return 1
+				fi
+				;;
+			v2_shadow)
+				discard_desired_snapshot
+				procd_kill proxypool || true
+				;;
 		esac
 		state=$(capture_procd_state)
 		[ "$state" = absent ] || return 1
-		clear_backend_evidence_and_snapshots || return 1
+		discard_desired_snapshot
+		finish_confirmed_cleanup "$backend" || return 1
 		return 0
 	fi
 
-	if [ "$previous" = v1 ]; then
+	if [ "$backend" = v1 ]; then
+		begin_backend_mutation || {
+			discard_desired_snapshot
+			return 1
+		}
+		if ! v1_snapshot_matches_live; then
+			discard_desired_snapshot
+			clear_cleanup_required v1 || true
+			return 1
+		fi
+		if legacy_reload; then result=0; else result=$?; fi
+		if [ "$result" -eq 0 ]; then
+			discard_desired_snapshot
+			clear_cleanup_required v1 || return 1
+			return 0
+		fi
+		if ! v1_snapshot_matches_live || ! legacy_stop; then
+			record_v1_cleanup_required
+			discard_desired_snapshot
+			return "$result"
+		fi
 		discard_desired_snapshot
-		legacy_reload
-		return
+		finish_confirmed_cleanup v1 || true
+		return "$result"
 	fi
 
 	PROXYPOOL_START_PREPARED=1

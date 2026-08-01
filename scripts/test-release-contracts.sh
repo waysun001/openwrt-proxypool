@@ -46,7 +46,7 @@ if grep -Eq 'INSTALL_(CONF|DATA).*proxypool_(v2|runtime).*etc/config' "$MAKEFILE
 	exit 1
 fi
 [ -f "$UPGRADE_KEEP" ] || { echo 'missing sysupgrade keep list for overlay-only configs' >&2; exit 1; }
-expected_keep=$(printf '/etc/config/proxypool_v2\n/etc/config/proxypool_runtime\n')
+expected_keep=$(printf '/etc/config/proxypool_v2\n/etc/config/proxypool_runtime\n/etc/proxypool/activated-backend\n/etc/proxypool/cleanup-required\n')
 [ "$(cat "$UPGRADE_KEEP")" = "$expected_keep" ] || { echo 'unexpected ProxyPool sysupgrade keep list' >&2; exit 1; }
 
 require_fixed "$HOST_RUNNER" 'go test -race -count=1 ./...'

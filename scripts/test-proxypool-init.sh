@@ -12,6 +12,9 @@ QUARANTINE_FILE="$TEST_TMP/backend.cleanup-required"
 TRANSITION_FILE="$TEST_TMP/transition"
 ACTIVE_SNAPSHOT_FILE="$TEST_TMP/active-snapshot"
 SNAPSHOT_ROOT="$TEST_TMP/snapshots"
+PERSISTENT_STATE_DIR="$TEST_TMP/persistent-state"
+ACTIVATED_BACKEND_FILE="$PERSISTENT_STATE_DIR/activated-backend"
+CLEANUP_REQUIRED_FILE="$PERSISTENT_STATE_DIR/cleanup-required"
 LEGACY_CONFIG_FILE="$TEST_TMP/proxypool"
 V2_CONFIG_FILE="$TEST_TMP/proxypool_v2"
 SELECTOR_FILE="$TEST_TMP/proxypool_runtime"
@@ -25,7 +28,7 @@ QUERY_COUNT_FILE="$TEST_TMP/query-count"
 export TRACE_FILE MARKER_FILE QUARANTINE_FILE TRANSITION_FILE ACTIVE_SNAPSHOT_FILE
 export SNAPSHOT_ROOT LEGACY_CONFIG_FILE V2_CONFIG_FILE SELECTOR_FILE
 export PROCD_RUNNING_FILE PROCD_STAGED_FILE PROCD_TRANSACTION_FILE LEGACY_RUNNING_FILE
-export QUERY_COUNT_FILE
+export QUERY_COUNT_FILE PERSISTENT_STATE_DIR ACTIVATED_BACKEND_FILE CLEANUP_REQUIRED_FILE
 
 make_fake() {
 	path=$1
@@ -39,14 +42,39 @@ EOF
 
 make_fake "$TEST_TMP/legacy" '
 printf "legacy:%s\n" "$*" >>"$TRACE_FILE"
+if [ -n "${PROXYPOOL_TEST_REQUIRE_ACTIVATED-}" ]; then
+	[ -f "$ACTIVATED_BACKEND_FILE" ] && [ "$(cat "$ACTIVATED_BACKEND_FILE")" = "$PROXYPOOL_TEST_REQUIRE_ACTIVATED" ] || {
+		printf "activated:missing-before-legacy:%s\n" "${1-}" >>"$TRACE_FILE"
+		exit 96
+	}
+fi
+if [ -n "${PROXYPOOL_TEST_REQUIRE_WAL-}" ]; then
+	[ -f "$CLEANUP_REQUIRED_FILE" ] && [ "$(cat "$CLEANUP_REQUIRED_FILE")" = "$PROXYPOOL_TEST_REQUIRE_WAL" ] || {
+		printf "wal:missing-before-legacy:%s\n" "${1-}" >>"$TRACE_FILE"
+		exit 97
+	}
+fi
 case "${1-}" in
 	start)
-		case "${PROXYPOOL_TEST_LEGACY_FAIL-}" in start|start_and_stop) exit 1 ;; esac
+		case "${PROXYPOOL_TEST_LEGACY_FAIL-}" in
+			start|start_and_stop)
+				if [ "${PROXYPOOL_TEST_MUTATE_LEGACY_ON_START_FAILURE-0}" = 1 ]; then
+					printf "# changed-during-failed-start\n" >>"$LEGACY_CONFIG_FILE"
+				fi
+				exit 1
+				;;
+		esac
 		: >"$LEGACY_RUNNING_FILE"
 		;;
 	stop)
-		case "${PROXYPOOL_TEST_LEGACY_FAIL-}" in stop|start_and_stop) exit 1 ;; esac
+		case "${PROXYPOOL_TEST_LEGACY_FAIL-}" in stop|start_and_stop|reload_and_stop) exit 1 ;; esac
 		rm -f "$LEGACY_RUNNING_FILE"
+		if [ "${PROXYPOOL_TEST_MUTATE_LEGACY_AFTER_STOP-0}" = 1 ]; then
+			printf "# changed-after-stop\n" >>"$LEGACY_CONFIG_FILE"
+		fi
+		;;
+	reload)
+		case "${PROXYPOOL_TEST_LEGACY_FAIL-}" in reload|reload_and_stop) exit 1 ;; esac
 		;;
 esac'
 make_fake "$TEST_TMP/lease" 'printf "lease:%s\n" "$*" >>"$TRACE_FILE"'
@@ -84,6 +112,9 @@ case "$command_name" in
 			printf "config global '\''global'\''\n\toption runtime_backend '\''v1'\''\n" >"$SELECTOR_FILE"
 		fi
 		class=$(sed -n "s/^# test-class://p" "$3" | head -n1)
+		if [ "${PROXYPOOL_TEST_MUTATE_LEGACY_DURING_CLASSIFY-0}" = 1 ] && [ "$class" = v1 ]; then
+			printf "# changed-during-classification\n" >>"$LEGACY_CONFIG_FILE"
+		fi
 		case "$class" in
 			v1|v2_shadow|v2_shadow_invalid) printf "%s\n" "$class" ;;
 			bad_output) printf "v1 unexpected\n" ;;
@@ -112,11 +143,15 @@ case "$command_name" in
 		case "${PROXYPOOL_TEST_QUERY-}" in
 			unknown) printf "unknown\n"; exit 1 ;;
 			unknown_after_first) [ "$query_count" -le 1 ] || { printf "unknown\n"; exit 1; } ;;
+			unknown_after_second) [ "$query_count" -le 2 ] || { printf "unknown\n"; exit 1; } ;;
 			bad_output) printf "present unexpected\n"; exit 0 ;;
+			global_running) [ -n "$instance" ] || { printf "running\n"; exit 0; } ;;
 		esac
 		if [ -n "$instance" ]; then
-			if [ -f "$PROCD_RUNNING_FILE" ] && grep -Fqx "$instance" "$PROCD_RUNNING_FILE"; then
+			if [ "${PROXYPOOL_TEST_EXACT_STATE-}" = present ]; then
 				printf "present\n"
+			elif [ -f "$PROCD_RUNNING_FILE" ] && grep -Fqx "$instance" "$PROCD_RUNNING_FILE"; then
+				printf "running\n"
 			else
 				printf "absent\n"
 			fi
@@ -146,6 +181,13 @@ assert_contains_fragment() {
 
 assert_not_contains_fragment() {
 	if grep -Fq -- "$1" "$TRACE_FILE"; then fail "unexpected trace fragment: $1"; fi
+}
+
+assert_no_backend_mutation() {
+	assert_not_contains_fragment 'legacy:'
+	assert_not_contains_fragment 'procd:open:'
+	assert_not_contains_fragment 'procd:service-close:'
+	assert_not_contains_fragment 'procd:kill:'
 }
 
 assert_before() {
@@ -214,7 +256,12 @@ config global 'global'
 EOF
 }
 
-set_selector() {
+set_activated_backend() {
+	mkdir -p "$PERSISTENT_STATE_DIR"
+	printf '%s\n' "$1" >"$ACTIVATED_BACKEND_FILE"
+}
+
+set_selector_only() {
 	case "$1" in
 		missing) rm -rf "$SELECTOR_FILE" ;;
 		v1|v2_shadow)
@@ -228,16 +275,21 @@ EOF
 	esac
 }
 
+set_selector() {
+	set_selector_only "$1"
+	[ "$1" != v2_shadow ] || set_activated_backend v2_shadow
+}
+
 reset_case() {
 	: >"$TRACE_FILE"
 	: >"$CRONTAB_FILE"
 	rm -f "$MARKER_FILE" "$TRANSITION_FILE" "$ACTIVE_SNAPSHOT_FILE"
 	rm -rf "$QUARANTINE_FILE"
 	rm -f "$PID_FILE" "$PROCD_RUNNING_FILE" "$PROCD_STAGED_FILE" "$PROCD_TRANSACTION_FILE" "$LEGACY_RUNNING_FILE" "$QUERY_COUNT_FILE"
-	rm -rf "$SNAPSHOT_ROOT" "$TEST_TMP/legacy-run" "$SELECTOR_FILE"
+	rm -rf "$SNAPSHOT_ROOT" "$PERSISTENT_STATE_DIR" "$TEST_TMP/legacy-run" "$SELECTOR_FILE"
 	write_legacy_config 1
 	write_v2_config v2_shadow 1
-	set_selector missing
+	set_selector_only missing
 }
 
 run_action() (
@@ -248,6 +300,9 @@ run_action() (
 	export PROXYPOOL_TRANSITION_MARKER="$TRANSITION_FILE"
 	export PROXYPOOL_ACTIVE_SNAPSHOT_MARKER="$ACTIVE_SNAPSHOT_FILE"
 	export PROXYPOOL_SNAPSHOT_ROOT="$SNAPSHOT_ROOT"
+	export PROXYPOOL_PERSISTENT_STATE_DIR="$PERSISTENT_STATE_DIR"
+	export PROXYPOOL_ACTIVATED_BACKEND_MARKER="$ACTIVATED_BACKEND_FILE"
+	export PROXYPOOL_CLEANUP_REQUIRED_MARKER="$CLEANUP_REQUIRED_FILE"
 	export PROXYPOOL_LEGACY_CONFIG_FILE="$LEGACY_CONFIG_FILE"
 	export PROXYPOOL_V2_CONFIG_FILE="$V2_CONFIG_FILE"
 	export PROXYPOOL_SELECTOR_FILE="$SELECTOR_FILE"
@@ -278,8 +333,22 @@ run_action() (
 		printf 'procd:close:%s\n' "$*" >>"$TRACE_FILE"
 		[ "${PROXYPOOL_TEST_FAIL_PROCD_STEP-}" != close_instance ]
 	}
+	require_test_wal() {
+		if [ -n "${PROXYPOOL_TEST_REQUIRE_ACTIVATED-}" ]; then
+			[ -f "$ACTIVATED_BACKEND_FILE" ] && [ "$(cat "$ACTIVATED_BACKEND_FILE")" = "$PROXYPOOL_TEST_REQUIRE_ACTIVATED" ] || {
+				printf 'activated:missing-before-procd\n' >>"$TRACE_FILE"
+				return 96
+			}
+		fi
+		[ -n "${PROXYPOOL_TEST_REQUIRE_WAL-}" ] || return 0
+		[ -f "$CLEANUP_REQUIRED_FILE" ] && [ "$(cat "$CLEANUP_REQUIRED_FILE")" = "$PROXYPOOL_TEST_REQUIRE_WAL" ] || {
+			printf 'wal:missing-before-procd\n' >>"$TRACE_FILE"
+			return 97
+		}
+	}
 	procd_close_service() {
 		printf 'procd:service-close:%s\n' "$*" >>"$TRACE_FILE"
+		require_test_wal || return $?
 		if [ "${PROXYPOOL_TEST_SERVICE_SET-}" = ignore ]; then
 			:
 		elif [ -s "$PROCD_STAGED_FILE" ]; then
@@ -296,6 +365,7 @@ run_action() (
 	}
 	procd_kill() {
 		printf 'procd:kill:%s\n' "$*" >>"$TRACE_FILE"
+		require_test_wal || return $?
 		if [ -e "$PROCD_TRANSACTION_FILE" ]; then
 			printf 'procd:transaction-corrupted\n' >>"$TRACE_FILE"
 		fi
@@ -308,7 +378,17 @@ run_action() (
 		for argument in "$@"; do last=$argument; done
 		if [ "${PROXYPOOL_TEST_FAIL_MARKER_WRITE-}" = runtime ] && [ "$last" = "$MARKER_FILE" ]; then return 1; fi
 		if [ "${PROXYPOOL_TEST_FAIL_MARKER_WRITE-}" = active ] && [ "$last" = "$ACTIVE_SNAPSHOT_FILE" ]; then return 1; fi
+		if [ "${PROXYPOOL_TEST_FAIL_MARKER_WRITE-}" = activated ] && [ "$last" = "$ACTIVATED_BACKEND_FILE" ]; then return 1; fi
+		if [ "${PROXYPOOL_TEST_FAIL_MARKER_WRITE-}" = cleanup ] && [ "$last" = "$CLEANUP_REQUIRED_FILE" ]; then return 1; fi
 		command mv "$@"
+	}
+	rm() {
+		for argument in "$@"; do
+			case "${PROXYPOOL_TEST_FAIL_MARKER_CLEAR-}:$argument" in
+				cleanup:"$CLEANUP_REQUIRED_FILE"|runtime:"$MARKER_FILE"|active:"$ACTIVE_SNAPSHOT_FILE") return 1 ;;
+			esac
+		done
+		command rm "$@"
 	}
 	start() {
 		local start_result=0 service_result=0
@@ -351,6 +431,15 @@ assert_contains 'ctl:procd:any'
 assert_before 'ctl:procd:any' 'legacy:start'
 assert_contains 'legacy:start'
 assert_file_line "$MARKER_FILE" v1
+assert_file_line "$ACTIVATED_BACKEND_FILE" v1
+[ ! -e "$CLEANUP_REQUIRED_FILE" ] || fail 'successful V1 bootstrap retained cleanup-required'
+case "$(uname -s)" in
+	Linux*)
+		[ "$(stat -c '%a' "$PERSISTENT_STATE_DIR")" = 700 ] || fail 'persistent state directory is not mode 0700'
+		[ "$(stat -c '%a' "$ACTIVATED_BACKEND_FILE")" = 600 ] || fail 'activated-backend is not mode 0600'
+		;;
+	*) echo 'SKIP: persistent state mode assertion requires a POSIX filesystem' ;;
+esac
 assert_not_contains_fragment "$LEGACY_CONFIG_FILE"
 
 # A fresh image selects V2 from its separate selector/config snapshot. The
@@ -438,6 +527,7 @@ old_snapshot="$SNAPSHOT_ROOT/generation.old"
 mkdir -p "$old_snapshot"
 cp "$V2_CONFIG_FILE" "$old_snapshot/proxypool"
 printf '%s\n' "$old_snapshot" >"$ACTIVE_SNAPSHOT_FILE"
+set_activated_backend v2_shadow
 set_selector v1
 expect_failure run_start
 assert_not_contains_fragment 'legacy:'
@@ -507,7 +597,8 @@ reset_case
 set_selector v2_shadow
 PROXYPOOL_TEST_SERVICE_SET=wrong_instance expect_failure run_start
 [ ! -e "$MARKER_FILE" ] || fail 'wrong instance published V2 marker'
-assert_generation_count 1
+assert_contains 'procd:kill:proxypool'
+assert_generation_count 0
 
 reset_case
 set_selector v2_shadow
@@ -527,6 +618,15 @@ reset_case
 set_selector v2_shadow
 PROXYPOOL_TEST_QUERY=bad_output expect_failure run_start
 [ ! -e "$MARKER_FILE" ] || fail 'malformed procd state published V2 marker'
+
+# A global query has no exact instance identity, so "running" is malformed
+# even if an old runtime marker would otherwise allow a same-backend restart.
+reset_case
+set_selector v2_shadow
+printf 'v2_shadow\n' >"$MARKER_FILE"
+PROXYPOOL_TEST_QUERY=global_running expect_failure run_start
+assert_no_backend_mutation
+assert_file_line "$MARKER_FILE" v2_shadow
 
 reset_case
 set_selector v2_shadow
@@ -553,7 +653,7 @@ assert_contains 'ctl:procd:any'
 reset_case
 mkdir "$TEST_TMP/legacy-run"
 : >"$LEGACY_RUNNING_FILE"
-expect_success run_stop
+PROXYPOOL_TEST_REQUIRE_ACTIVATED=v1 PROXYPOOL_TEST_REQUIRE_WAL=v1 expect_success run_stop
 assert_before 'legacy:stop' 'procd:kill:proxypool'
 [ ! -e "$LEGACY_RUNNING_FILE" ] || fail 'markerless V1 stop left legacy runtime running'
 
@@ -568,7 +668,7 @@ reset_case
 mkdir "$TEST_TMP/legacy-run"
 : >"$LEGACY_RUNNING_FILE"
 write_legacy_config 0
-expect_success run_start
+PROXYPOOL_TEST_REQUIRE_ACTIVATED=v1 PROXYPOOL_TEST_REQUIRE_WAL=v1 expect_success run_start
 assert_before 'legacy:stop' 'procd:service-close:set'
 assert_not_contains_fragment 'legacy:start'
 [ ! -e "$LEGACY_RUNNING_FILE" ] || fail 'disabled markerless V1 left legacy runtime running'
@@ -590,6 +690,32 @@ expect_failure run_stop
 assert_not_contains_fragment 'legacy:'
 [ -e "$LEGACY_RUNNING_FILE" ] || fail 'non-V1 stop mutated markerless legacy evidence'
 assert_generation_count 0
+
+reset_case
+mkdir "$TEST_TMP/legacy-run"
+: >"$LEGACY_RUNNING_FILE"
+PROXYPOOL_TEST_FAIL_MARKER_WRITE=activated expect_failure run_stop
+assert_no_backend_mutation
+[ -e "$LEGACY_RUNNING_FILE" ] || fail 'failed V1 preclaim mutated markerless stop target'
+[ ! -e "$ACTIVATED_BACKEND_FILE" ] || fail 'failed markerless stop preclaim published activation'
+
+reset_case
+mkdir "$TEST_TMP/legacy-run"
+: >"$LEGACY_RUNNING_FILE"
+write_legacy_config 0
+PROXYPOOL_TEST_FAIL_MARKER_WRITE=activated expect_failure run_start
+assert_no_backend_mutation
+[ -e "$LEGACY_RUNNING_FILE" ] || fail 'failed V1 preclaim mutated markerless disable target'
+[ ! -e "$ACTIVATED_BACKEND_FILE" ] || fail 'failed markerless disable preclaim published activation'
+
+reset_case
+mkdir "$TEST_TMP/legacy-run"
+: >"$LEGACY_RUNNING_FILE"
+set_selector_only v2_shadow
+expect_failure run_stop
+assert_no_backend_mutation
+[ -e "$LEGACY_RUNNING_FILE" ] || fail 'unactivated V2 selector mutated markerless V1 runtime'
+[ ! -e "$ACTIVATED_BACKEND_FILE" ] || fail 'unactivated V2 stop claimed ownership'
 
 reset_case
 printf 'v2_shadow\n' >"$MARKER_FILE"
@@ -620,18 +746,21 @@ assert_file_line "$MARKER_FILE" v2_shadow
 reset_case
 printf 'v2_shadow\n' >"$MARKER_FILE"
 printf 'old-shadow\n' >"$PROCD_RUNNING_FILE"
-PROXYPOOL_TEST_KILL=noop expect_success run_stop
+set_selector v2_shadow
+PROXYPOOL_TEST_KILL=noop expect_failure run_stop
 assert_file_line "$MARKER_FILE" v2_shadow
 
 reset_case
 printf 'v2_shadow\n' >"$MARKER_FILE"
 printf 'old-shadow\n' >"$PROCD_RUNNING_FILE"
-PROXYPOOL_TEST_QUERY=unknown expect_success run_stop
+set_selector v2_shadow
+PROXYPOOL_TEST_QUERY=unknown expect_failure run_stop
 assert_file_line "$MARKER_FILE" v2_shadow
 
 reset_case
 printf 'v2_shadow\n' >"$MARKER_FILE"
 printf 'old-shadow\n' >"$PROCD_RUNNING_FILE"
+set_selector v2_shadow
 expect_success run_stop
 [ ! -e "$MARKER_FILE" ] || fail 'confirmed stop retained marker'
 
@@ -851,6 +980,7 @@ old_two=$(make_managed_generation DEF456)
 printf '%s\n' "$old_one" >"$ACTIVE_SNAPSHOT_FILE"
 printf 'v2_shadow\n' >"$MARKER_FILE"
 printf 'old-shadow\n' >"$PROCD_RUNNING_FILE"
+set_selector v2_shadow
 expect_success run_stop
 assert_generation_count 0
 [ ! -e "$ACTIVE_SNAPSHOT_FILE" ] || fail 'confirmed stop retained active snapshot pointer'
@@ -861,7 +991,8 @@ old_two=$(make_managed_generation DEF456)
 printf '%s\n' "$old_one" >"$ACTIVE_SNAPSHOT_FILE"
 printf 'v2_shadow\n' >"$MARKER_FILE"
 printf 'old-shadow\n' >"$PROCD_RUNNING_FILE"
-PROXYPOOL_TEST_KILL=noop expect_success run_stop
+set_selector v2_shadow
+PROXYPOOL_TEST_KILL=noop expect_failure run_stop
 assert_generation_count 2
 assert_file_line "$ACTIVE_SNAPSHOT_FILE" "$old_one"
 
@@ -871,7 +1002,8 @@ old_two=$(make_managed_generation DEF456)
 printf '%s\n' "$old_one" >"$ACTIVE_SNAPSHOT_FILE"
 printf 'v2_shadow\n' >"$MARKER_FILE"
 printf 'old-shadow\n' >"$PROCD_RUNNING_FILE"
-PROXYPOOL_TEST_QUERY=unknown expect_success run_stop
+set_selector v2_shadow
+PROXYPOOL_TEST_QUERY=unknown expect_failure run_stop
 assert_generation_count 2
 assert_file_line "$ACTIVE_SNAPSHOT_FILE" "$old_one"
 
@@ -954,6 +1086,437 @@ if ln -s "$outside_pointer" "$ACTIVE_SNAPSHOT_FILE" 2>/dev/null && [ -L "$ACTIVE
 else
 	echo 'SKIP: active snapshot symlink assertion requires symlink support'
 fi
+
+# Q: Persistent activation is backend ownership, not a running flag. A fresh
+# image may bootstrap only strict V1 (missing selector is V1 compatibility),
+# and ownership must be atomically reserved before any backend mutation.
+reset_case
+write_legacy_config 0
+set_selector_only missing
+expect_success run_start
+assert_no_backend_mutation
+assert_file_line "$ACTIVATED_BACKEND_FILE" v1
+[ ! -e "$MARKER_FILE" ] || fail 'disabled fresh V1 published runtime'
+[ ! -e "$CLEANUP_REQUIRED_FILE" ] || fail 'disabled fresh V1 retained cleanup intent'
+
+reset_case
+PROXYPOOL_TEST_FAIL_MARKER_WRITE=activated expect_failure run_start
+assert_no_backend_mutation
+[ ! -e "$ACTIVATED_BACKEND_FILE" ] || fail 'failed activation write published ownership'
+[ ! -e "$MARKER_FILE" ] || fail 'failed activation write published runtime'
+[ ! -e "$CLEANUP_REQUIRED_FILE" ] || fail 'failed activation write published cleanup intent'
+
+reset_case
+set_selector_only v2_shadow
+expect_failure run_start
+assert_no_backend_mutation
+[ ! -e "$ACTIVATED_BACKEND_FILE" ] || fail 'unactivated V2 start claimed ownership'
+[ ! -e "$MARKER_FILE" ] || fail 'unactivated V2 start published runtime'
+
+reset_case
+set_activated_backend v1
+set_selector_only v2_shadow
+expect_failure run_start
+assert_no_backend_mutation
+assert_file_line "$ACTIVATED_BACKEND_FILE" v1
+
+reset_case
+set_activated_backend v2_shadow
+set_selector_only v1
+expect_failure run_start
+assert_no_backend_mutation
+assert_file_line "$ACTIVATED_BACKEND_FILE" v2_shadow
+
+reset_case
+set_activated_backend v1
+printf 'v2_shadow\n' >"$MARKER_FILE"
+set_selector_only v1
+expect_failure run_start
+assert_no_backend_mutation
+assert_file_line "$ACTIVATED_BACKEND_FILE" v1
+assert_file_line "$MARKER_FILE" v2_shadow
+
+reset_case
+mkdir -p "$PERSISTENT_STATE_DIR"
+printf v1 >"$ACTIVATED_BACKEND_FILE"
+set_selector_only v1
+expect_failure run_start
+assert_no_backend_mutation
+
+reset_case
+mkdir -p "$PERSISTENT_STATE_DIR"
+printf 'v1\nextra\n' >"$ACTIVATED_BACKEND_FILE"
+set_selector_only v1
+expect_failure run_start
+assert_no_backend_mutation
+
+reset_case
+mkdir -p "$PERSISTENT_STATE_DIR"
+mkdir "$ACTIVATED_BACKEND_FILE"
+set_selector_only v1
+expect_failure run_start
+assert_no_backend_mutation
+[ -d "$ACTIVATED_BACKEND_FILE" ] || fail 'activated-backend directory was replaced'
+
+reset_case
+mkdir -p "$PERSISTENT_STATE_DIR"
+printf 'v1\n' >"$TEST_TMP/activated-symlink-target"
+if ln -s "$TEST_TMP/activated-symlink-target" "$ACTIVATED_BACKEND_FILE" 2>/dev/null && [ -L "$ACTIVATED_BACKEND_FILE" ]; then
+	set_selector_only v1
+	expect_failure run_start
+	assert_no_backend_mutation
+	[ -L "$ACTIVATED_BACKEND_FILE" ] || fail 'activated-backend symlink was replaced'
+else
+	echo 'SKIP: activated-backend symlink assertion requires symlink support'
+fi
+
+reset_case
+printf 'not-a-directory\n' >"$PERSISTENT_STATE_DIR"
+set_selector_only v1
+expect_failure run_start
+assert_no_backend_mutation
+[ -f "$PERSISTENT_STATE_DIR" ] || fail 'persistent state non-directory was replaced'
+
+reset_case
+persistent_target="$TEST_TMP/persistent-state-target"
+mkdir "$persistent_target"
+printf 'v1\n' >"$persistent_target/activated-backend"
+rm -rf "$PERSISTENT_STATE_DIR"
+if ln -s "$persistent_target" "$PERSISTENT_STATE_DIR" 2>/dev/null && [ -L "$PERSISTENT_STATE_DIR" ]; then
+	set_selector_only v1
+	expect_failure run_start
+	assert_no_backend_mutation
+	[ -L "$PERSISTENT_STATE_DIR" ] || fail 'persistent state symlink was replaced'
+else
+	echo 'SKIP: persistent state directory symlink assertion requires symlink support'
+fi
+
+# A normal stop clears boot-local evidence but preserves ownership. After a
+# selector change and simulated /var/run loss, activation still cross-blocks.
+reset_case
+set_activated_backend v1
+printf 'v1\n' >"$MARKER_FILE"
+: >"$LEGACY_RUNNING_FILE"
+set_selector_only v1
+PROXYPOOL_TEST_REQUIRE_WAL=v1 expect_success run_stop
+assert_file_line "$ACTIVATED_BACKEND_FILE" v1
+[ ! -e "$MARKER_FILE" ] || fail 'confirmed stop retained boot-local runtime marker'
+[ ! -e "$CLEANUP_REQUIRED_FILE" ] || fail 'confirmed stop retained cleanup intent'
+set_selector_only v2_shadow
+: >"$TRACE_FILE"
+expect_failure run_start
+assert_no_backend_mutation
+assert_file_line "$ACTIVATED_BACKEND_FILE" v1
+
+# A preserved V2 selector is valid only when its activated ownership was
+# restored with it; loss of /var/run does not erase that ownership.
+reset_case
+set_selector v2_shadow
+PROXYPOOL_TEST_REQUIRE_WAL=v2_shadow expect_success run_start
+assert_file_line "$ACTIVATED_BACKEND_FILE" v2_shadow
+assert_file_line "$MARKER_FILE" v2_shadow
+[ ! -e "$CLEANUP_REQUIRED_FILE" ] || fail 'successful V2 start retained cleanup intent'
+
+# R: cleanup-required is a persistent write-ahead log. Failure to publish it
+# aborts before legacy/procd mutation while preserving any successful V1
+# ownership reservation.
+reset_case
+set_selector_only v1
+PROXYPOOL_TEST_FAIL_MARKER_WRITE=cleanup expect_failure run_start
+assert_no_backend_mutation
+assert_file_line "$ACTIVATED_BACKEND_FILE" v1
+[ ! -e "$MARKER_FILE" ] || fail 'WAL write failure published V1 runtime'
+[ ! -e "$CLEANUP_REQUIRED_FILE" ] || fail 'failed WAL write left a valid intent'
+
+reset_case
+set_selector v2_shadow
+PROXYPOOL_TEST_FAIL_MARKER_WRITE=cleanup expect_failure run_start
+assert_no_backend_mutation
+assert_file_line "$ACTIVATED_BACKEND_FILE" v2_shadow
+[ ! -e "$MARKER_FILE" ] || fail 'WAL write failure published V2 runtime'
+
+# Exact, malformed, symlink, or backend-mismatched cleanup evidence blocks
+# start/reload without mutation. Only stop may recover an exact match.
+reset_case
+set_activated_backend v1
+printf 'v1\n' >"$CLEANUP_REQUIRED_FILE"
+printf 'v1\n' >"$MARKER_FILE"
+: >"$LEGACY_RUNNING_FILE"
+set_selector_only v1
+expect_failure run_start
+assert_no_backend_mutation
+assert_file_line "$CLEANUP_REQUIRED_FILE" v1
+
+reset_case
+set_activated_backend v1
+printf 'v1\n' >"$CLEANUP_REQUIRED_FILE"
+printf 'v1\n' >"$MARKER_FILE"
+: >"$LEGACY_RUNNING_FILE"
+set_selector_only v1
+expect_failure run_reload
+assert_no_backend_mutation
+assert_file_line "$CLEANUP_REQUIRED_FILE" v1
+
+reset_case
+set_activated_backend v1
+printf 'v1\nextra\n' >"$CLEANUP_REQUIRED_FILE"
+printf 'v1\n' >"$MARKER_FILE"
+: >"$LEGACY_RUNNING_FILE"
+set_selector_only v1
+expect_failure run_start
+assert_no_backend_mutation
+
+reset_case
+set_activated_backend v1
+printf 'v2_shadow\n' >"$CLEANUP_REQUIRED_FILE"
+printf 'v1\n' >"$MARKER_FILE"
+: >"$LEGACY_RUNNING_FILE"
+set_selector_only v1
+expect_failure run_reload
+assert_no_backend_mutation
+
+reset_case
+set_activated_backend v1
+printf 'v1\n' >"$TEST_TMP/cleanup-symlink-target"
+if ln -s "$TEST_TMP/cleanup-symlink-target" "$CLEANUP_REQUIRED_FILE" 2>/dev/null && [ -L "$CLEANUP_REQUIRED_FILE" ]; then
+	printf 'v1\n' >"$MARKER_FILE"
+	: >"$LEGACY_RUNNING_FILE"
+	set_selector_only v1
+	expect_failure run_start
+	assert_no_backend_mutation
+	[ -L "$CLEANUP_REQUIRED_FILE" ] || fail 'cleanup-required symlink was replaced'
+else
+	echo 'SKIP: cleanup-required symlink assertion requires symlink support'
+fi
+
+reset_case
+set_activated_backend v1
+printf 'v1\n' >"$CLEANUP_REQUIRED_FILE"
+printf 'v1\n' >"$MARKER_FILE"
+: >"$LEGACY_RUNNING_FILE"
+set_selector_only v1
+PROXYPOOL_TEST_REQUIRE_WAL=v1 expect_success run_stop
+assert_contains 'legacy:stop'
+assert_file_line "$ACTIVATED_BACKEND_FILE" v1
+[ ! -e "$MARKER_FILE" ] || fail 'V1 recovery stop retained runtime marker'
+[ ! -e "$CLEANUP_REQUIRED_FILE" ] || fail 'V1 recovery stop retained WAL after confirmed clean'
+
+reset_case
+set_activated_backend v2_shadow
+printf 'v2_shadow\n' >"$CLEANUP_REQUIRED_FILE"
+printf 'v2_shadow\n' >"$MARKER_FILE"
+printf 'old-shadow\n' >"$PROCD_RUNNING_FILE"
+set_selector_only v2_shadow
+PROXYPOOL_TEST_REQUIRE_WAL=v2_shadow expect_success run_stop
+assert_contains 'procd:kill:proxypool'
+assert_file_line "$ACTIVATED_BACKEND_FILE" v2_shadow
+[ ! -e "$MARKER_FILE" ] || fail 'V2 recovery stop retained runtime marker'
+[ ! -e "$CLEANUP_REQUIRED_FILE" ] || fail 'V2 recovery stop retained WAL after confirmed clean'
+
+reset_case
+set_activated_backend v2_shadow
+printf 'corrupt\n' >"$CLEANUP_REQUIRED_FILE"
+printf 'v2_shadow\n' >"$MARKER_FILE"
+printf 'old-shadow\n' >"$PROCD_RUNNING_FILE"
+set_selector_only v2_shadow
+expect_failure run_stop
+assert_no_backend_mutation
+[ -s "$PROCD_RUNNING_FILE" ] || fail 'corrupt recovery evidence allowed procd teardown'
+assert_file_line "$MARKER_FILE" v2_shadow
+
+reset_case
+set_activated_backend v1
+printf 'v1\n' >"$CLEANUP_REQUIRED_FILE"
+printf 'v1\n' >"$MARKER_FILE"
+: >"$LEGACY_RUNNING_FILE"
+set_selector_only v1
+PROXYPOOL_TEST_LEGACY_FAIL=stop PROXYPOOL_TEST_REQUIRE_WAL=v1 expect_failure run_stop
+assert_file_line "$ACTIVATED_BACKEND_FILE" v1
+assert_file_line "$MARKER_FILE" v1
+assert_file_line "$CLEANUP_REQUIRED_FILE" v1
+[ -e "$LEGACY_RUNNING_FILE" ] || fail 'failed V1 recovery lost legacy runtime evidence'
+
+# Clearing the WAL is itself part of commit. A clean stop may clear boot-local
+# runtime, but failure to remove persistent cleanup evidence remains visible.
+reset_case
+set_activated_backend v1
+printf 'v1\n' >"$MARKER_FILE"
+: >"$LEGACY_RUNNING_FILE"
+set_selector_only v1
+PROXYPOOL_TEST_FAIL_MARKER_CLEAR=cleanup PROXYPOOL_TEST_REQUIRE_WAL=v1 expect_failure run_stop
+assert_file_line "$ACTIVATED_BACKEND_FILE" v1
+[ ! -e "$MARKER_FILE" ] || fail 'clean stop with WAL-clear failure retained runtime marker'
+assert_file_line "$CLEANUP_REQUIRED_FILE" v1
+
+reset_case
+set_selector v2_shadow
+printf 'v2_shadow\n' >"$MARKER_FILE"
+printf 'old-shadow\n' >"$PROCD_RUNNING_FILE"
+old_one=$(make_managed_generation ABC123)
+printf '%s\n' "$old_one" >"$ACTIVE_SNAPSHOT_FILE"
+PROXYPOOL_TEST_FAIL_MARKER_CLEAR=runtime PROXYPOOL_TEST_REQUIRE_WAL=v2_shadow expect_failure run_stop
+assert_file_line "$MARKER_FILE" v2_shadow
+assert_file_line "$CLEANUP_REQUIRED_FILE" v2_shadow
+assert_file_line "$ACTIVE_SNAPSHOT_FILE" "$old_one"
+
+reset_case
+set_selector v2_shadow
+printf 'v2_shadow\n' >"$MARKER_FILE"
+printf 'old-shadow\n' >"$PROCD_RUNNING_FILE"
+old_one=$(make_managed_generation ABC123)
+printf '%s\n' "$old_one" >"$ACTIVE_SNAPSHOT_FILE"
+PROXYPOOL_TEST_FAIL_MARKER_CLEAR=active PROXYPOOL_TEST_REQUIRE_WAL=v2_shadow expect_failure run_stop
+assert_file_line "$MARKER_FILE" v2_shadow
+assert_file_line "$CLEANUP_REQUIRED_FILE" v2_shadow
+assert_file_line "$ACTIVE_SNAPSHOT_FILE" "$old_one"
+
+# S: C1 distinguishes occupancy from health. An exact configured-but-stopped
+# instance is never committed; cleanup is attempted and only confirmed global
+# absence permits volatile evidence/WAL/snapshot cleanup.
+reset_case
+set_selector v2_shadow
+PROXYPOOL_TEST_EXACT_STATE=present PROXYPOOL_TEST_REQUIRE_WAL=v2_shadow expect_failure run_start
+assert_contains 'procd:kill:proxypool'
+assert_file_line "$ACTIVATED_BACKEND_FILE" v2_shadow
+[ ! -e "$MARKER_FILE" ] || fail 'non-running exact instance published runtime'
+[ ! -e "$CLEANUP_REQUIRED_FILE" ] || fail 'confirmed cleanup retained V2 WAL'
+assert_generation_count 0
+
+reset_case
+set_selector v2_shadow
+PROXYPOOL_TEST_EXACT_STATE=present PROXYPOOL_TEST_KILL=noop PROXYPOOL_TEST_REQUIRE_WAL=v2_shadow expect_failure run_start
+assert_contains 'procd:kill:proxypool'
+assert_file_line "$ACTIVATED_BACKEND_FILE" v2_shadow
+assert_file_line "$CLEANUP_REQUIRED_FILE" v2_shadow
+[ ! -e "$MARKER_FILE" ] || fail 'unclean non-running fresh V2 published runtime'
+assert_generation_count 1
+
+# A destructive same-backend failure cannot retain a successful runtime
+# illusion after global absence is confirmed. Uncertain cleanup retains the
+# old runtime plus WAL/quarantine for explicit stop recovery.
+reset_case
+set_activated_backend v2_shadow
+printf 'v2_shadow\n' >"$MARKER_FILE"
+printf 'old-shadow\n' >"$PROCD_RUNNING_FILE"
+set_selector_only v2_shadow
+PROXYPOOL_TEST_FAIL_PROCD_STEP='param:stdout' PROXYPOOL_TEST_REQUIRE_WAL=v2_shadow expect_failure run_start
+assert_file_line "$ACTIVATED_BACKEND_FILE" v2_shadow
+[ ! -e "$MARKER_FILE" ] || fail 'confirmed failed V2 replacement retained runtime marker'
+[ ! -e "$CLEANUP_REQUIRED_FILE" ] || fail 'confirmed failed V2 replacement retained WAL'
+
+reset_case
+set_activated_backend v2_shadow
+printf 'v2_shadow\n' >"$MARKER_FILE"
+printf 'old-shadow\n' >"$PROCD_RUNNING_FILE"
+set_selector_only v2_shadow
+PROXYPOOL_TEST_FAIL_PROCD_STEP='param:stdout' PROXYPOOL_TEST_KILL=noop PROXYPOOL_TEST_REQUIRE_WAL=v2_shadow expect_failure run_start
+assert_file_line "$MARKER_FILE" v2_shadow
+assert_file_line "$CLEANUP_REQUIRED_FILE" v2_shadow
+assert_generation_count 1
+
+reset_case
+set_activated_backend v1
+printf 'v1\n' >"$MARKER_FILE"
+: >"$LEGACY_RUNNING_FILE"
+set_selector_only v1
+PROXYPOOL_TEST_LEGACY_FAIL=start PROXYPOOL_TEST_REQUIRE_WAL=v1 expect_failure run_start
+assert_file_line "$ACTIVATED_BACKEND_FILE" v1
+[ ! -e "$MARKER_FILE" ] || fail 'clean failed V1 replacement retained runtime marker'
+[ ! -e "$CLEANUP_REQUIRED_FILE" ] || fail 'clean failed V1 replacement retained WAL'
+
+reset_case
+set_activated_backend v1
+printf 'v1\n' >"$MARKER_FILE"
+: >"$LEGACY_RUNNING_FILE"
+set_selector_only v1
+PROXYPOOL_TEST_LEGACY_FAIL=stop PROXYPOOL_TEST_REQUIRE_WAL=v1 expect_failure run_start
+assert_file_line "$MARKER_FILE" v1
+assert_file_line "$CLEANUP_REQUIRED_FILE" v1
+assert_file_line "$QUARANTINE_FILE" v1
+
+# T: The classified V1 bytes remain owned until the final legacy call. Any
+# live-file mutation is detected immediately before stop/start/reload. If stop
+# already completed, runtime is cleared and ownership remains for recovery.
+reset_case
+set_selector_only v1
+PROXYPOOL_TEST_MUTATE_LEGACY_DURING_CLASSIFY=1 expect_failure run_start
+assert_no_backend_mutation
+assert_file_line "$ACTIVATED_BACKEND_FILE" v1
+[ ! -e "$CLEANUP_REQUIRED_FILE" ] || fail 'pre-mutation V1 mismatch wrote WAL'
+assert_generation_count 0
+
+reset_case
+set_activated_backend v1
+printf 'v1\n' >"$MARKER_FILE"
+: >"$LEGACY_RUNNING_FILE"
+set_selector_only v1
+PROXYPOOL_TEST_MUTATE_LEGACY_DURING_CLASSIFY=1 expect_failure run_stop
+assert_no_backend_mutation
+assert_file_line "$MARKER_FILE" v1
+[ -e "$LEGACY_RUNNING_FILE" ] || fail 'V1 stop mutated backend after snapshot mismatch'
+
+reset_case
+set_activated_backend v1
+printf 'v1\n' >"$MARKER_FILE"
+: >"$LEGACY_RUNNING_FILE"
+set_selector_only v1
+PROXYPOOL_TEST_MUTATE_LEGACY_DURING_CLASSIFY=1 expect_failure run_reload
+assert_no_backend_mutation
+assert_file_line "$MARKER_FILE" v1
+
+reset_case
+set_activated_backend v1
+printf 'v1\n' >"$MARKER_FILE"
+: >"$LEGACY_RUNNING_FILE"
+set_selector_only v1
+PROXYPOOL_TEST_MUTATE_LEGACY_AFTER_STOP=1 PROXYPOOL_TEST_REQUIRE_WAL=v1 expect_failure run_start
+assert_contains 'legacy:stop'
+assert_not_contains_fragment 'legacy:start'
+assert_file_line "$ACTIVATED_BACKEND_FILE" v1
+[ ! -e "$MARKER_FILE" ] || fail 'post-stop V1 mutation retained runtime marker'
+[ ! -e "$CLEANUP_REQUIRED_FILE" ] || fail 'post-stop V1 mutation retained WAL after clean stop'
+[ ! -e "$LEGACY_RUNNING_FILE" ] || fail 'post-stop V1 mutation resurrected legacy runtime'
+
+reset_case
+set_selector_only v1
+PROXYPOOL_TEST_LEGACY_FAIL=start PROXYPOOL_TEST_MUTATE_LEGACY_ON_START_FAILURE=1 PROXYPOOL_TEST_REQUIRE_WAL=v1 expect_failure run_start
+assert_contains 'legacy:start'
+[ "$(grep -Fxc 'legacy:stop' "$TRACE_FILE" || true)" -eq 0 ] || fail 'V1 rollback ignored changed live config'
+assert_file_line "$ACTIVATED_BACKEND_FILE" v1
+assert_file_line "$CLEANUP_REQUIRED_FILE" v1
+assert_file_line "$QUARANTINE_FILE" v1
+
+reset_case
+set_activated_backend v1
+printf 'v1\n' >"$MARKER_FILE"
+: >"$LEGACY_RUNNING_FILE"
+set_selector_only v1
+PROXYPOOL_TEST_LEGACY_FAIL=reload PROXYPOOL_TEST_REQUIRE_WAL=v1 expect_failure run_reload
+assert_contains 'legacy:reload'
+assert_contains 'legacy:stop'
+assert_file_line "$ACTIVATED_BACKEND_FILE" v1
+[ ! -e "$MARKER_FILE" ] || fail 'clean failed V1 reload retained runtime marker'
+[ ! -e "$CLEANUP_REQUIRED_FILE" ] || fail 'clean failed V1 reload retained WAL'
+
+reset_case
+set_activated_backend v1
+printf 'v1\n' >"$MARKER_FILE"
+: >"$LEGACY_RUNNING_FILE"
+set_selector_only v1
+PROXYPOOL_TEST_LEGACY_FAIL=reload_and_stop PROXYPOOL_TEST_REQUIRE_WAL=v1 expect_failure run_reload
+assert_file_line "$MARKER_FILE" v1
+assert_file_line "$CLEANUP_REQUIRED_FILE" v1
+assert_file_line "$QUARANTINE_FILE" v1
+
+# Successful backend commit followed by WAL-clear failure reports failure and
+# leaves persistent cleanup evidence rather than claiming a fully clean start.
+reset_case
+set_selector_only v1
+PROXYPOOL_TEST_FAIL_MARKER_CLEAR=cleanup PROXYPOOL_TEST_REQUIRE_WAL=v1 expect_failure run_start
+assert_file_line "$ACTIVATED_BACKEND_FILE" v1
+assert_file_line "$MARKER_FILE" v1
+assert_file_line "$CLEANUP_REQUIRED_FILE" v1
+[ -e "$LEGACY_RUNNING_FILE" ] || fail 'WAL-clear failure rolled back a committed V1 backend'
 
 reset_case
 expect_success run_action triggers

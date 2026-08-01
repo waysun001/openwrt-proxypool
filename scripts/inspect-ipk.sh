@@ -39,10 +39,16 @@ for overlay_only in proxypool_v2 proxypool_runtime; do
 		exit 1
 	}
 done
+for runtime_state in activated-backend cleanup-required; do
+	[ ! -e "$inspect_tmp/data/etc/proxypool/$runtime_state" ] || {
+		echo "package payload unexpectedly owns /etc/proxypool/$runtime_state" >&2
+		exit 1
+	}
+done
 
 keep="$inspect_tmp/data/lib/upgrade/keep.d/proxypool"
 expected_keep="$inspect_tmp/expected-keep"
-printf '/etc/config/proxypool_v2\n/etc/config/proxypool_runtime\n' >"$expected_keep"
+printf '/etc/config/proxypool_v2\n/etc/config/proxypool_runtime\n/etc/proxypool/activated-backend\n/etc/proxypool/cleanup-required\n' >"$expected_keep"
 [ -f "$keep" ] && cmp -s "$expected_keep" "$keep" || { echo 'missing or invalid sysupgrade keep list' >&2; exit 1; }
 [ "$(stat -c '%a' "$keep")" = 644 ] || { echo 'unexpected mode for sysupgrade keep list' >&2; exit 1; }
 

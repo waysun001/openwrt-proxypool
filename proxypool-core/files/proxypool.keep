@@ -1,2 +1,4 @@
 /etc/config/proxypool_v2
 /etc/config/proxypool_runtime
+/etc/proxypool/activated-backend
+/etc/proxypool/cleanup-required
