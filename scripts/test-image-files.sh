@@ -52,4 +52,40 @@ for required_config in proxypool proxypool_v2 proxypool_runtime; do
 	}
 done
 
+# Model a settings-preserving sysupgrade from a legacy-only V1 image. The old
+# backup has no selector, so the new ROM default remains visible after restore
+# and must not silently select V2. The separate V2 shadow config still ships so
+# a later explicit migration has a validated target.
+ROM="$TEST_TMP/rom"
+OLD_V1_BACKUP="$TEST_TMP/old-v1-backup"
+UPGRADED_V1="$TEST_TMP/upgraded-v1"
+sh "$PREPARE" "$ROOT/files" "$ROM"
+mkdir -p "$OLD_V1_BACKUP/etc/config" "$UPGRADED_V1"
+cp "$ROOT/proxypool-core/files/proxypool.config" "$OLD_V1_BACKUP/etc/config/proxypool"
+cp -a "$ROM/." "$UPGRADED_V1/"
+cp -a "$OLD_V1_BACKUP/." "$UPGRADED_V1/"
+grep -Fq "option runtime_backend 'v1'" "$UPGRADED_V1/etc/config/proxypool_runtime" || {
+	echo 'legacy V1 sysupgrade inherited a non-V1 ROM selector' >&2
+	exit 1
+}
+if grep -Fq "option runtime_backend 'v2_shadow'" "$UPGRADED_V1/etc/config/proxypool_runtime"; then
+	echo 'legacy V1 sysupgrade silently selected V2 shadow' >&2
+	exit 1
+fi
+grep -Fq "option schema_version '2'" "$UPGRADED_V1/etc/config/proxypool_v2"
+grep -Fq "option runtime_backend 'v2_shadow'" "$UPGRADED_V1/etc/config/proxypool_v2"
+
+# An existing V2 selector is an explicitly preserved sysupgrade file and must
+# override the safer phase-1 ROM default when restored from the keep archive.
+V2_KEEP_BACKUP="$TEST_TMP/v2-keep-backup"
+UPGRADED_V2="$TEST_TMP/upgraded-v2"
+mkdir -p "$V2_KEEP_BACKUP/etc/config" "$UPGRADED_V2"
+printf "config global 'global'\n\toption runtime_backend 'v2_shadow'\n" >"$V2_KEEP_BACKUP/etc/config/proxypool_runtime"
+cp -a "$ROM/." "$UPGRADED_V2/"
+cp -a "$V2_KEEP_BACKUP/." "$UPGRADED_V2/"
+grep -Fq "option runtime_backend 'v2_shadow'" "$UPGRADED_V2/etc/config/proxypool_runtime" || {
+	echo 'preserved V2 selector did not override the ROM default' >&2
+	exit 1
+}
+
 echo 'ImageBuilder FILES staging: PASS'

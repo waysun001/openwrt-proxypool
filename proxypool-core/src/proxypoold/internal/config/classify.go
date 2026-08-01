@@ -169,7 +169,7 @@ func declaresV2(sections []*uciSection) bool {
 }
 
 var legacyGlobalOptions = []string{"enabled", "runtime_backend", "max_clients", "log_level", "lease_days", "lease_used"}
-var legacyClientOptions = []string{"enabled", "name", "type", "server", "port", "username", "password", "expiry", "slp_token", "slp_transport", "slp_obfs", "slp_obfs_key", "slp_insecure"}
+var legacyClientOptions = []string{"enabled", "name", "type", "server", "port", "username", "password", "expiry", "remark", "slp_token", "slp_transport", "slp_obfs", "slp_obfs_key", "slp_insecure"}
 var legacyClientLists = []string{"bind_ip"}
 
 func validLegacyV1(sections []*uciSection) bool {

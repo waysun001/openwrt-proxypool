@@ -172,10 +172,23 @@ func inspectProcdState(data []byte, service, instance string) string {
 		}
 		return "present"
 	}
-	if _, exists := instances[instance]; exists {
-		return "present"
+	instanceValue, exists := instances[instance]
+	if !exists {
+		return "absent"
 	}
-	return "absent"
+	instanceObject := instanceValue.(map[string]any)
+	runningValue, exists := instanceObject["running"]
+	if !exists {
+		return "unknown"
+	}
+	running, ok := runningValue.(bool)
+	if !ok {
+		return "unknown"
+	}
+	if running {
+		return "running"
+	}
+	return "present"
 }
 
 func runClassify(args []string, stdout, stderr io.Writer) int {

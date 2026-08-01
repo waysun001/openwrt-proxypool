@@ -108,7 +108,11 @@ fi
 [ -f "$IMAGE_OVERLAY_SELECTOR" ] || { echo 'missing ImageBuilder runtime selector' >&2; exit 1; }
 cmp -s "$PACKAGE_DEFAULT" "$IMAGE_OVERLAY_DEFAULT" || { echo 'ImageBuilder legacy rollback config differs from the package V1 baseline' >&2; exit 1; }
 require_fixed "$IMAGE_OVERLAY_V2" "option runtime_backend 'v2_shadow'"
-require_fixed "$IMAGE_OVERLAY_SELECTOR" "option runtime_backend 'v2_shadow'"
+require_fixed "$IMAGE_OVERLAY_SELECTOR" "option runtime_backend 'v1'"
+if grep -Fq "option runtime_backend 'v2_shadow'" "$IMAGE_OVERLAY_SELECTOR"; then
+	echo 'phase-1 ImageBuilder selector would silently switch a legacy V1 sysupgrade to V2' >&2
+	exit 1
+fi
 if grep -Fq 'schema_version' "$IMAGE_OVERLAY_DEFAULT"; then
 	echo 'legacy rollback config was replaced by a V2 config' >&2
 	exit 1

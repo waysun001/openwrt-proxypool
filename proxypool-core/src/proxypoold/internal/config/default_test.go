@@ -25,7 +25,7 @@ func TestPackagedDefaultRemainsTheExactLegacyV1UpgradeBaseline(t *testing.T) {
 	}
 }
 
-func TestImageBuilderDefaultIsStrictEmptyV2ShadowWithOperationalDNS(t *testing.T) {
+func TestImageBuilderDefaultSelectsV1AndRetainsStrictEmptyV2Shadow(t *testing.T) {
 	overlayRoot := filepath.Join("..", "..", "..", "..", "..", "files", "etc", "config")
 	legacyContents, err := os.ReadFile(filepath.Join(overlayRoot, "proxypool"))
 	if err != nil {
@@ -35,7 +35,7 @@ func TestImageBuilderDefaultIsStrictEmptyV2ShadowWithOperationalDNS(t *testing.T
 		t.Fatalf("ImageBuilder legacy rollback config changed: sha256=%s", got)
 	}
 	selector := InspectRuntimeSelectorFile(filepath.Join(overlayRoot, "proxypool_runtime"))
-	if selector != RuntimeSelectionV2Shadow {
+	if selector != RuntimeSelectionV1 {
 		t.Fatalf("ImageBuilder selector=%q", selector)
 	}
 	contents, err := os.ReadFile(filepath.Join(overlayRoot, "proxypool_v2"))

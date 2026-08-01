@@ -253,7 +253,7 @@ func TestRunProcdStateRequiresExactArgumentsWithoutQuerying(t *testing.T) {
 	}
 }
 
-func TestRunProcdStateReportsStructuralThreeState(t *testing.T) {
+func TestRunProcdStateReportsStrictOccupancyAndExactHealth(t *testing.T) {
 	tests := []struct {
 		name       string
 		instance   string
@@ -266,8 +266,12 @@ func TestRunProcdStateReportsStructuralThreeState(t *testing.T) {
 		{name: "service missing", response: `{}`, wantStdout: "absent\n"},
 		{name: "instances empty", response: `{"proxypool":{"instances":{}}}`, wantStdout: "absent\n"},
 		{name: "any instance present", response: "{\n\"proxypool\":{\"instances\":{\"main\":{\"running\":false}}}}\n", wantStdout: "present\n"},
-		{name: "exact instance present", instance: "blue", response: `{"proxypool":{"instances":{"main":{},"blue":{"running":true}}}}`, wantStdout: "present\n"},
+		{name: "any instance occupancy does not require health", response: `{"proxypool":{"instances":{"main":{"pid":123}}}}`, wantStdout: "present\n"},
+		{name: "exact instance running", instance: "blue", response: `{"proxypool":{"instances":{"main":{},"blue":{"running":true}}}}`, wantStdout: "running\n"},
+		{name: "exact instance configured but not running", instance: "blue", response: `{"proxypool":{"instances":{"blue":{"running":false}}}}`, wantStdout: "present\n"},
 		{name: "exact instance absent", instance: "blue", response: `{"proxypool":{"instances":{"main":{"running":true}}}}`, wantStdout: "absent\n"},
+		{name: "exact instance running missing", instance: "blue", response: `{"proxypool":{"instances":{"blue":{"pid":123}}}}`, wantCode: 1, wantStdout: "unknown\n", wantStderr: "procd state query failed\n"},
+		{name: "exact instance running malformed", instance: "blue", response: `{"proxypool":{"instances":{"blue":{"running":"json-secret-password"}}}}`, wantCode: 1, wantStdout: "unknown\n", wantStderr: "procd state query failed\n"},
 		{name: "query error", queryErr: errors.New("ubus-secret-password"), wantCode: 1, wantStdout: "unknown\n", wantStderr: "procd state query failed\n"},
 		{name: "second document", response: `{"proxypool":{"instances":{}}} {"password":"json-secret-password"}`, wantCode: 1, wantStdout: "unknown\n", wantStderr: "procd state query failed\n"},
 		{name: "root malformed", response: `[]`, wantCode: 1, wantStdout: "unknown\n", wantStderr: "procd state query failed\n"},

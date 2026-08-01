@@ -57,6 +57,37 @@ config client 'old_l2tp'
 	}
 }
 
+func TestClassifyRecognizesCompleteLuCILegacyClientShape(t *testing.T) {
+	legacy := []byte(`config global 'global'
+	option enabled '1'
+	option max_clients '60'
+	option log_level 'info'
+	option lease_days '360'
+	option lease_used '12'
+
+config client 'luci_client'
+	option enabled '1'
+	option name 'LuCI node'
+	option type 'slp'
+	option server 'proxy.example.com'
+	option port '443'
+	option username 'alice'
+	option password 'legacy-password'
+	option expiry '2027-01-01'
+	option remark 'office router'
+	option slp_token 'legacy-token'
+	option slp_transport 'quic'
+	option slp_obfs '1'
+	option slp_obfs_key 'legacy-obfs-key'
+	option slp_insecure '0'
+	list bind_ip '192.168.9.10'
+`)
+
+	if got := Classify(legacy).State(); got != ConfigMigrationRequired {
+		t.Fatalf("state = %q, want %q", got, ConfigMigrationRequired)
+	}
+}
+
 func TestClassifyRecognizesExplicitV1BackendAsLegacy(t *testing.T) {
 	legacy := []byte("config global 'global'\n\toption enabled '1'\n\toption runtime_backend 'v1'\n\toption max_clients '60'\n")
 	if got := Classify(legacy).State(); got != ConfigMigrationRequired {
@@ -73,6 +104,7 @@ func TestClassifyRejectsEmptyUnknownAndDeclaredButBrokenV2(t *testing.T) {
 		{name: "generic global is not genuine v1", data: []byte("config global 'global'\n\toption enabled '1'\n")},
 		{name: "unknown section", data: []byte("config mystery 'x'\n\toption enabled '1'\n")},
 		{name: "unknown legacy option", data: []byte("config global 'global'\n\toption enabled '1'\n\toption surprise '1'\n")},
+		{name: "unknown legacy client option", data: []byte("config global 'global'\n\toption max_clients '60'\nconfig client 'old'\n\toption future_option '1'\n")},
 		{name: "malformed uci", data: []byte("config global 'global\n")},
 		{name: "unknown schema", data: []byte("config global 'global'\n\toption schema_version '99'\n")},
 		{name: "v2 marker without schema", data: []byte("config global 'global'\n\toption runtime_backend 'v2_shadow'\n")},
