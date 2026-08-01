@@ -104,8 +104,108 @@ type JobStore struct {
 	nextSequence uint64
 }
 
+// JobSnapshot is the complete bounded, credential-free durable projection of
+// JobStore. Jobs and events retain insertion order; NextEventSequence prevents
+// sequence reuse after a daemon restart.
+type JobSnapshot struct {
+	Jobs              []Job       `json:"jobs"`
+	Events            []NodeEvent `json:"events"`
+	NextEventSequence uint64      `json:"next_event_sequence"`
+}
+
 func NewJobStore() *JobStore {
 	return &JobStore{jobs: make(map[string]Job)}
+}
+
+// Snapshot returns an independent copy suitable for durable storage.
+func (s *JobStore) Snapshot() JobSnapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.snapshotLocked()
+}
+
+// Restore replaces the retained state only after the entire snapshot has been
+// validated. Invalid snapshots never partially mutate live work.
+func (s *JobStore) Restore(snapshot JobSnapshot) error {
+	normalized, err := normalizeJobSnapshot(snapshot)
+	if err != nil {
+		return err
+	}
+
+	jobs := make(map[string]Job, len(normalized.Jobs))
+	order := make([]string, 0, len(normalized.Jobs))
+	for _, job := range normalized.Jobs {
+		jobs[job.ID] = cloneJob(job)
+		order = append(order, job.ID)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.jobs = jobs
+	s.jobOrder = order
+	s.events = cloneNodeEvents(normalized.Events)
+	s.nextSequence = normalized.NextEventSequence
+	return nil
+}
+
+func (s *JobStore) snapshotLocked() JobSnapshot {
+	jobs := make([]Job, 0, len(s.jobOrder))
+	for _, id := range s.jobOrder {
+		jobs = append(jobs, cloneJob(s.jobs[id]))
+	}
+	return JobSnapshot{
+		Jobs:              jobs,
+		Events:            cloneNodeEvents(s.events),
+		NextEventSequence: s.nextSequence,
+	}
+}
+
+func normalizeJobSnapshot(snapshot JobSnapshot) (JobSnapshot, error) {
+	if len(snapshot.Jobs) > MaxRetainedJobs || len(snapshot.Events) > MaxRetainedNodeEvents {
+		return JobSnapshot{}, codeError(ErrorCodeCapacityExceeded, "runtime snapshot capacity is exceeded")
+	}
+	normalized := JobSnapshot{
+		Jobs:              make([]Job, 0, len(snapshot.Jobs)),
+		Events:            make([]NodeEvent, 0, len(snapshot.Events)),
+		NextEventSequence: snapshot.NextEventSequence,
+	}
+	seenJobs := make(map[string]struct{}, len(snapshot.Jobs))
+	for _, job := range snapshot.Jobs {
+		if !validJob(job) {
+			return JobSnapshot{}, codeError(ErrorCodeInvalidConfig, "runtime job snapshot is invalid")
+		}
+		if _, exists := seenJobs[job.ID]; exists {
+			return JobSnapshot{}, codeError(ErrorCodeDuplicate, "runtime job snapshot contains a duplicate")
+		}
+		seenJobs[job.ID] = struct{}{}
+		normalized.Jobs = append(normalized.Jobs, cloneJob(job))
+	}
+
+	var previousSequence uint64
+	for _, event := range snapshot.Events {
+		if !validStoredNodeEvent(event) || event.Sequence <= previousSequence {
+			return JobSnapshot{}, codeError(ErrorCodeInvalidConfig, "runtime event snapshot is invalid")
+		}
+		previousSequence = event.Sequence
+		normalized.Events = append(normalized.Events, cloneNodeEvent(event))
+	}
+	if len(normalized.Events) > 0 && previousSequence != normalized.NextEventSequence {
+		return JobSnapshot{}, codeError(ErrorCodeInvalidConfig, "runtime event sequence is invalid")
+	}
+	return normalized, nil
+}
+
+func validStoredNodeEvent(event NodeEvent) bool {
+	return event.Sequence > 0 && event.JobID != "" && event.NodeID != "" && event.Generation > 0 &&
+		!event.At.IsZero() && validRuntimeState(event.State)
+}
+
+func cloneNodeEvents(events []NodeEvent) []NodeEvent {
+	cloned := make([]NodeEvent, len(events))
+	for index := range events {
+		cloned[index] = cloneNodeEvent(events[index])
+	}
+	return cloned
 }
 
 // Put inserts a job or advances an existing job through a legal monotonic
