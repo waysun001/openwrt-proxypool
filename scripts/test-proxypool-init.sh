@@ -158,6 +158,29 @@ assert_file_line() {
 	[ -f "$1" ] && [ "$(cat "$1")" = "$2" ] || fail "unexpected file content: $1"
 }
 
+generation_count() {
+	count=0
+	if [ -d "$SNAPSHOT_ROOT" ] && [ ! -L "$SNAPSHOT_ROOT" ]; then
+		for generation in "$SNAPSHOT_ROOT"/generation.*; do
+			[ -e "$generation" ] || [ -L "$generation" ] || continue
+			count=$((count + 1))
+		done
+	fi
+	printf '%s\n' "$count"
+}
+
+assert_generation_count() {
+	actual=$(generation_count)
+	[ "$actual" -eq "$1" ] || fail "expected $1 snapshot generation(s), found $actual"
+}
+
+make_managed_generation() {
+	generation="$SNAPSHOT_ROOT/generation.$1"
+	mkdir -p "$generation"
+	cp "$V2_CONFIG_FILE" "$generation/proxypool"
+	printf '%s\n' "$generation"
+}
+
 expect_success() {
 	if ! "$@"; then fail "expected success: $*"; fi
 }
@@ -298,12 +321,10 @@ run_action() (
 		return "$start_result"
 	}
 	stop() {
-		local stop_result=0
 		printf 'rc:stop\n' >>"$TRACE_FILE"
-		stop_service || stop_result=$?
+		stop_service || true
 		procd_kill proxypool || true
-		service_stopped || true
-		return "$stop_result"
+		service_stopped
 	}
 	sleep() { printf 'sleep:%s\n' "$*" >>"$TRACE_FILE"; }
 
@@ -486,6 +507,7 @@ reset_case
 set_selector v2_shadow
 PROXYPOOL_TEST_SERVICE_SET=wrong_instance expect_failure run_start
 [ ! -e "$MARKER_FILE" ] || fail 'wrong instance published V2 marker'
+assert_generation_count 1
 
 reset_case
 set_selector v2_shadow
@@ -523,6 +545,52 @@ assert_contains 'ctl:procd:any'
 
 # Disabled same-backend starts clear evidence only after confirmed global
 # procd absence. Query uncertainty or a lingering instance retains evidence.
+
+# A markerless live V1 upgrade is recognized only through a genuine V1
+# selector/config plus concrete legacy runtime evidence. Stop/disable must not
+# leave that runtime behind, and rc.common must report teardown failures via
+# service_stopped (the final hook in the real stop sequence).
+reset_case
+mkdir "$TEST_TMP/legacy-run"
+: >"$LEGACY_RUNNING_FILE"
+expect_success run_stop
+assert_before 'legacy:stop' 'procd:kill:proxypool'
+[ ! -e "$LEGACY_RUNNING_FILE" ] || fail 'markerless V1 stop left legacy runtime running'
+
+reset_case
+mkdir "$TEST_TMP/legacy-run"
+: >"$LEGACY_RUNNING_FILE"
+PROXYPOOL_TEST_LEGACY_FAIL=stop expect_failure run_stop
+assert_contains 'legacy:stop'
+[ -e "$LEGACY_RUNNING_FILE" ] || fail 'failed markerless V1 stop lost runtime evidence'
+
+reset_case
+mkdir "$TEST_TMP/legacy-run"
+: >"$LEGACY_RUNNING_FILE"
+write_legacy_config 0
+expect_success run_start
+assert_before 'legacy:stop' 'procd:service-close:set'
+assert_not_contains_fragment 'legacy:start'
+[ ! -e "$LEGACY_RUNNING_FILE" ] || fail 'disabled markerless V1 left legacy runtime running'
+[ ! -e "$MARKER_FILE" ] || fail 'disabled markerless V1 published a backend marker'
+
+reset_case
+mkdir "$TEST_TMP/legacy-run"
+: >"$LEGACY_RUNNING_FILE"
+write_legacy_config 0
+PROXYPOOL_TEST_LEGACY_FAIL=stop expect_failure run_start
+assert_contains 'legacy:stop'
+[ -e "$LEGACY_RUNNING_FILE" ] || fail 'failed markerless V1 disable lost runtime evidence'
+
+reset_case
+mkdir "$TEST_TMP/legacy-run"
+: >"$LEGACY_RUNNING_FILE"
+set_selector v2_shadow
+expect_failure run_stop
+assert_not_contains_fragment 'legacy:'
+[ -e "$LEGACY_RUNNING_FILE" ] || fail 'non-V1 stop mutated markerless legacy evidence'
+assert_generation_count 0
+
 reset_case
 printf 'v2_shadow\n' >"$MARKER_FILE"
 printf 'old-shadow\n' >"$PROCD_RUNNING_FILE"
@@ -647,12 +715,245 @@ reset_case
 set_selector v2_shadow
 expect_success run_start
 first_instance=$(cat "$PROCD_RUNNING_FILE")
+first_snapshot=$(cat "$ACTIVE_SNAPSHOT_FILE")
+assert_generation_count 1
 : >"$TRACE_FILE"
 expect_success run_reload
 second_instance=$(cat "$PROCD_RUNNING_FILE")
+second_snapshot=$(cat "$ACTIVE_SNAPSHOT_FILE")
 [ "$first_instance" != "$second_instance" ] || fail 'V2 reload reused its procd instance token'
+[ "$first_snapshot" != "$second_snapshot" ] || fail 'V2 reload reused its immutable snapshot'
+[ ! -e "$first_snapshot" ] || fail 'successful V2 reload retained the superseded snapshot'
+[ -f "$second_snapshot/proxypool" ] || fail 'successful V2 reload lost its active snapshot'
+assert_generation_count 1
 assert_contains 'rc:start'
 assert_contains "ctl:procd:$second_instance"
+
+# I: Every snapshot-builder rejection owns and removes the generation it
+# created, including failures after the config copy has completed.
+reset_case
+set_selector v2_shadow
+PROXYPOOL_TEST_SELECTOR_OUTPUT=failure expect_failure run_start
+assert_generation_count 0
+
+reset_case
+set_selector v2_shadow
+rm -f "$V2_CONFIG_FILE"
+expect_failure run_start
+assert_generation_count 0
+
+reset_case
+set_selector v2_shadow
+write_v2_config bad_output 1
+expect_failure run_start
+assert_generation_count 0
+
+reset_case
+set_selector v2_shadow
+PROXYPOOL_TEST_ENABLED_FAILURE=1 expect_failure run_start
+assert_generation_count 0
+
+# J: A valid snapshot is also discarded when admission rejects it before an
+# instance is staged.
+reset_case
+printf 'v1\n' >"$MARKER_FILE"
+: >"$LEGACY_RUNNING_FILE"
+set_selector v2_shadow
+expect_failure run_start
+assert_generation_count 0
+
+reset_case
+mkdir "$TEST_TMP/legacy-run"
+set_selector v2_shadow
+expect_failure run_start
+assert_generation_count 0
+
+reset_case
+set_selector v2_shadow
+PROXYPOOL_TEST_QUERY=unknown expect_failure run_start
+assert_generation_count 0
+
+# K: V1 and disabled paths never retain classifier-only generations, whether
+# the legacy action succeeds, fails, or needs rollback.
+reset_case
+set_selector v1
+expect_success run_start
+assert_generation_count 0
+
+reset_case
+set_selector v1
+PROXYPOOL_TEST_LEGACY_FAIL=start expect_failure run_start
+assert_generation_count 0
+
+reset_case
+set_selector v1
+PROXYPOOL_TEST_LEGACY_FAIL=start_and_stop expect_failure run_start
+assert_generation_count 0
+
+reset_case
+printf 'v1\n' >"$MARKER_FILE"
+: >"$LEGACY_RUNNING_FILE"
+set_selector v1
+expect_success run_reload
+assert_generation_count 0
+
+reset_case
+printf 'v1\n' >"$MARKER_FILE"
+: >"$LEGACY_RUNNING_FILE"
+set_selector v1
+write_legacy_config 0
+expect_success run_start
+assert_generation_count 0
+
+reset_case
+mkdir "$TEST_TMP/legacy-run"
+: >"$LEGACY_RUNNING_FILE"
+expect_success run_stop
+assert_generation_count 0
+
+# M: A V2 candidate is removed only after absence is confirmed. Any exact or
+# global query uncertainty, or a still-present instance, keeps the candidate.
+reset_case
+set_selector v2_shadow
+PROXYPOOL_TEST_SERVICE_SET=ignore expect_failure run_start
+assert_generation_count 0
+
+reset_case
+set_selector v2_shadow
+PROXYPOOL_TEST_QUERY=unknown_after_first expect_failure run_start
+assert_generation_count 1
+
+reset_case
+set_selector v2_shadow
+PROXYPOOL_TEST_FAIL_PROCD_STEP='param:stdout' expect_failure run_start
+assert_generation_count 0
+
+reset_case
+set_selector v2_shadow
+PROXYPOOL_TEST_FAIL_PROCD_STEP='param:stdout' PROXYPOOL_TEST_KILL=noop expect_failure run_start
+assert_generation_count 1
+
+reset_case
+set_selector v2_shadow
+PROXYPOOL_TEST_FAIL_MARKER_WRITE=runtime expect_failure run_start
+assert_generation_count 0
+
+reset_case
+set_selector v2_shadow
+PROXYPOOL_TEST_FAIL_MARKER_WRITE=runtime PROXYPOOL_TEST_KILL=noop expect_failure run_start
+assert_generation_count 1
+
+# N: Once global procd absence is confirmed, stop and disable safely sweep all
+# managed generations. A present/unknown service retains both data and pointer.
+reset_case
+old_one=$(make_managed_generation ABC123)
+old_two=$(make_managed_generation DEF456)
+printf '%s\n' "$old_one" >"$ACTIVE_SNAPSHOT_FILE"
+printf 'v2_shadow\n' >"$MARKER_FILE"
+printf 'old-shadow\n' >"$PROCD_RUNNING_FILE"
+expect_success run_stop
+assert_generation_count 0
+[ ! -e "$ACTIVE_SNAPSHOT_FILE" ] || fail 'confirmed stop retained active snapshot pointer'
+
+reset_case
+old_one=$(make_managed_generation ABC123)
+old_two=$(make_managed_generation DEF456)
+printf '%s\n' "$old_one" >"$ACTIVE_SNAPSHOT_FILE"
+printf 'v2_shadow\n' >"$MARKER_FILE"
+printf 'old-shadow\n' >"$PROCD_RUNNING_FILE"
+PROXYPOOL_TEST_KILL=noop expect_success run_stop
+assert_generation_count 2
+assert_file_line "$ACTIVE_SNAPSHOT_FILE" "$old_one"
+
+reset_case
+old_one=$(make_managed_generation ABC123)
+old_two=$(make_managed_generation DEF456)
+printf '%s\n' "$old_one" >"$ACTIVE_SNAPSHOT_FILE"
+printf 'v2_shadow\n' >"$MARKER_FILE"
+printf 'old-shadow\n' >"$PROCD_RUNNING_FILE"
+PROXYPOOL_TEST_QUERY=unknown expect_success run_stop
+assert_generation_count 2
+assert_file_line "$ACTIVE_SNAPSHOT_FILE" "$old_one"
+
+reset_case
+old_one=$(make_managed_generation ABC123)
+old_two=$(make_managed_generation DEF456)
+printf '%s\n' "$old_one" >"$ACTIVE_SNAPSHOT_FILE"
+printf 'v2_shadow\n' >"$MARKER_FILE"
+printf 'old-shadow\n' >"$PROCD_RUNNING_FILE"
+set_selector v2_shadow
+write_v2_config v2_shadow 0
+PROXYPOOL_TEST_SERVICE_SET=ignore expect_failure run_start
+assert_generation_count 2
+assert_file_line "$ACTIVE_SNAPSHOT_FILE" "$old_one"
+
+reset_case
+old_one=$(make_managed_generation ABC123)
+old_two=$(make_managed_generation DEF456)
+printf '%s\n' "$old_one" >"$ACTIVE_SNAPSHOT_FILE"
+printf 'v2_shadow\n' >"$MARKER_FILE"
+printf 'old-shadow\n' >"$PROCD_RUNNING_FILE"
+set_selector v2_shadow
+write_v2_config v2_shadow 0
+expect_success run_start
+assert_generation_count 0
+[ ! -e "$ACTIVE_SNAPSHOT_FILE" ] || fail 'confirmed disable retained active snapshot pointer'
+
+# O: ACTIVE is only a best-effort GC pointer. Failure to publish it cannot
+# roll back a query-confirmed healthy V2 backend or guess which snapshot to
+# delete; a later confirmed stop can sweep both safely.
+reset_case
+old_one=$(make_managed_generation ABC123)
+printf '%s\n' "$old_one" >"$ACTIVE_SNAPSHOT_FILE"
+printf 'v2_shadow\n' >"$MARKER_FILE"
+printf 'old-shadow\n' >"$PROCD_RUNNING_FILE"
+set_selector v2_shadow
+PROXYPOOL_TEST_FAIL_MARKER_WRITE=active expect_success run_start
+assert_file_line "$MARKER_FILE" v2_shadow
+assert_file_line "$ACTIVE_SNAPSHOT_FILE" "$old_one"
+[ -s "$PROCD_RUNNING_FILE" ] || fail 'ACTIVE write failure stopped a healthy V2 instance'
+assert_generation_count 2
+expect_success run_stop
+assert_generation_count 0
+
+# P: ACTIVE data is never trusted as a deletion target. Traversal, multiline,
+# and symlink forms may cause conservative retention but cannot delete outside
+# the managed generation namespace.
+reset_case
+outside_dir="$TEST_TMP/outside-generation"
+mkdir "$outside_dir"
+: >"$outside_dir/sentinel"
+old_one=$(make_managed_generation ABC123)
+printf '%s/../..%s\n' "$old_one" "/outside-generation" >"$ACTIVE_SNAPSHOT_FILE"
+printf 'v2_shadow\n' >"$MARKER_FILE"
+printf 'old-shadow\n' >"$PROCD_RUNNING_FILE"
+set_selector v2_shadow
+expect_success run_start
+[ -f "$outside_dir/sentinel" ] || fail 'traversal ACTIVE pointer deleted outside snapshot root'
+[ -d "$old_one" ] || fail 'invalid traversal pointer authorized generation deletion'
+
+reset_case
+old_one=$(make_managed_generation ABC123)
+printf '%s\n%s\n' "$old_one" "$TEST_TMP/outside-generation" >"$ACTIVE_SNAPSHOT_FILE"
+printf 'v2_shadow\n' >"$MARKER_FILE"
+printf 'old-shadow\n' >"$PROCD_RUNNING_FILE"
+set_selector v2_shadow
+expect_success run_start
+[ -d "$old_one" ] || fail 'multiline ACTIVE pointer authorized generation deletion'
+
+reset_case
+outside_pointer="$TEST_TMP/outside-active-pointer"
+printf '%s\n' "$TEST_TMP/outside-generation" >"$outside_pointer"
+if ln -s "$outside_pointer" "$ACTIVE_SNAPSHOT_FILE" 2>/dev/null && [ -L "$ACTIVE_SNAPSHOT_FILE" ]; then
+	printf 'v2_shadow\n' >"$MARKER_FILE"
+	printf 'old-shadow\n' >"$PROCD_RUNNING_FILE"
+	set_selector v2_shadow
+	expect_success run_start
+	[ -f "$outside_pointer" ] || fail 'symlink ACTIVE marker deleted its target'
+	[ -L "$ACTIVE_SNAPSHOT_FILE" ] || fail 'symlink ACTIVE marker was followed or replaced'
+else
+	echo 'SKIP: active snapshot symlink assertion requires symlink support'
+fi
 
 reset_case
 expect_success run_action triggers
