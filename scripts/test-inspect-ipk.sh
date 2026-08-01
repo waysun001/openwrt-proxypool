@@ -26,6 +26,7 @@ printf '%s\n' \
 	'esac' \
 	'case "$target" in' \
 	'  */etc/config/proxypool) printf "600\\n" ;;' \
+	'  */usr/lib/proxypool/ubus-call-stdin.uc) printf "755\\n" ;;' \
 	'  */lib/upgrade/keep.d/proxypool|*.nft|*.uc) printf "644\\n" ;;' \
 	'  *) printf "755\\n" ;;' \
 	'esac' \
@@ -53,16 +54,18 @@ make_ipk() {
 		"$data/etc/hotplug.d/iface" \
 		"$data/usr/sbin" "$data/usr/bin" "$data/usr/lib/proxypool" \
 		"$data/lib/upgrade/keep.d"
-	depends='libc, firewall4, kmod-nft-bridge, uci, ucode, ubus, jshn, nftables, ip-bridge, coreutils-stat'
+	depends='libc, firewall4, kmod-nft-bridge, uci, ucode, ucode-mod-ubus, ubus, jshn, nftables, ip-bridge, coreutils-stat, coreutils-timeout'
 	case "$fixture_kind" in
-		missing_firewall4_dep) depends='libc, kmod-nft-bridge, uci, ucode, ubus, jshn, nftables, ip-bridge, coreutils-stat' ;;
-		missing_bridge_dep) depends='libc, firewall4, uci, ucode, ubus, jshn, nftables, ip-bridge, coreutils-stat' ;;
-		missing_uci_dep) depends='libc, firewall4, kmod-nft-bridge, ucode, ubus, jshn, nftables, ip-bridge, coreutils-stat' ;;
-		missing_ucode_dep) depends='libc, firewall4, kmod-nft-bridge, uci, ubus, jshn, nftables, ip-bridge, coreutils-stat' ;;
-		missing_ubus_dep) depends='libc, firewall4, kmod-nft-bridge, uci, ucode, jshn, nftables, ip-bridge, coreutils-stat' ;;
-		missing_jshn_dep) depends='libc, firewall4, kmod-nft-bridge, uci, ucode, ubus, nftables, ip-bridge, coreutils-stat' ;;
-		missing_ip_bridge_dep) depends='libc, firewall4, kmod-nft-bridge, uci, ucode, ubus, jshn, nftables, coreutils-stat' ;;
-		missing_coreutils_stat_dep) depends='libc, firewall4, kmod-nft-bridge, uci, ucode, ubus, jshn, nftables, ip-bridge' ;;
+		missing_firewall4_dep) depends='libc, kmod-nft-bridge, uci, ucode, ucode-mod-ubus, ubus, jshn, nftables, ip-bridge, coreutils-stat, coreutils-timeout' ;;
+		missing_bridge_dep) depends='libc, firewall4, uci, ucode, ucode-mod-ubus, ubus, jshn, nftables, ip-bridge, coreutils-stat, coreutils-timeout' ;;
+		missing_uci_dep) depends='libc, firewall4, kmod-nft-bridge, ucode, ucode-mod-ubus, ubus, jshn, nftables, ip-bridge, coreutils-stat, coreutils-timeout' ;;
+		missing_ucode_dep) depends='libc, firewall4, kmod-nft-bridge, uci, ucode-mod-ubus, ubus, jshn, nftables, ip-bridge, coreutils-stat, coreutils-timeout' ;;
+		missing_ucode_ubus_dep) depends='libc, firewall4, kmod-nft-bridge, uci, ucode, ubus, jshn, nftables, ip-bridge, coreutils-stat, coreutils-timeout' ;;
+		missing_ubus_dep) depends='libc, firewall4, kmod-nft-bridge, uci, ucode, ucode-mod-ubus, jshn, nftables, ip-bridge, coreutils-stat, coreutils-timeout' ;;
+		missing_jshn_dep) depends='libc, firewall4, kmod-nft-bridge, uci, ucode, ucode-mod-ubus, ubus, nftables, ip-bridge, coreutils-stat, coreutils-timeout' ;;
+		missing_ip_bridge_dep) depends='libc, firewall4, kmod-nft-bridge, uci, ucode, ucode-mod-ubus, ubus, jshn, nftables, coreutils-stat, coreutils-timeout' ;;
+		missing_coreutils_stat_dep) depends='libc, firewall4, kmod-nft-bridge, uci, ucode, ucode-mod-ubus, ubus, jshn, nftables, ip-bridge, coreutils-timeout' ;;
+		missing_coreutils_timeout_dep) depends='libc, firewall4, kmod-nft-bridge, uci, ucode, ucode-mod-ubus, ubus, jshn, nftables, ip-bridge, coreutils-stat' ;;
 	esac
 	printf '%s\n' \
 		'Package: proxypool-core' \
@@ -152,7 +155,8 @@ make_ipk() {
 		proxypool-fw4-activate \
 		proxypool-fw4-check-staged \
 		proxypool-postinst \
-		proxypool-safety-uci-default; do
+		proxypool-safety-uci-default \
+		ubus-call-stdin.uc; do
 		printf '%s\n' '#!/bin/sh' 'exit 0' >"$data/usr/lib/proxypool/$helper"
 		chmod 755 "$data/usr/lib/proxypool/$helper"
 	done
@@ -160,6 +164,8 @@ make_ipk() {
 	chmod 755 "$data/etc/hotplug.d/net/99-proxypool-lan-isolation"
 	cp "$data/etc/hotplug.d/net/99-proxypool-lan-isolation" \
 		"$data/etc/hotplug.d/iface/99-proxypool-lan-isolation"
+	cp "$data/etc/hotplug.d/net/99-proxypool-lan-isolation" \
+		"$data/etc/hotplug.d/iface/98-proxypool-v2-event"
 	for ruleset in \
 		proxypool-guard.nft \
 		proxypool-fw4-input-gate.nft \
@@ -177,6 +183,8 @@ make_ipk() {
 		missing_lan_worker) rm -f "$data/usr/lib/proxypool/lan-isolation-worker.sh" ;;
 		missing_lan_hotplug) rm -f "$data/etc/hotplug.d/net/99-proxypool-lan-isolation" ;;
 		missing_lan_iface_hotplug) rm -f "$data/etc/hotplug.d/iface/99-proxypool-lan-isolation" ;;
+		missing_v2_iface_hotplug) rm -f "$data/etc/hotplug.d/iface/98-proxypool-v2-event" ;;
+		missing_ubus_stdin_helper) rm -f "$data/usr/lib/proxypool/ubus-call-stdin.uc" ;;
 	esac
 
 	chmod 600 "$data/etc/config/proxypool"
@@ -208,10 +216,11 @@ for invalid_kind in \
 	payload_v2 payload_state \
 	payload_ppp_ip_up payload_ppp_ip_down payload_ppp_ip_up_d payload_ppp_ip_down_d \
 	payload_journal payload_wireless_quarantine payload_activation_marker payload_uci_default bad_keep \
-	missing_firewall4_dep missing_bridge_dep missing_uci_dep missing_ucode_dep missing_ubus_dep missing_jshn_dep \
-	missing_ip_bridge_dep missing_coreutils_stat_dep \
+	missing_firewall4_dep missing_bridge_dep missing_uci_dep missing_ucode_dep missing_ucode_ubus_dep missing_ubus_dep missing_jshn_dep \
+	missing_ip_bridge_dep missing_coreutils_stat_dep missing_coreutils_timeout_dep \
 	missing_postinst bad_postinst missing_guard missing_template \
-	missing_legacy_gate missing_lan_isolation missing_lan_worker missing_lan_hotplug missing_lan_iface_hotplug; do
+	missing_legacy_gate missing_lan_isolation missing_lan_worker missing_lan_hotplug missing_lan_iface_hotplug \
+	missing_v2_iface_hotplug missing_ubus_stdin_helper; do
 	make_ipk "$invalid_kind" "$invalid_kind"
 	if run_inspector "$invalid_kind"; then
 		printf 'invalid IPK fixture passed: %s\n' "$invalid_kind" >&2
@@ -265,10 +274,12 @@ grep -Fq 'missing required dependency: firewall4' "$TEST_TMP/missing_firewall4_d
 grep -Fq 'missing required dependency: kmod-nft-bridge' "$TEST_TMP/missing_bridge_dep.log"
 grep -Fq 'missing required dependency: uci' "$TEST_TMP/missing_uci_dep.log"
 grep -Fq 'missing required dependency: ucode' "$TEST_TMP/missing_ucode_dep.log"
+grep -Fq 'missing required dependency: ucode-mod-ubus' "$TEST_TMP/missing_ucode_ubus_dep.log"
 grep -Fq 'missing required dependency: ubus' "$TEST_TMP/missing_ubus_dep.log"
 grep -Fq 'missing required dependency: jshn' "$TEST_TMP/missing_jshn_dep.log"
 grep -Fq 'missing required dependency: ip-bridge' "$TEST_TMP/missing_ip_bridge_dep.log"
 grep -Fq 'missing required dependency: coreutils-stat' "$TEST_TMP/missing_coreutils_stat_dep.log"
+grep -Fq 'missing required dependency: coreutils-timeout' "$TEST_TMP/missing_coreutils_timeout_dep.log"
 grep -Fq 'missing executable control/postinst-pkg' "$TEST_TMP/missing_postinst.log"
 grep -Fq 'invalid control/postinst-pkg' "$TEST_TMP/bad_postinst.log"
 grep -Fq 'missing executable /etc/init.d/proxypool-guard' "$TEST_TMP/missing_guard.log"
@@ -279,6 +290,8 @@ grep -Fq 'missing executable /usr/lib/proxypool/lan-isolation.sh' "$TEST_TMP/mis
 grep -Fq 'missing executable /usr/lib/proxypool/lan-isolation-worker.sh' "$TEST_TMP/missing_lan_worker.log"
 grep -Fq 'missing executable /etc/hotplug.d/net/99-proxypool-lan-isolation' "$TEST_TMP/missing_lan_hotplug.log"
 grep -Fq 'missing executable /etc/hotplug.d/iface/99-proxypool-lan-isolation' "$TEST_TMP/missing_lan_iface_hotplug.log"
+grep -Fq 'missing executable /etc/hotplug.d/iface/98-proxypool-v2-event' "$TEST_TMP/missing_v2_iface_hotplug.log"
+grep -Fq 'missing executable /usr/lib/proxypool/ubus-call-stdin.uc' "$TEST_TMP/missing_ubus_stdin_helper.log"
 grep -Fq 'unexpected mode for /usr/lib/proxypool/lan-isolation.sh' "$TEST_TMP/wrong_lan_mode.log"
 grep -Fq 'unexpected mode for /usr/lib/proxypool/lan-isolation-worker.sh' "$TEST_TMP/wrong_lan_worker_mode.log"
 grep -Fq 'unexpected mode for /usr/lib/proxypool/legacy-gate.sh' "$TEST_TMP/wrong_legacy_gate_mode.log"

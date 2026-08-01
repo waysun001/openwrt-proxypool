@@ -67,7 +67,7 @@ require_fixed "$MAKEFILE" '$(GO_PKG_BUILD_BIN_DIR)/proxypoolctl $(1)/usr/bin/pro
 require_fixed "$MAKEFILE" '$(PKG_BUILD_DIR)/ip2region_searcher $(1)/usr/lib/proxypool/ip2region_searcher'
 require_fixed "$MAKEFILE" '$(INSTALL_DIR) $(1)/lib/upgrade/keep.d'
 require_fixed "$MAKEFILE" '$(INSTALL_DATA) ./files/proxypool.keep $(1)/lib/upgrade/keep.d/proxypool'
-for dependency in firewall4 kmod-nft-bridge uci ucode ubus jshn ip-bridge coreutils-stat; do
+for dependency in firewall4 kmod-nft-bridge uci ucode ucode-mod-ubus ubus jshn ip-bridge coreutils-stat coreutils-timeout; do
 	require_fixed "$MAKEFILE" "+$dependency"
 done
 require_fixed "$ROOT/proxypool-core/files/lan-isolation.sh" 'STAT="${PROXYPOOL_STAT:-/bin/stat}"'
@@ -83,6 +83,7 @@ for install_contract in \
 	'$(INSTALL_BIN) ./files/lan-isolation-worker.sh $(1)/usr/lib/proxypool/lan-isolation-worker.sh' \
 	'$(INSTALL_BIN) ./files/proxypool-lan-isolation.hotplug $(1)/etc/hotplug.d/net/99-proxypool-lan-isolation' \
 	'$(INSTALL_BIN) ./files/proxypool-lan-isolation.hotplug $(1)/etc/hotplug.d/iface/99-proxypool-lan-isolation' \
+	'$(INSTALL_BIN) ./files/proxypool-netifd-event $(1)/etc/hotplug.d/iface/98-proxypool-v2-event' \
 	'$(INSTALL_BIN) ./files/proxypool-firewall-defaults $(1)/usr/lib/proxypool/proxypool-firewall-defaults' \
 	'$(INSTALL_BIN) ./files/proxypool-firewall-transaction $(1)/usr/lib/proxypool/proxypool-firewall-transaction' \
 	'$(INSTALL_BIN) ./files/proxypool-fw4-activate $(1)/usr/lib/proxypool/proxypool-fw4-activate' \
@@ -92,6 +93,7 @@ for install_contract in \
 	'$(INSTALL_DATA) ./files/proxypool-guard.nft $(1)/usr/lib/proxypool/proxypool-guard.nft' \
 	'$(INSTALL_DATA) ./files/proxypool-fw4-input-gate.nft $(1)/usr/lib/proxypool/proxypool-fw4-input-gate.nft' \
 	'$(INSTALL_DATA) ./files/proxypool-fw4-forward-gate.nft $(1)/usr/lib/proxypool/proxypool-fw4-forward-gate.nft' \
+	'$(INSTALL_BIN) ./files/proxypool-ubus-call-stdin.uc $(1)/usr/lib/proxypool/ubus-call-stdin.uc' \
 	'$(INSTALL_DATA) ./files/proxypool-uci-staged.uc $(1)/usr/lib/proxypool/proxypool-uci-staged.uc'; do
 	require_fixed "$MAKEFILE" "$install_contract"
 done
@@ -121,6 +123,10 @@ fi
 expected_keep=$(printf '/etc/config/proxypool_v2\n/etc/config/proxypool_runtime\n/etc/proxypool/activated-backend\n/etc/proxypool/cleanup-required\n/etc/proxypool/firewall-transaction\n/etc/proxypool/wireless-quarantine\n')
 [ "$(cat "$UPGRADE_KEEP")" = "$expected_keep" ] || { echo 'unexpected ProxyPool sysupgrade keep list' >&2; exit 1; }
 require_fixed "$IPK_INSPECTOR" '/etc/proxypool/wireless-quarantine'
+require_fixed "$IPK_INSPECTOR" 'usr/lib/proxypool/ubus-call-stdin.uc'
+require_fixed "$IPK_INSPECTOR" 'etc/hotplug.d/iface/98-proxypool-v2-event'
+require_fixed "$IPK_INSPECTOR" 'ucode-mod-ubus'
+require_fixed "$IPK_INSPECTOR" 'coreutils-timeout'
 
 require_fixed "$HOST_RUNNER" 'go test -race -count=1 ./...'
 require_fixed "$HOST_RUNNER" 'go test -count=1 ./...'

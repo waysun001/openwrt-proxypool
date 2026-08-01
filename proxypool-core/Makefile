@@ -20,7 +20,7 @@ define Package/proxypool-core
   SECTION:=net
   CATEGORY:=Network
   TITLE:=ProxyPool control plane and legacy runtime
-  DEPENDS:=$(GO_ARCH_DEPENDS) +xl2tpd +ppp +ppp-mod-pppol2tp +redsocks +firewall4 +kmod-nft-bridge +uci +ucode +ubus +jshn +nftables +ip-full +ip-bridge +coreutils-stat +conntrack +curl
+  DEPENDS:=$(GO_ARCH_DEPENDS) +xl2tpd +ppp +ppp-mod-pppol2tp +redsocks +firewall4 +kmod-nft-bridge +uci +ucode +ucode-mod-ubus +ubus +jshn +nftables +ip-full +ip-bridge +coreutils-stat +coreutils-timeout +conntrack +curl
 endef
 
 define Package/proxypool-core/description
@@ -62,6 +62,7 @@ define Package/proxypool-core/install
 	$(INSTALL_DIR) $(1)/etc/hotplug.d/net $(1)/etc/hotplug.d/iface
 	$(INSTALL_BIN) ./files/proxypool-lan-isolation.hotplug $(1)/etc/hotplug.d/net/99-proxypool-lan-isolation
 	$(INSTALL_BIN) ./files/proxypool-lan-isolation.hotplug $(1)/etc/hotplug.d/iface/99-proxypool-lan-isolation
+	$(INSTALL_BIN) ./files/proxypool-netifd-event $(1)/etc/hotplug.d/iface/98-proxypool-v2-event
 
 	$(INSTALL_DIR) $(1)/lib/upgrade/keep.d
 	$(INSTALL_DATA) ./files/proxypool.keep $(1)/lib/upgrade/keep.d/proxypool
@@ -97,6 +98,7 @@ define Package/proxypool-core/install
 	$(INSTALL_DATA) ./files/proxypool-fw4-input-gate.nft $(1)/usr/lib/proxypool/proxypool-fw4-input-gate.nft
 	$(INSTALL_DATA) ./files/proxypool-fw4-forward-gate.nft $(1)/usr/lib/proxypool/proxypool-fw4-forward-gate.nft
 	$(INSTALL_DATA) ./files/proxypool-uci-staged.uc $(1)/usr/lib/proxypool/proxypool-uci-staged.uc
+	$(INSTALL_BIN) ./files/proxypool-ubus-call-stdin.uc $(1)/usr/lib/proxypool/ubus-call-stdin.uc
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/ip2region_searcher $(1)/usr/lib/proxypool/ip2region_searcher
 	$(INSTALL_DATA) ./files/ip2region.xdb $(1)/usr/lib/proxypool/ip2region.xdb
 

@@ -4,7 +4,7 @@
 
 **Goal:** 在不重新启用 V1 的前提下，让一个自动发现的设备绑定一个真实 L2TP 节点，经节点 DNS 和节点 PPP 接口进行 TCP 上网，并在任意失败时自动撤权和恢复。
 
-**Architecture:** 将现有只读 `engine.Shadow` 保留为迁移诊断入口，新增正式 `engine.Controller`、持久 runtime snapshot、限并发 scheduler 及窄平台接口。OpenWrt L2TP 适配器通过 `ubus network add_dynamic/del_dynamic` 创建每节点 `proto=l2tp` 接口，复用 OpenWrt 23.05 官方 `l2tp.sh` 管理的共享 xl2tpd；DNS listener 和 nft 租约只在节点、DNS、路由、MAC/IP tuple 全部验证后开放。
+**Architecture:** 将现有只读 `engine.Shadow` 保留为迁移诊断入口，新增正式 `engine.Controller`、持久 runtime snapshot、限并发 scheduler 及窄平台接口。OpenWrt L2TP 适配器通过 `network add_dynamic` 创建每节点 `proto=l2tp` 接口，并通过该动态接口自身的 `remove` 方法删除，复用 OpenWrt 23.05 官方 `l2tp.sh` 管理的共享 xl2tpd；DNS listener 和 nft 租约只在节点、DNS、路由、MAC/IP tuple 全部验证后开放。
 
 **Tech Stack:** Go 1.20.14、OpenWrt 23.05.3 netifd/ubus/xl2tpd、nftables、procd、UCI、LuCI Lua/JavaScript、POSIX shell 测试夹具。
 
@@ -324,11 +324,11 @@ git commit -m "feat: resolve client DNS through assigned nodes"
 - Dynamic interface name is a deterministic bounded `ppv2NNNN`; ownership snapshot binds node ID, policy ID, generation, interface name, endpoint, creation boot ID and exact config digest.
 - An iface hotplug helper installed as `/etc/hotplug.d/iface/98-proxypool-v2-event` filters exact owned `ppv2*` netifd interface events and sends a bounded notification to `proxypoold`; it performs no nft/route/UCI mutation. The daemon also treats exact ubus status polling as authoritative, so missed hotplug notifications cannot create authorization.
 
-- [ ] **Step 1: Write failing adapter tests**
+- [x] **Step 1: Write failing adapter tests**
 
-Fixture the exact ubus calls for `network add_dynamic`, `network.interface.<name> status` and `network del_dynamic`. Cover domain/bootstrap endpoint, username/password control bytes, interface-name collisions, existing foreign interface, wrong l3_device, stale generation, missing PPP address, shared xl2tpd disappearance, stop timeout and hotplug-event spoofing. Prove no call disables/restarts xl2tpd directly and no global chap-secrets or PPP hook is written.
+Fixture the exact ubus calls for `network add_dynamic`, `network.interface.<name> status` and `network.interface.<name> remove`. Cover domain/bootstrap endpoint, username/password control bytes, interface-name collisions, existing foreign interface, wrong l3_device, stale generation, missing PPP address, shared xl2tpd disappearance, stop timeout and hotplug-event spoofing. Prove no call disables/restarts xl2tpd directly and no global chap-secrets or PPP hook is written. Pass the secret-bearing add payload through a narrow stdin-to-ubus helper because the stock OpenWrt `ubus` CLI only accepts JSON as an argv value.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 ```sh
 cd proxypool-core/src/proxypoold
@@ -339,15 +339,15 @@ sh scripts/test-v2-l2tp-adapter.sh
 
 Expected: FAIL because the adapter and event helper are absent.
 
-- [ ] **Step 3: Implement netifd adapter**
+- [x] **Step 3: Implement netifd adapter**
 
 Bootstrap-resolve the configured node server before setup and submit the exact IP in a dynamic netifd configuration with `proto=l2tp`, credentials, `ipv6=0`, bounded keepalive/MTU and strictly allowlisted `pppd_options`. The OpenWrt 23.05 script itself writes `nodefaultroute` and `usepeerdns`; do not invent unsupported `defaultroute`/`peerdns` protocol fields. Since dnsmasq has already been verified at `port=0`/`noresolv=1`, peer DNS cannot become a client fallback. Rely on the official protocol script to add/remove LACs in the shared xl2tpd. Verify ubus state, `l3_device=l2tp-<interface>`, IPv4 address, exact owned policy rule/table and ownership digest before returning a session.
 
-- [ ] **Step 4: Verify GREEN and package safety**
+- [x] **Step 4: Verify GREEN and package safety**
 
 Run adapter tests, `scripts/test-package-safety-integration.sh`, IPK inspectors and the kernel/LAN isolation contracts.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```sh
 git add proxypool-core/src/proxypoold/internal/platform/openwrt/l2tp* proxypool-core/files/proxypool-netifd-event scripts/test-v2-l2tp-adapter.sh proxypool-core/Makefile

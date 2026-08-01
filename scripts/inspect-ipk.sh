@@ -24,7 +24,7 @@ dependency_names=$(
 		tr ',' '\n' |
 		sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*(.*$//' -e 's/[[:space:]]*$//'
 )
-for required_dependency in firewall4 kmod-nft-bridge uci ucode ubus jshn ip-bridge coreutils-stat; do
+for required_dependency in firewall4 kmod-nft-bridge uci ucode ucode-mod-ubus ubus jshn ip-bridge coreutils-stat coreutils-timeout; do
 	printf '%s\n' "$dependency_names" | grep -Fqx "$required_dependency" || {
 		echo "missing required dependency: $required_dependency" >&2
 		exit 1
@@ -140,12 +140,14 @@ for executable_relative in \
 	usr/lib/proxypool/proxypool-fw4-activate \
 	usr/lib/proxypool/proxypool-fw4-check-staged \
 	usr/lib/proxypool/proxypool-postinst \
-	usr/lib/proxypool/proxypool-safety-uci-default; do
+	usr/lib/proxypool/proxypool-safety-uci-default \
+	usr/lib/proxypool/ubus-call-stdin.uc; do
 	require_mode "$executable_relative" 755
 done
 
 require_mode etc/hotplug.d/net/99-proxypool-lan-isolation 755
 require_mode etc/hotplug.d/iface/99-proxypool-lan-isolation 755
+require_mode etc/hotplug.d/iface/98-proxypool-v2-event 755
 
 for data_relative in \
 	usr/lib/proxypool/proxypool-guard.nft \

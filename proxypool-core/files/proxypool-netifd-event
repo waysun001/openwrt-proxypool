@@ -1,0 +1,28 @@
+#!/bin/sh
+
+# Netifd hotplug is a bounded wake-up hint only. The daemon always reads the
+# authoritative ubus status before changing node state or data-plane leases.
+
+case "${INTERFACE-}" in
+	ppv2????) ;;
+	*) exit 0 ;;
+esac
+
+case "${INTERFACE#ppv2}" in
+	*[!0-9]*|'') exit 0 ;;
+esac
+
+case "${ACTION-}" in
+	ifup|ifdown|update) ;;
+	*) exit 0 ;;
+esac
+
+PROXYPOOL_CTL="${PROXYPOOL_CTL:-/usr/bin/proxypoolctl}"
+PROXYPOOL_TIMEOUT="${PROXYPOOL_TIMEOUT:-/usr/bin/timeout}"
+PROXYPOOL_SOCKET="${PROXYPOOL_SOCKET:-/var/run/proxypoold.sock}"
+
+printf '{"version":1,"id":"netifd","method":"system.interface_event","params":{"interface":"%s","action":"%s"}}\n' \
+	"$INTERFACE" "$ACTION" |
+	"$PROXYPOOL_TIMEOUT" -s KILL 2 "$PROXYPOOL_CTL" call --socket "$PROXYPOOL_SOCKET" >/dev/null 2>&1
+
+exit 0
