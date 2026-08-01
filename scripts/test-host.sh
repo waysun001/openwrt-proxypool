@@ -24,6 +24,7 @@ for shell_file in \
 	proxypool-core/files/lan-isolation-worker.sh \
 	proxypool-core/files/legacy-gate.sh \
 	proxypool-core/files/proxypool-lan-isolation.hotplug \
+	proxypool-core/files/proxypool-netifd-event \
 	proxypool-core/files/proxypool-firewall-defaults \
 	proxypool-core/files/proxypool-firewall-transaction \
 	proxypool-core/files/proxypool-fw4-activate \
@@ -57,6 +58,8 @@ for shell_file in \
 	scripts/test-proxypool-init.sh \
 	scripts/test-release-contracts.sh \
 	scripts/test-status-readonly.sh \
+	scripts/test-v2-l2tp-adapter.sh \
+	scripts/test-v2-live-integration.sh \
 	scripts/test-whitespace-range.sh; do
 	sh -n "$shell_file"
 done
@@ -79,6 +82,8 @@ sh scripts/test-proxypool-guard.sh
 sh scripts/test-proxypool-init.sh
 sh scripts/test-release-contracts.sh
 sh scripts/test-status-readonly.sh
+sh scripts/test-v2-l2tp-adapter.sh
+sh scripts/test-v2-live-integration.sh
 sh scripts/test-whitespace-range.sh
 git diff --check
 

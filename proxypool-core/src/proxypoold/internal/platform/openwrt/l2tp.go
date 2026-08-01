@@ -87,7 +87,7 @@ func NewL2TPAdapter(runner platform.InputCommandRunner, resolver L2TPEndpointRes
 }
 
 func (adapter *L2TPAdapter) Start(ctx context.Context, request platform.NodeRequest) (platform.Session, error) {
-	logical, l3Device, err := adapter.validateRequest(request)
+	logical, l3Device, err := adapter.validateRequest(request, true)
 	if err != nil {
 		return platform.Session{}, err
 	}
@@ -111,21 +111,19 @@ func (adapter *L2TPAdapter) Start(ctx context.Context, request platform.NodeRequ
 	if err != nil {
 		return session, err
 	}
-	owned, ownershipErr := adapter.lookupOwnership(entry)
 	if status.exists {
-		if ownershipErr != nil || !owned {
+		ownedEntry, ownershipErr := adapter.startOwnership(entry)
+		if ownershipErr != nil {
 			return session, errors.New("L2TP interface ownership conflicts")
 		}
-		session.StartedAt = entry.StartedAt
+		session.StartedAt = ownedEntry.StartedAt
+		session.OwnershipDigest = ownedEntry.OwnershipDigest
 		if err := adapter.waitReady(ctx, logical, l3Device); err != nil {
 			return session, err
 		}
 		return session, nil
 	}
-	if ownershipErr != nil {
-		return session, ownershipErr
-	}
-	if err := adapter.reserveOwnership(entry); err != nil {
+	if err := adapter.reserveDormantOwnership(entry); err != nil {
 		return session, err
 	}
 	configuration := l2tpDynamicConfig{
@@ -147,7 +145,7 @@ func (adapter *L2TPAdapter) Start(ctx context.Context, request platform.NodeRequ
 }
 
 func (adapter *L2TPAdapter) Probe(ctx context.Context, request platform.NodeRequest, session platform.Session) error {
-	logical, l3Device, err := adapter.validateRequest(request)
+	logical, l3Device, err := adapter.validateRequest(request, true)
 	if err != nil {
 		return err
 	}
@@ -168,14 +166,11 @@ func (adapter *L2TPAdapter) Probe(ctx context.Context, request platform.NodeRequ
 }
 
 func (adapter *L2TPAdapter) Stop(ctx context.Context, request platform.NodeRequest, session platform.Session) error {
-	logical, l3Device, err := adapter.validateRequest(request)
+	logical, l3Device, err := adapter.validateRequest(request, false)
 	if err != nil {
 		return err
 	}
-	if !exactL2TPSession(request, session, l3Device) {
-		return errors.New("L2TP session ownership is stale")
-	}
-	entry, err := adapter.sessionOwnership(request, session, logical, l3Device)
+	entry, err := adapter.stopOwnership(request, session, logical, l3Device)
 	if err != nil {
 		return errors.New("L2TP ownership verification failed")
 	}
@@ -197,10 +192,10 @@ func (adapter *L2TPAdapter) Stop(ctx context.Context, request platform.NodeReque
 	return adapter.deleteOwnership(entry)
 }
 
-func (adapter *L2TPAdapter) validateRequest(request platform.NodeRequest) (string, string, error) {
+func (adapter *L2TPAdapter) validateRequest(request platform.NodeRequest, requireEnabled bool) (string, string, error) {
 	if adapter == nil || adapter.runner == nil || !filepath.IsAbs(adapter.manifestPath) || !filepath.IsAbs(adapter.bootIDPath) ||
 		adapter.pollInterval <= 0 || adapter.now == nil || !safeOwnershipID.MatchString(request.Node.ID) ||
-		request.Node.Protocol != model.ProtocolL2TP || !request.Node.Enabled || request.Node.PolicyID == 0 || request.Node.PolicyID > 60 ||
+		request.Node.Protocol != model.ProtocolL2TP || (requireEnabled && !request.Node.Enabled) || request.Node.PolicyID == 0 || request.Node.PolicyID > 60 ||
 		request.Node.Port == 0 || request.Node.Revision == 0 || request.Generation == 0 || !validL2TPCredential(request.Node.Username, 256) ||
 		!validL2TPCredential(request.Node.Password, 1024) || !validL2TPServer(request.Node.Server) {
 		return "", "", errors.New("L2TP request is invalid")
@@ -439,6 +434,25 @@ func (adapter *L2TPAdapter) lookupOwnership(want l2tpOwnership) (bool, error) {
 	return false, nil
 }
 
+func (adapter *L2TPAdapter) startOwnership(want l2tpOwnership) (l2tpOwnership, error) {
+	adapter.manifestMu.Lock()
+	defer adapter.manifestMu.Unlock()
+	manifest, err := adapter.loadManifest()
+	if err != nil {
+		return l2tpOwnership{}, err
+	}
+	for _, entry := range manifest.Entries {
+		if entry.LogicalInterface != want.LogicalInterface {
+			continue
+		}
+		if !sameL2TPStartIdentity(entry, want) {
+			return l2tpOwnership{}, errors.New("L2TP ownership generation conflicts")
+		}
+		return entry, nil
+	}
+	return l2tpOwnership{}, errors.New("L2TP ownership is absent")
+}
+
 func (adapter *L2TPAdapter) sessionOwnership(request platform.NodeRequest, session platform.Session, logical, l3Device string) (l2tpOwnership, error) {
 	adapter.manifestMu.Lock()
 	defer adapter.manifestMu.Unlock()
@@ -459,7 +473,29 @@ func (adapter *L2TPAdapter) sessionOwnership(request platform.NodeRequest, sessi
 	return l2tpOwnership{}, errors.New("L2TP ownership is absent")
 }
 
-func (adapter *L2TPAdapter) reserveOwnership(entry l2tpOwnership) error {
+func (adapter *L2TPAdapter) stopOwnership(request platform.NodeRequest, session platform.Session, logical, l3Device string) (l2tpOwnership, error) {
+	adapter.manifestMu.Lock()
+	defer adapter.manifestMu.Unlock()
+	manifest, err := adapter.loadManifest()
+	if err != nil {
+		return l2tpOwnership{}, err
+	}
+	for _, entry := range manifest.Entries {
+		if entry.LogicalInterface != logical {
+			continue
+		}
+		if entry.NodeID != request.Node.ID || entry.PolicyID != request.Node.PolicyID || entry.Generation != request.Generation || entry.L3Device != l3Device {
+			return l2tpOwnership{}, errors.New("L2TP ownership generation conflicts")
+		}
+		if session != (platform.Session{}) && (!exactL2TPSession(request, session, l3Device) || entry.OwnershipDigest != session.OwnershipDigest) {
+			return l2tpOwnership{}, errors.New("L2TP session ownership is stale")
+		}
+		return entry, nil
+	}
+	return l2tpOwnership{}, errors.New("L2TP ownership is absent")
+}
+
+func (adapter *L2TPAdapter) reserveDormantOwnership(entry l2tpOwnership) error {
 	adapter.manifestMu.Lock()
 	defer adapter.manifestMu.Unlock()
 	manifest, err := adapter.loadManifest()
@@ -470,7 +506,7 @@ func (adapter *L2TPAdapter) reserveOwnership(entry l2tpOwnership) error {
 		if current.LogicalInterface != entry.LogicalInterface {
 			continue
 		}
-		if current.Generation > entry.Generation || (current.Generation == entry.Generation && !sameL2TPOwnership(current, entry)) {
+		if !sameL2TPStartIdentity(current, entry) {
 			return errors.New("L2TP ownership generation conflicts")
 		}
 		if sameL2TPOwnership(current, entry) {
@@ -481,6 +517,11 @@ func (adapter *L2TPAdapter) reserveOwnership(entry l2tpOwnership) error {
 	}
 	manifest.Entries = append(manifest.Entries, entry)
 	return adapter.saveManifest(manifest)
+}
+
+func sameL2TPStartIdentity(left, right l2tpOwnership) bool {
+	return left.NodeID == right.NodeID && left.PolicyID == right.PolicyID && left.ConfigRevision == right.ConfigRevision &&
+		left.Generation == right.Generation && left.LogicalInterface == right.LogicalInterface && left.L3Device == right.L3Device
 }
 
 func (adapter *L2TPAdapter) deleteOwnership(want l2tpOwnership) error {

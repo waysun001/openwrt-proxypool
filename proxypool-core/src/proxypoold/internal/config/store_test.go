@@ -55,8 +55,8 @@ func TestReplaceAdvancesRevisionAndPreservesPolicyID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Replace(): %v", err)
 	}
-	if got.Revision != 4 || got.Nodes["node_a"].Revision != 4 {
-		t.Fatalf("revision = config %d node %d, want 4", got.Revision, got.Nodes["node_a"].Revision)
+	if got.Revision != 4 || got.Nodes["node_a"].Revision != 3 {
+		t.Fatalf("revision = config %d node %d, want config 4 and unchanged node 3", got.Revision, got.Nodes["node_a"].Revision)
 	}
 	info, err := os.Stat(path)
 	if err != nil {
@@ -72,6 +72,26 @@ func TestReplaceAdvancesRevisionAndPreservesPolicyID(t *testing.T) {
 	changed.Nodes["node_a"] = node
 	_, err = store.Replace(context.Background(), 4, changed)
 	assertCode(t, err, "invalid_config")
+}
+
+func TestReplaceKeepsUnchangedNodeRevisionAcrossDeviceOnlyMutation(t *testing.T) {
+	path := writeInitialConfig(t, 3)
+	store := NewStore(path)
+	next, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	device := next.Devices["device_a"]
+	device.NodeID = "node_b"
+	next.Devices["device_a"] = device
+
+	got, err := store.Replace(context.Background(), 3, next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Revision != 4 || got.Nodes["node_a"].Revision != 3 || got.Nodes["node_b"].Revision != 3 {
+		t.Fatalf("device-only write invalidated running nodes: config=%d node_a=%d node_b=%d", got.Revision, got.Nodes["node_a"].Revision, got.Nodes["node_b"].Revision)
+	}
 }
 
 func TestReplaceCleansTempAndKeepsOriginalOnWriteSyncOrRenameFailure(t *testing.T) {
@@ -143,6 +163,21 @@ func TestReplaceReportsDirectorySyncFailureAfterRename(t *testing.T) {
 	}
 	if loaded.Revision != 4 {
 		t.Fatalf("revision after renamed file = %d, want 4", loaded.Revision)
+	}
+}
+
+func TestEnsureDurableRetriesDirectorySyncAfterAmbiguousReplace(t *testing.T) {
+	path := writeInitialConfig(t, 3)
+	ops := &failingOps{fsOps: osFS{}, fail: "dir-sync-once"}
+	store := newStore(path, ops)
+	if _, err := store.Replace(context.Background(), 3, validConfig()); err == nil {
+		t.Fatal("Replace() error = nil, want first directory sync failure")
+	}
+	if err := store.EnsureDurable(context.Background()); err != nil {
+		t.Fatalf("EnsureDurable() error = %v", err)
+	}
+	if ops.syncDirCalls != 2 {
+		t.Fatalf("directory sync calls = %d, want 2", ops.syncDirCalls)
 	}
 }
 
@@ -303,6 +338,7 @@ type failingOps struct {
 	renameCalls     int
 	chmodCalls      int
 	closeCalls      int
+	syncDirCalls    int
 }
 
 func (f *failingOps) CreateTemp(dir, pattern string) (tempFile, error) {
@@ -344,7 +380,8 @@ func (f *failingOps) Rename(oldPath, newPath string) error {
 }
 
 func (f *failingOps) SyncDir(path string) error {
-	if f.fail == "dir-sync" {
+	f.syncDirCalls++
+	if f.fail == "dir-sync" || (f.fail == "dir-sync-once" && f.syncDirCalls == 1) {
 		return errors.New("injected directory sync failure")
 	}
 	return f.fsOps.SyncDir(path)

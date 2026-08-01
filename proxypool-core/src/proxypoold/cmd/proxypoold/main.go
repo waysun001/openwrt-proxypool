@@ -2,18 +2,24 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/netip"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"proxypoold/internal/api"
 	"proxypoold/internal/buildinfo"
 	"proxypoold/internal/config"
+	"proxypoold/internal/dnsproxy"
 	"proxypoold/internal/engine"
+	"proxypoold/internal/live"
+	"proxypoold/internal/model"
+	"proxypoold/internal/platform"
 	openwrtplatform "proxypoold/internal/platform/openwrt"
 )
 
@@ -40,47 +46,180 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	default:
 	}
 
-	var handler api.Handler
-	methods := map[string]struct{}{"status.get": {}}
 	if options.mode == "shadow" {
 		shadow := engine.NewShadow(options.configPath, nil)
 		shadow.Start()
-		handler = shadow
-	} else {
-		runner := openwrtplatform.NewRunner(10 * time.Second)
-		inventory := openwrtplatform.NewDeviceInventory("/tmp/dhcp.leases", runner)
-		leases := openwrtplatform.NewLeaseManager(
-			runner, inventory,
-			netip.MustParsePrefix("192.168.9.0/24"),
-			netip.MustParseAddr("192.168.9.1"),
-		)
-		controller, err := engine.NewController(
-			config.NewStore(options.configPath),
-			engine.NewRuntimeStore(options.statePath),
-			engine.NewMachine(nil),
-			engine.NewJobStore(),
-			engine.WithDeviceServices(inventory, leases),
-		)
-		if err != nil {
-			_, _ = fmt.Fprintln(stderr, "proxypoold: live control initialization failed")
+		server := &api.Server{Path: options.socketPath, Handler: shadow, Methods: map[string]struct{}{"status.get": {}}}
+		if err := server.Serve(ctx); err != nil {
+			_, _ = fmt.Fprintln(stderr, "proxypoold: control service failed")
 			return 1
 		}
-		handler = controller
-		methods = map[string]struct{}{
-			"status.get": {}, "device.list": {}, "device.bind": {}, "device.unbind": {},
-			"node.action": {}, "job.get": {}, "job.list": {}, "system.events": {},
-		}
+		return 0
 	}
-	server := &api.Server{
-		Path:    options.socketPath,
-		Handler: handler,
-		Methods: methods,
-	}
-	if err := server.Serve(ctx); err != nil {
-		_, _ = fmt.Fprintln(stderr, "proxypoold: control service failed")
+	if err := runLive(ctx, options); err != nil {
+		_, _ = fmt.Fprintln(stderr, "proxypoold: live service failed")
 		return 1
 	}
 	return 0
+}
+
+func runLive(ctx context.Context, options daemonOptions) error {
+	if err := ensurePrivateStateParent(options.statePath); err != nil {
+		return err
+	}
+	desiredStore := config.NewStore(options.configPath)
+	desired, err := desiredStore.Load()
+	if err != nil || !desired.Global.Enabled {
+		return errors.New("live desired configuration is unavailable")
+	}
+	runner := openwrtplatform.NewRunner(10 * time.Second)
+	inventory := openwrtplatform.NewDeviceInventory("/tmp/dhcp.leases", runner)
+	leaseManager := openwrtplatform.NewLeaseManager(
+		runner, inventory, netip.MustParsePrefix("192.168.9.0/24"), netip.MustParseAddr("192.168.9.1"),
+	)
+	controller, err := engine.NewController(
+		desiredStore, engine.NewRuntimeStore(options.statePath), engine.NewMachine(nil), engine.NewJobStore(),
+		engine.WithDeviceServices(inventory, leaseManager),
+	)
+	if err != nil {
+		return errors.New("live control initialization failed")
+	}
+	resolver, err := bootstrapResolver(desired.Global.DoHEndpoints)
+	if err != nil {
+		return err
+	}
+	dnsServer := dnsproxy.NewServer(netip.MustParseAddrPort("192.168.9.1:53"))
+	l2tp := openwrtplatform.NewL2TPAdapter(runner, resolver, "")
+	routeGate := live.NewRouteGate(openwrtplatform.NewRouteManager(runner))
+	dnsFactory := func(_ model.Node, session platform.Session, endpoint model.DoHEndpoint) (dnsproxy.NodeChannel, error) {
+		transport, err := openwrtplatform.NewDoHTransport(endpoint, session.Interface)
+		if err != nil {
+			return nil, err
+		}
+		return dnsproxy.NewDoHChannel(endpoint, transport)
+	}
+	dnsGate := live.NewDNSGate(desiredStore, dnsServer, dnsFactory)
+	authorizer := openwrtplatform.NewAuthorizer(runner, "/var/run/proxypool/authorization.json")
+	authorizationGate := live.NewAuthorizationGate(desiredStore, authorizer)
+	scheduler := engine.NewScheduler(controller, l2tp, engine.SchedulerConfig{
+		L2TPConcurrency: desired.Global.L2TPConcurrency, ProxyConcurrency: desired.Global.ProxyConcurrency,
+		ConnectTimeout: desired.Global.ConnectTimeout, StopTimeout: desired.Global.StopTimeout,
+	}, routeGate, dnsGate, authorizationGate)
+	controller.AttachScheduler(scheduler)
+	server := &api.Server{
+		Path: options.socketPath, Handler: controller,
+		Methods: map[string]struct{}{
+			"status.get": {}, "device.list": {}, "device.bind": {}, "device.unbind": {},
+			"node.action": {}, "job.get": {}, "job.list": {}, "system.events": {}, "system.interface_event": {},
+		},
+	}
+	return serveLive(ctx, controller, scheduler, dnsServer, authorizationGate, authorizer, server, desired.Global.StopTimeout)
+}
+
+func bootstrapResolver(endpoints []model.DoHEndpoint) (*dnsproxy.HostResolver, error) {
+	channels := make([]dnsproxy.NodeChannel, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		transport, err := openwrtplatform.NewBootstrapDoHTransport(endpoint)
+		if err != nil {
+			return nil, errors.New("bootstrap DNS transport is invalid")
+		}
+		channel, err := dnsproxy.NewDoHChannel(endpoint, transport)
+		if err != nil {
+			return nil, errors.New("bootstrap DNS channel is invalid")
+		}
+		channels = append(channels, channel)
+	}
+	if len(channels) == 0 {
+		return nil, errors.New("bootstrap DNS endpoint is missing")
+	}
+	return dnsproxy.NewHostResolver(channels...), nil
+}
+
+func serveLive(ctx context.Context, controller *engine.Controller, scheduler *engine.Scheduler, dnsServer *dnsproxy.Server, authorizationGate *live.AuthorizationGate, authorizer platform.Authorizer, server *api.Server, stopTimeout time.Duration) error {
+	serviceCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	dnsDone := make(chan error, 1)
+	go func() { dnsDone <- dnsServer.Run(serviceCtx) }()
+	select {
+	case <-ctx.Done():
+		return nil
+	case err := <-dnsDone:
+		return err
+	case <-dnsServer.Ready():
+	}
+	if err := controller.ReconcileStartup(serviceCtx); err != nil {
+		return errors.New("startup reconciliation failed")
+	}
+	schedulerDone := make(chan error, 1)
+	serverDone := make(chan error, 1)
+	go func() { schedulerDone <- scheduler.Run(serviceCtx) }()
+	go func() { serverDone <- server.Serve(serviceCtx) }()
+	var serviceErr error
+	schedulerStopped := false
+	select {
+	case <-ctx.Done():
+	case serviceErr = <-dnsDone:
+	case serviceErr = <-schedulerDone:
+		schedulerStopped = true
+	case serviceErr = <-serverDone:
+	}
+	cancel()
+	cleanupTimeout := stopTimeout
+	if cleanupTimeout <= 0 {
+		cleanupTimeout = 30 * time.Second
+	}
+	authorizationGate.StopRenewals()
+	revokeCtx, revokeCancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	revokeErr := authorizer.RevokeAll(revokeCtx)
+	revokeCancel()
+	var drainErr error
+	if !schedulerStopped {
+		drainCtx, drainCancel := context.WithTimeout(context.Background(), cleanupTimeout)
+		select {
+		case <-schedulerDone:
+		case <-drainCtx.Done():
+			drainErr = errors.New("live scheduler shutdown timed out")
+		}
+		drainCancel()
+	}
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	shutdownErr := scheduler.Shutdown(shutdownCtx)
+	shutdownCancel()
+	if drainErr != nil && shutdownErr == nil {
+		shutdownErr = drainErr
+	}
+	return liveServiceResult(ctx.Err(), serviceErr, shutdownErr, revokeErr)
+}
+
+func liveServiceResult(parentErr, serviceErr, shutdownErr, revokeErr error) error {
+	if shutdownErr != nil || revokeErr != nil {
+		return errors.New("live cleanup failed")
+	}
+	if parentErr != nil {
+		return nil
+	}
+	return serviceErr
+}
+
+func ensurePrivateStateParent(path string) error {
+	if !filepath.IsAbs(path) || filepath.Base(path) == "." {
+		return errors.New("runtime state path is invalid")
+	}
+	directory := filepath.Dir(path)
+	info, err := os.Lstat(directory)
+	if errors.Is(err, os.ErrNotExist) {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			return errors.New("runtime state directory creation failed")
+		}
+		info, err = os.Lstat(directory)
+	}
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("runtime state directory is unsafe")
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		return errors.New("runtime state directory permission failed")
+	}
+	return nil
 }
 
 type daemonOptions struct {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -40,6 +41,7 @@ type Scheduler struct {
 	sessions  map[string]platform.Session
 	l2tp      chan struct{}
 	proxy     chan struct{}
+	workers   sync.WaitGroup
 }
 
 func NewScheduler(controller *Controller, adapter platform.NodeAdapter, config SchedulerConfig, gates ...platform.SessionGate) *Scheduler {
@@ -97,17 +99,80 @@ func (scheduler *Scheduler) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			scheduler.workers.Wait()
 			return nil
 		case job := <-scheduler.queue:
 			scheduler.mu.Lock()
 			delete(scheduler.submitted, job.ID)
 			scheduler.mu.Unlock()
+			if job.Kind == "device.bind" && len(job.Nodes) > 1 {
+				scheduler.workers.Add(1)
+				go func(job Job) {
+					defer scheduler.workers.Done()
+					for _, progress := range job.Nodes {
+						scheduler.runNode(ctx, scheduledNode{jobID: job.ID, nodeID: progress.NodeID})
+						if ctx.Err() != nil {
+							return
+						}
+						if !scheduler.waitForOrderedNode(ctx, job.ID, progress.NodeID) {
+							_ = scheduler.controller.schedulerFailFollowingNodes(ctx, job.ID, progress.NodeID)
+							return
+						}
+					}
+				}(cloneJob(job))
+				continue
+			}
 			for _, progress := range job.Nodes {
 				work := scheduledNode{jobID: job.ID, nodeID: progress.NodeID}
-				go scheduler.runNode(ctx, work)
+				scheduler.workers.Add(1)
+				go func(work scheduledNode) {
+					defer scheduler.workers.Done()
+					scheduler.runNode(ctx, work)
+				}(work)
 			}
 		}
 	}
+}
+
+// Shutdown removes only side effects owned by sessions established by this
+// process. Runtime status remains observationally online so a later daemon can
+// reconcile and recreate the same desired node.
+func (scheduler *Scheduler) Shutdown(ctx context.Context) error {
+	if scheduler == nil || scheduler.controller == nil || scheduler.adapter == nil {
+		return errors.New("scheduler dependencies are missing")
+	}
+	scheduler.mu.Lock()
+	nodeIDs := make([]string, 0, len(scheduler.sessions))
+	sessions := make(map[string]platform.Session, len(scheduler.sessions))
+	for nodeID, session := range scheduler.sessions {
+		nodeIDs = append(nodeIDs, nodeID)
+		sessions[nodeID] = session
+	}
+	scheduler.sessions = make(map[string]platform.Session)
+	scheduler.mu.Unlock()
+	sort.Strings(nodeIDs)
+	failed := false
+	for _, nodeID := range nodeIDs {
+		node, exists := scheduler.controller.schedulerNode(nodeID)
+		if !exists {
+			failed = true
+			continue
+		}
+		session := sessions[nodeID]
+		request := platform.NodeRequest{Node: node, JobID: "system-shutdown", Generation: session.Generation}
+		for index := len(scheduler.gates) - 1; index >= 0; index-- {
+			if err := scheduler.gates[index].Close(ctx, request, session); err != nil {
+				failed = true
+			}
+		}
+		if err := scheduler.adapter.Stop(ctx, request, session); err != nil {
+			failed = true
+		}
+	}
+	if failed {
+		return errors.New("scheduler shutdown cleanup failed")
+	}
+	return nil
 }
 
 func (scheduler *Scheduler) runNode(ctx context.Context, work scheduledNode) {
@@ -117,10 +182,6 @@ func (scheduler *Scheduler) runNode(ctx context.Context, work scheduledNode) {
 
 	job, node, exists := scheduler.controller.schedulerWork(work.jobID, work.nodeID)
 	if !exists || isTerminalJob(job.State) {
-		return
-	}
-	if job.Kind == "device.unbind" {
-		_ = scheduler.controller.schedulerCompleteNode(ctx, work.jobID, work.nodeID, "unbound")
 		return
 	}
 	if job.Kind == "node.stop" {
@@ -134,7 +195,18 @@ func (scheduler *Scheduler) runNode(ctx context.Context, work scheduledNode) {
 		return
 	}
 	if exists && status.State == model.StateOnline && job.Kind != "node.reconnect" {
-		_ = scheduler.controller.schedulerRecordStatus(ctx, work.jobID, status, "online")
+		if job.Kind == "device.bind" {
+			status = scheduler.prepareReconnect(ctx, work, node, status)
+			if status.State == model.StateQueued {
+				scheduler.startNode(ctx, work, node, status)
+			}
+		} else {
+			scheduler.refreshNode(ctx, work, node, status)
+		}
+		return
+	}
+	if job.Kind == "device.unbind" {
+		_ = scheduler.controller.schedulerCompleteNode(ctx, work.jobID, work.nodeID, "unbound")
 		return
 	}
 	if exists && status.State != model.StateQueued && status.State != model.StateDisabled && status.State != model.StateFailed && status.State != model.StateBackoff {
@@ -159,6 +231,65 @@ func (scheduler *Scheduler) runNode(ctx context.Context, work scheduledNode) {
 	scheduler.startNode(ctx, work, node, status)
 }
 
+func (scheduler *Scheduler) waitForOrderedNode(ctx context.Context, jobID, nodeID string) bool {
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		job, exists := scheduler.controller.jobs.Get(jobID)
+		if !exists {
+			return false
+		}
+		for _, progress := range job.Nodes {
+			if progress.NodeID != nodeID {
+				continue
+			}
+			switch nodeProgressBucket(progress) {
+			case jobBucketSucceeded:
+				return true
+			case jobBucketFailed, jobBucketCancelled:
+				return false
+			}
+			if progress.Step == "cleanup_failed" {
+				return false
+			}
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ticker.C:
+		}
+	}
+}
+
+func (scheduler *Scheduler) refreshNode(ctx context.Context, work scheduledNode, node model.Node, status NodeStatus) {
+	request := platform.NodeRequest{Node: node, JobID: work.jobID, Generation: status.Generation}
+	refreshCtx, cancel := context.WithTimeout(ctx, scheduler.config.ConnectTimeout)
+	defer cancel()
+	session, err := scheduler.adapter.Start(refreshCtx, request)
+	if err != nil {
+		scheduler.cleanupFailedStart(request, session, nil)
+		scheduler.failStart(ctx, work, status, err, ErrorCodeDataplaneFailed)
+		return
+	}
+	if err := scheduler.adapter.Probe(refreshCtx, request, session); err != nil {
+		scheduler.cleanupFailedStart(request, session, nil)
+		scheduler.failStart(ctx, work, status, err, ErrorCodeProbeFailed)
+		return
+	}
+	opened := make([]platform.SessionGate, 0, len(scheduler.gates))
+	for _, gate := range scheduler.gates {
+		if err := gate.Open(refreshCtx, request, session); err != nil {
+			scheduler.cleanupFailedStart(request, session, opened)
+			scheduler.failStart(ctx, work, status, err, ErrorCodeDataplaneFailed)
+			return
+		}
+		opened = append(opened, gate)
+	}
+	scheduler.putSession(work.nodeID, session)
+	_ = scheduler.controller.schedulerRecordStatus(ctx, work.jobID, status, "online")
+}
+
 func (scheduler *Scheduler) prepareReconnect(ctx context.Context, work scheduledNode, node model.Node, status NodeStatus) NodeStatus {
 	updated, err := scheduler.controller.schedulerApply(ctx, work.jobID, work.nodeID, status.Generation, EventManualReconnect, nil, "stopping")
 	if err != nil {
@@ -167,7 +298,7 @@ func (scheduler *Scheduler) prepareReconnect(ctx context.Context, work scheduled
 	if updated.State == model.StateQueued {
 		return updated
 	}
-	return scheduler.cleanupBarrier(ctx, work, node, updated)
+	return scheduler.cleanupBarrier(ctx, work, node, updated, status.Generation)
 }
 
 func (scheduler *Scheduler) stopNode(ctx context.Context, work scheduledNode, node model.Node, status NodeStatus, exists, reconnect bool) {
@@ -184,11 +315,11 @@ func (scheduler *Scheduler) stopNode(ctx context.Context, work scheduledNode, no
 	if err != nil {
 		return
 	}
-	_ = scheduler.cleanupBarrier(ctx, work, node, updated)
+	_ = scheduler.cleanupBarrier(ctx, work, node, updated, status.Generation)
 }
 
-func (scheduler *Scheduler) cleanupBarrier(ctx context.Context, work scheduledNode, node model.Node, status NodeStatus) NodeStatus {
-	request := platform.NodeRequest{Node: node, JobID: work.jobID, Generation: status.Generation}
+func (scheduler *Scheduler) cleanupBarrier(ctx context.Context, work scheduledNode, node model.Node, status NodeStatus, ownershipGeneration uint64) NodeStatus {
+	request := platform.NodeRequest{Node: node, JobID: work.jobID, Generation: ownershipGeneration}
 	session := scheduler.takeSession(work.nodeID)
 	stopCtx, cancel := context.WithTimeout(context.Background(), scheduler.config.StopTimeout)
 	defer cancel()
@@ -272,6 +403,10 @@ func (scheduler *Scheduler) cleanupFailedStart(request platform.NodeRequest, ses
 
 func (scheduler *Scheduler) failStart(ctx context.Context, work scheduledNode, status NodeStatus, cause error, code string) {
 	kind := EventFailure
+	var coded *model.CodeError
+	if errors.As(cause, &coded) && coded.Code != "" {
+		code = coded.Code
+	}
 	if errors.Is(cause, context.DeadlineExceeded) || errors.Is(cause, context.Canceled) {
 		kind = EventTimeout
 		code = ErrorCodeConnectTimeout
@@ -359,6 +494,13 @@ func (controller *Controller) schedulerStatus(nodeID string) (NodeStatus, bool) 
 	return cloneNodeStatus(status), exists
 }
 
+func (controller *Controller) schedulerNode(nodeID string) (model.Node, bool) {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	node, exists := controller.desired.Nodes[nodeID]
+	return node, exists
+}
+
 func (controller *Controller) schedulerEnsureKnown(ctx context.Context, jobID, nodeID string) (NodeStatus, bool, error) {
 	controller.mu.Lock()
 	defer controller.mu.Unlock()
@@ -436,6 +578,46 @@ func (controller *Controller) schedulerRecordStatus(ctx context.Context, jobID s
 
 func (controller *Controller) schedulerCompleteNode(ctx context.Context, jobID, nodeID, step string) error {
 	return controller.schedulerRecordStatus(ctx, jobID, NodeStatus{NodeID: nodeID, State: model.StateDisabled}, step)
+}
+
+func (controller *Controller) schedulerFailFollowingNodes(ctx context.Context, jobID, completedNodeID string) error {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	job, exists := controller.jobs.Get(jobID)
+	if !exists || isTerminalJob(job.State) {
+		return nil
+	}
+	before := controller.jobs.Snapshot()
+	found := false
+	for _, progress := range job.Nodes {
+		if !found {
+			found = progress.NodeID == completedNodeID
+			continue
+		}
+		bucket := nodeProgressBucket(progress)
+		if bucket == jobBucketSucceeded || bucket == jobBucketFailed || bucket == jobBucketCancelled {
+			continue
+		}
+		status := NodeStatus{
+			NodeID:    progress.NodeID,
+			State:     model.StateFailed,
+			Attempts:  progress.Attempt,
+			LastError: &PublicError{Code: ErrorCodeDataplaneFailed, Message: "blocked by an earlier node operation"},
+		}
+		if err := controller.updateJobForStatus(jobID, status, "blocked_by_previous_node"); err != nil {
+			_ = controller.jobs.Restore(before)
+			return err
+		}
+	}
+	if !found {
+		_ = controller.jobs.Restore(before)
+		return errors.New("scheduler ordered job node is missing")
+	}
+	if err := controller.persistLocked(ctx); err != nil {
+		_ = controller.jobs.Restore(before)
+		return err
+	}
+	return nil
 }
 
 func (controller *Controller) updateJobForStatus(jobID string, status NodeStatus, step string) error {

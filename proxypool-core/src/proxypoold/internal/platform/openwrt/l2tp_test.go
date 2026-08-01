@@ -202,6 +202,28 @@ func TestL2TPProbeAndStopDoNotDependOnEndpointDNSAfterStart(t *testing.T) {
 	}
 }
 
+func TestL2TPStopUsesDurableOwnershipAfterNodeWasDisabledAndRevisionAdvanced(t *testing.T) {
+	runner := newL2TPRunner()
+	runner.ready = true
+	adapter := newTestL2TPAdapter(t, runner, &l2tpResolver{address: netip.MustParseAddr("203.0.113.17")})
+	request := validL2TPRequest()
+	if _, err := adapter.Start(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+
+	// The controller persists desired=false before it asks the scheduler to
+	// tear down the old generation. A daemon restart can also lose the in-memory
+	// Session, so Stop must rely on the root-private ownership manifest.
+	request.Node.Enabled = false
+	request.Node.Revision++
+	if err := adapter.Stop(context.Background(), request, platform.Session{}); err != nil {
+		t.Fatalf("owned disabled L2TP interface was stranded: %v", err)
+	}
+	if runner.removes != 1 {
+		t.Fatalf("interface remove calls = %d, want 1", runner.removes)
+	}
+}
+
 func TestL2TPOwnershipPersistsPrivatelyAndRecoversSameGeneration(t *testing.T) {
 	directory := t.TempDir()
 	manifest := filepath.Join(directory, "l2tp.json")
@@ -239,6 +261,38 @@ func TestL2TPOwnershipPersistsPrivatelyAndRecoversSameGeneration(t *testing.T) {
 	}
 	if runner.removes != 0 {
 		t.Fatal("stale stop reached netifd")
+	}
+}
+
+func TestL2TPRecoverySurvivesEndpointDNSRotationWithoutManualReconnect(t *testing.T) {
+	runner := newL2TPRunner()
+	runner.ready = true
+	resolver := &l2tpResolver{address: netip.MustParseAddr("203.0.113.17")}
+	adapter := newTestL2TPAdapter(t, runner, resolver)
+	request := validL2TPRequest()
+	first, err := adapter.Start(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resolver.address = netip.MustParseAddr("203.0.113.18")
+	existing, err := adapter.Start(context.Background(), request)
+	if err != nil {
+		t.Fatalf("existing owned interface was rejected after DNS rotation: %v", err)
+	}
+	if existing.OwnershipDigest != first.OwnershipDigest || runner.adds != 1 {
+		t.Fatalf("existing ownership was replaced: first=%#v existing=%#v adds=%d", first, existing, runner.adds)
+	}
+
+	runner.mu.Lock()
+	runner.exists = false
+	runner.mu.Unlock()
+	recreated, err := adapter.Start(context.Background(), request)
+	if err != nil {
+		t.Fatalf("absent owned interface did not adopt the new endpoint: %v", err)
+	}
+	if recreated.OwnershipDigest == first.OwnershipDigest || runner.adds != 2 {
+		t.Fatalf("dormant ownership did not rotate endpoint: first=%#v recreated=%#v adds=%d", first, recreated, runner.adds)
 	}
 }
 

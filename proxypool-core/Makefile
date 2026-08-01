@@ -24,7 +24,7 @@ define Package/proxypool-core
 endef
 
 define Package/proxypool-core/description
-  ProxyPool V2 shadow control plane with the complete V1 runtime retained for rollback.
+  ProxyPool V2 live control plane with the quarantined V1 runtime retained for migration diagnostics.
 endef
 
 define Package/proxypool-core/conffiles

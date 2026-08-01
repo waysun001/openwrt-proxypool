@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -212,6 +213,38 @@ func TestControllerReadMethodsAreStrictBoundedAndCredentialFree(t *testing.T) {
 	assertControllerError(t, controller.Handle(context.Background(), controllerRequest("bad-events", "system.events", `{"after_sequence":0,"limit":1001}`)), ErrorCodeInvalidRequest)
 }
 
+func TestControllerNetifdHintQueuesOwnedNodeRecoveryAndRejectsSpoofing(t *testing.T) {
+	controller, err := NewController(
+		&memoryDesiredStore{cfg: controllerConfig()}, &memoryRuntimePersistence{}, NewMachine(nil), NewJobStore(),
+		WithControllerJobIDSource(func() string { return "job-netifd-recover" }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := controller.Handle(context.Background(), controllerRequest("netifd", "system.interface_event", `{"interface":"ppv20001","action":"ifdown"}`))
+	assertControllerSuccess(t, valid)
+	if !bytes.Contains(valid.Result, []byte(`"job_id":"job-netifd-recover"`)) {
+		t.Fatalf("netifd result = %s", valid.Result)
+	}
+	job, exists := controller.jobs.Get("job-netifd-recover")
+	if !exists || job.Kind != "system.recover" || len(job.Nodes) != 1 || job.Nodes[0].NodeID != "node_a" {
+		t.Fatalf("netifd recovery job = %#v exists=%t", job, exists)
+	}
+
+	for index, params := range []string{
+		`{"interface":"ppv20001\"},\"action\":\"ifup","action":"ifup"}`,
+		`{"interface":"ppv29999","action":"ifup"}`,
+		`{"interface":"ppv20001","action":"invented"}`,
+		`{"interface":"ppv20001","action":"ifup","future":true}`,
+	} {
+		response := controller.Handle(context.Background(), controllerRequest("bad-netifd", "system.interface_event", params))
+		assertControllerError(t, response, ErrorCodeInvalidRequest)
+		if len(controller.jobs.List()) != 1 {
+			t.Fatalf("invalid hint %d queued work", index)
+		}
+	}
+}
+
 func TestControllerDoesNotCreateJobWhenDesiredPersistenceFails(t *testing.T) {
 	cfg := controllerConfig()
 	desired := &failingDesiredStore{cfg: cfg, replaceErr: errors.New("injected credential=DO-NOT-LEAK")}
@@ -315,6 +348,214 @@ func TestControllerLeaseFailureDoesNotPublishDiscoveredBinding(t *testing.T) {
 	}
 }
 
+func TestControllerUnbindRemovesStaticLeaseBeforePublishingDesiredChange(t *testing.T) {
+	cfg := controllerConfig()
+	configPath := writeControllerConfig(t, cfg)
+	leases := &controllerLeaseManager{}
+	jobs := NewJobStore()
+	controller, err := NewController(
+		config.NewStore(configPath), NewRuntimeStore(filepath.Join(t.TempDir(), "runtime.json")), NewMachine(nil), jobs,
+		WithDeviceServices(&controllerDeviceSource{}, leases), WithControllerJobIDSource(func() string { return "job-unbind-lease" }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := controller.Handle(context.Background(), controllerRequest("unbind-lease", "device.unbind", `{"device_id":"device_a","expected_revision":3}`))
+	assertControllerSuccess(t, response)
+	stored, err := config.NewStore(configPath).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leases.removed) != 1 || leases.removed[0].ID != "device_a" || stored.Devices["device_a"].Enabled || len(jobs.List()) != 1 {
+		t.Fatalf("unbind cleanup = removed %#v device %#v jobs %#v", leases.removed, stored.Devices["device_a"], jobs.List())
+	}
+}
+
+func TestControllerUnbindLeaseFailurePreservesDesiredBinding(t *testing.T) {
+	cfg := controllerConfig()
+	configPath := writeControllerConfig(t, cfg)
+	leases := &controllerLeaseManager{removeErr: errors.New("dnsmasq reload failed")}
+	jobs := NewJobStore()
+	controller, err := NewController(
+		config.NewStore(configPath), NewRuntimeStore(filepath.Join(t.TempDir(), "runtime.json")), NewMachine(nil), jobs,
+		WithDeviceServices(&controllerDeviceSource{}, leases),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := controller.Handle(context.Background(), controllerRequest("unbind-lease-fails", "device.unbind", `{"device_id":"device_a","expected_revision":3}`))
+	assertControllerError(t, response, ErrorCodeInternal)
+	stored, _ := config.NewStore(configPath).Load()
+	if stored.Revision != 3 || !stored.Devices["device_a"].Enabled || stored.Devices["device_a"].NodeID != "node_a" || len(jobs.List()) != 0 {
+		t.Fatalf("failed lease removal changed desired state: revision=%d device=%#v jobs=%#v", stored.Revision, stored.Devices["device_a"], jobs.List())
+	}
+}
+
+func TestControllerUnbindRollbackIsBoundedWhenPersistenceAndLeaseRestoreFail(t *testing.T) {
+	cfg := controllerConfig()
+	desired := &failingDesiredStore{cfg: cfg, replaceErr: errors.New("storage unavailable")}
+	leases := &controllerLeaseManager{applyWaitForContext: true}
+	controller, err := NewController(
+		desired, &memoryRuntimePersistence{}, NewMachine(nil), NewJobStore(),
+		WithDeviceServices(&controllerDeviceSource{}, leases),
+		WithControllerLeaseRollbackTimeout(20*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	response := controller.Handle(context.Background(), controllerRequest("bounded-unbind-rollback", "device.unbind", `{"device_id":"device_a","expected_revision":3}`))
+	assertControllerError(t, response, ErrorCodeInternal)
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("unbind rollback took %s", elapsed)
+	}
+	if len(leases.removed) != 1 || len(leases.applied) != 1 {
+		t.Fatalf("unbind rollback calls = removed %#v applied %#v", leases.removed, leases.applied)
+	}
+	if desired.cfg.Revision != 3 || !desired.cfg.Devices["device_a"].Enabled {
+		t.Fatalf("failed rollback mutated desired state: %#v", desired.cfg)
+	}
+}
+
+func TestControllerUnbindConvergesToUnboundWhenLeaseRollbackFails(t *testing.T) {
+	desired := &failOnceDesiredStore{cfg: controllerConfig()}
+	leases := &controllerLeaseManager{applyErr: errors.New("lease restore failed")}
+	jobs := NewJobStore()
+	controller, err := NewController(
+		desired, &memoryRuntimePersistence{}, NewMachine(nil), jobs,
+		WithDeviceServices(&controllerDeviceSource{}, leases),
+		WithControllerLeaseRollbackTimeout(50*time.Millisecond),
+		WithControllerJobIDSource(func() string { return "job-repaired-unbind" }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := controller.Handle(context.Background(), controllerRequest("repaired-unbind", "device.unbind", `{"device_id":"device_a","expected_revision":3}`))
+	assertControllerSuccess(t, response)
+	stored, err := desired.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	device := stored.Devices["device_a"]
+	if stored.Revision != 4 || device.Enabled || device.NodeID != "" || len(jobs.List()) != 1 {
+		t.Fatalf("repaired unbind = revision %d device %#v jobs %#v", stored.Revision, device, jobs.List())
+	}
+}
+
+func TestControllerUnbindRecognizesDesiredStateInstalledBeforePersistenceError(t *testing.T) {
+	desired := &postCommitErrorDesiredStore{cfg: controllerConfig()}
+	leases := &controllerLeaseManager{}
+	jobs := NewJobStore()
+	controller, err := NewController(
+		desired, &memoryRuntimePersistence{}, NewMachine(nil), jobs,
+		WithDeviceServices(&controllerDeviceSource{}, leases),
+		WithControllerJobIDSource(func() string { return "job-post-commit-unbind" }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := controller.Handle(context.Background(), controllerRequest("post-commit-unbind", "device.unbind", `{"device_id":"device_a","expected_revision":3}`))
+	assertControllerSuccess(t, response)
+	stored, err := desired.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Revision != 4 || stored.Devices["device_a"].Enabled || stored.Devices["device_a"].NodeID != "" {
+		t.Fatalf("post-commit desired state = %#v", stored)
+	}
+	if len(leases.applied) != 0 || len(leases.removed) != 1 || len(jobs.List()) != 1 {
+		t.Fatalf("post-commit recovery = applied %#v removed %#v jobs %#v", leases.applied, leases.removed, jobs.List())
+	}
+}
+
+func TestControllerUnbindQueuesFailClosedCleanupWhenDesiredDurabilityCannotBeConfirmed(t *testing.T) {
+	desired := &postCommitErrorDesiredStore{cfg: controllerConfig(), ensureErr: errors.New("directory sync still unavailable")}
+	runtime := &memoryRuntimePersistence{}
+	recorder := &controllerSchedulerRecorder{}
+	controller, err := NewController(desired, runtime, NewMachine(nil), NewJobStore(), WithControllerJobIDSource(func() string { return "job-uncertain-unbind" }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.AttachScheduler(recorder)
+	response := controller.Handle(context.Background(), controllerRequest("uncertain-unbind", "device.unbind", `{"device_id":"device_a","expected_revision":3}`))
+	assertControllerError(t, response, ErrorCodeInternal)
+	job, exists := controller.jobs.Get("job-uncertain-unbind")
+	if !exists || len(recorder.jobs) != 1 || recorder.jobs[0].ID != job.ID {
+		t.Fatalf("uncertain durable cleanup = job %#v exists=%t submitted=%#v", job, exists, recorder.jobs)
+	}
+}
+
+func TestControllerSubmitsCleanupWhenRuntimePersistenceFailsAfterDesiredCommit(t *testing.T) {
+	desired := &memoryDesiredStore{cfg: controllerConfig()}
+	runtime := &memoryRuntimePersistence{failSaveAt: 2}
+	recorder := &controllerSchedulerRecorder{}
+	controller, err := NewController(desired, runtime, NewMachine(nil), NewJobStore(), WithControllerJobIDSource(func() string { return "job-runtime-failure-unbind" }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.AttachScheduler(recorder)
+	response := controller.Handle(context.Background(), controllerRequest("runtime-failure-unbind", "device.unbind", `{"device_id":"device_a","expected_revision":3}`))
+	assertControllerSuccess(t, response)
+	job, exists := controller.jobs.Get("job-runtime-failure-unbind")
+	if !exists || len(recorder.jobs) != 1 || recorder.jobs[0].ID != job.ID {
+		t.Fatalf("runtime persistence cleanup = job %#v exists=%t submitted=%#v", job, exists, recorder.jobs)
+	}
+}
+
+func TestControllerRecoversWhenRuntimeRevisionIsAheadOfDesired(t *testing.T) {
+	desired := controllerConfig()
+	runtime := &memoryRuntimePersistence{exists: true, snapshot: RuntimeSnapshot{SchemaVersion: RuntimeSnapshotSchemaVersion, ConfigRevision: desired.Revision + 1}}
+	controller, err := NewController(&memoryDesiredStore{cfg: desired}, runtime, NewMachine(nil), NewJobStore())
+	if err != nil {
+		t.Fatalf("NewController() error = %v", err)
+	}
+	if controller.desired.Revision != desired.Revision {
+		t.Fatalf("controller desired revision = %d", controller.desired.Revision)
+	}
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	if runtime.snapshot.ConfigRevision != desired.Revision {
+		t.Fatalf("recovered runtime revision = %d", runtime.snapshot.ConfigRevision)
+	}
+}
+
+func TestControllerRebindQueuesOldNodeBeforeNewNode(t *testing.T) {
+	cfg := controllerConfig()
+	configPath := writeControllerConfig(t, cfg)
+	controller, err := NewController(
+		config.NewStore(configPath), NewRuntimeStore(filepath.Join(t.TempDir(), "runtime.json")), NewMachine(nil), NewJobStore(),
+		WithControllerJobIDSource(func() string { return "job-rebind" }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := controller.Handle(context.Background(), controllerRequest("rebind", "device.bind", `{"device_id":"device_a","node_id":"node_b","expected_revision":3}`))
+	assertControllerSuccess(t, response)
+	job, exists := controller.jobs.Get("job-rebind")
+	if !exists || len(job.Nodes) != 2 || job.Nodes[0].NodeID != "node_a" || job.Nodes[1].NodeID != "node_b" {
+		t.Fatalf("rebind job did not order old-node revocation before new-node admission: %#v", job)
+	}
+}
+
+func TestControllerRejectsBindingToDisabledNode(t *testing.T) {
+	cfg := controllerConfig()
+	node := cfg.Nodes["node_b"]
+	node.Enabled = false
+	cfg.Nodes["node_b"] = node
+	configPath := writeControllerConfig(t, cfg)
+	jobs := NewJobStore()
+	controller, err := NewController(config.NewStore(configPath), NewRuntimeStore(filepath.Join(t.TempDir(), "runtime.json")), NewMachine(nil), jobs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := controller.Handle(context.Background(), controllerRequest("bind-disabled", "device.bind", `{"device_id":"device_a","node_id":"node_b","expected_revision":3}`))
+	assertControllerError(t, response, ErrorCodeInvalidConfig)
+	stored, _ := config.NewStore(configPath).Load()
+	if stored.Revision != 3 || stored.Devices["device_a"].NodeID != "node_a" || len(jobs.List()) != 0 {
+		t.Fatalf("disabled-node bind changed state: revision=%d device=%#v jobs=%#v", stored.Revision, stored.Devices["device_a"], jobs.List())
+	}
+}
+
 type controllerDeviceSource struct {
 	devices []platform.DiscoveredDevice
 	err     error
@@ -325,14 +566,25 @@ func (source *controllerDeviceSource) List(context.Context) ([]platform.Discover
 }
 
 type controllerLeaseManager struct {
-	applied   []model.Device
-	removed   []model.Device
-	applyErr  error
-	removeErr error
+	applied             []model.Device
+	removed             []model.Device
+	applyErr            error
+	removeErr           error
+	applyWaitForContext bool
 }
 
-func (manager *controllerLeaseManager) Apply(_ context.Context, device model.Device, _ uint64) error {
+type controllerSchedulerRecorder struct{ jobs []Job }
+
+func (recorder *controllerSchedulerRecorder) Submit(job Job) {
+	recorder.jobs = append(recorder.jobs, cloneJob(job))
+}
+
+func (manager *controllerLeaseManager) Apply(ctx context.Context, device model.Device, _ uint64) error {
 	manager.applied = append(manager.applied, device)
+	if manager.applyWaitForContext {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	return manager.applyErr
 }
 
@@ -350,6 +602,61 @@ func (s *failingDesiredStore) Load() (model.DesiredConfig, error) { return s.cfg
 func (s *failingDesiredStore) Replace(context.Context, uint64, model.DesiredConfig) (model.DesiredConfig, error) {
 	return model.DesiredConfig{}, s.replaceErr
 }
+func (s *failingDesiredStore) EnsureDurable(context.Context) error { return nil }
+
+type failOnceDesiredStore struct {
+	mu           sync.Mutex
+	cfg          model.DesiredConfig
+	replaceCalls int
+}
+
+func (s *failOnceDesiredStore) Load() (model.DesiredConfig, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return cloneControllerConfig(s.cfg), nil
+}
+
+func (s *failOnceDesiredStore) Replace(_ context.Context, expected uint64, next model.DesiredConfig) (model.DesiredConfig, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.replaceCalls++
+	if s.replaceCalls == 1 {
+		return model.DesiredConfig{}, errors.New("first replace failed")
+	}
+	if s.cfg.Revision != expected {
+		return model.DesiredConfig{}, codeError(ErrorCodeRevisionConflict, "revision conflict")
+	}
+	next.Revision = expected + 1
+	s.cfg = cloneControllerConfig(next)
+	return cloneControllerConfig(next), nil
+}
+
+func (s *failOnceDesiredStore) EnsureDurable(context.Context) error { return nil }
+
+type postCommitErrorDesiredStore struct {
+	mu        sync.Mutex
+	cfg       model.DesiredConfig
+	ensureErr error
+}
+
+func (s *postCommitErrorDesiredStore) Load() (model.DesiredConfig, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return cloneControllerConfig(s.cfg), nil
+}
+
+func (s *postCommitErrorDesiredStore) Replace(_ context.Context, expected uint64, next model.DesiredConfig) (model.DesiredConfig, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cfg.Revision != expected {
+		return model.DesiredConfig{}, codeError(ErrorCodeRevisionConflict, "revision conflict")
+	}
+	next.Revision = expected + 1
+	s.cfg = cloneControllerConfig(next)
+	return model.DesiredConfig{}, errors.New("directory sync failed after rename")
+}
+
+func (s *postCommitErrorDesiredStore) EnsureDurable(context.Context) error { return s.ensureErr }
 
 func controllerConfig() model.DesiredConfig {
 	return model.DesiredConfig{

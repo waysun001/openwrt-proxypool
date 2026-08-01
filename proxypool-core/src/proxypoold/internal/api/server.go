@@ -19,7 +19,7 @@ import (
 const DefaultSocketPath = "/var/run/proxypoold.sock"
 
 var defaultMethods = map[string]struct{}{
-	"status.get": {}, "node.save": {}, "node.delete": {}, "node.action": {}, "device.list": {}, "device.bind": {}, "device.unbind": {}, "import.preview": {}, "import.commit": {}, "job.get": {}, "job.list": {}, "system.activate": {}, "system.events": {}, "diagnostics.create": {},
+	"status.get": {}, "node.save": {}, "node.delete": {}, "node.action": {}, "device.list": {}, "device.bind": {}, "device.unbind": {}, "import.preview": {}, "import.commit": {}, "job.get": {}, "job.list": {}, "system.activate": {}, "system.events": {}, "system.interface_event": {}, "diagnostics.create": {},
 }
 
 // Handler is deliberately small so business methods can remain independently testable.

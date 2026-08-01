@@ -21,6 +21,7 @@ SNAPSHOT_ROOT="${PROXYPOOL_SNAPSHOT_ROOT:-/var/run/proxypool-config}"
 PERSISTENT_STATE_DIR="${PROXYPOOL_PERSISTENT_STATE_DIR:-/etc/proxypool}"
 ACTIVATED_BACKEND_MARKER="${PROXYPOOL_ACTIVATED_BACKEND_MARKER:-$PERSISTENT_STATE_DIR/activated-backend}"
 CLEANUP_REQUIRED_MARKER="${PROXYPOOL_CLEANUP_REQUIRED_MARKER:-$PERSISTENT_STATE_DIR/cleanup-required}"
+V2_RUNTIME_STATE="${PROXYPOOL_V2_RUNTIME_STATE:-$PERSISTENT_STATE_DIR/runtime-v2.json}"
 
 LEGACY_CONFIG_FILE="${PROXYPOOL_LEGACY_CONFIG_FILE:-${PROXYPOOL_CONFIG_FILE:-/etc/config/proxypool}}"
 V2_CONFIG_FILE="${PROXYPOOL_V2_CONFIG_FILE:-/etc/config/proxypool_v2}"
@@ -757,8 +758,10 @@ shadow_instance_for_snapshot() {
 
 start_shadow() {
 	local snapshot="$1" instance="$2"
+	[ -f "$V2_CONFIG_FILE" ] && [ ! -L "$V2_CONFIG_FILE" ] &&
+		cmp -s "$snapshot/proxypool" "$V2_CONFIG_FILE" || return 1
 	procd_open_instance "$instance" || return 1
-	procd_set_param command /usr/sbin/proxypoold --config "$snapshot/proxypool" --socket /var/run/proxypoold.sock --shadow || return 1
+	procd_set_param command /usr/sbin/proxypoold --config "$V2_CONFIG_FILE" --state "$V2_RUNTIME_STATE" --socket /var/run/proxypoold.sock --live || return 1
 	procd_set_param respawn 3600 5 5 || return 1
 	procd_set_param stdout 1 || return 1
 	procd_set_param stderr 1 || return 1

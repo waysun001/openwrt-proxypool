@@ -39,3 +39,14 @@ func TestNewDoHTransportRequiresHTTPSBootstrapServerNameAndOwnedInterface(t *tes
 		}
 	}
 }
+
+func TestNewBootstrapDoHTransportDoesNotRequireAnEstablishedNodeInterface(t *testing.T) {
+	endpoint := model.DoHEndpoint{URL: "https://dns.example/dns-query", BootstrapIP: "1.1.1.1", ServerName: "dns.example"}
+	transport, err := NewBootstrapDoHTransport(endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if transport == nil || transport.DialContext == nil || transport.Proxy != nil || transport.TLSClientConfig.ServerName != "dns.example" {
+		t.Fatalf("bootstrap transport = %#v", transport)
+	}
+}

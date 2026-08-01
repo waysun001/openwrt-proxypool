@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -174,6 +175,15 @@ func TestRunKeepsMigrationAndInvalidConfigQueryable(t *testing.T) {
 				t.Fatal("daemon did not stop")
 			}
 		})
+	}
+}
+
+func TestLiveServiceResultDoesNotHideCleanupFailureOnShutdown(t *testing.T) {
+	if err := liveServiceResult(context.Canceled, nil, errors.New("session stop failed"), nil); err == nil {
+		t.Fatal("signal cancellation hid a live cleanup failure")
+	}
+	if err := liveServiceResult(context.Canceled, nil, nil, nil); err != nil {
+		t.Fatalf("clean signal shutdown returned %v", err)
 	}
 }
 

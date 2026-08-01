@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 type desiredConfigStore interface {
 	Load() (model.DesiredConfig, error)
 	Replace(context.Context, uint64, model.DesiredConfig) (model.DesiredConfig, error)
+	EnsureDurable(context.Context) error
 }
 
 type runtimePersistence interface {
@@ -33,6 +35,8 @@ type schedulerSubmitter interface {
 }
 
 type ControllerOption func(*Controller)
+
+const defaultControllerLeaseRollbackTimeout = 10 * time.Second
 
 func WithControllerClock(clock func() time.Time) ControllerOption {
 	return func(controller *Controller) {
@@ -57,6 +61,14 @@ func WithDeviceServices(source platform.DeviceSource, leases platform.LeaseManag
 	}
 }
 
+func WithControllerLeaseRollbackTimeout(timeout time.Duration) ControllerOption {
+	return func(controller *Controller) {
+		if timeout > 0 {
+			controller.leaseRollbackTimeout = timeout
+		}
+	}
+}
+
 // Controller is the formal V2 single writer. Platform work is deliberately
 // only queued here; Scheduler becomes the sole side-effect owner in Task 4.
 type Controller struct {
@@ -70,12 +82,13 @@ type Controller struct {
 	leaseManager platform.LeaseManager
 	scheduler    schedulerSubmitter
 
-	desired          model.DesiredConfig
-	statuses         map[string]NodeStatus
-	idempotency      map[string]IdempotencyRecord
-	idempotencyOrder []string
-	now              func() time.Time
-	newJobID         func() string
+	desired              model.DesiredConfig
+	statuses             map[string]NodeStatus
+	idempotency          map[string]IdempotencyRecord
+	idempotencyOrder     []string
+	now                  func() time.Time
+	newJobID             func() string
+	leaseRollbackTimeout time.Duration
 }
 
 func NewController(desiredStore desiredConfigStore, runtimeStore runtimePersistence, machine *Machine, jobs *JobStore, options ...ControllerOption) (*Controller, error) {
@@ -89,14 +102,15 @@ func NewController(desiredStore desiredConfigStore, runtimeStore runtimePersiste
 		jobs = NewJobStore()
 	}
 	controller := &Controller{
-		desiredStore: desiredStore,
-		runtimeStore: runtimeStore,
-		machine:      machine,
-		jobs:         jobs,
-		statuses:     make(map[string]NodeStatus),
-		idempotency:  make(map[string]IdempotencyRecord),
-		now:          time.Now,
-		newJobID:     randomReconciliationID,
+		desiredStore:         desiredStore,
+		runtimeStore:         runtimeStore,
+		machine:              machine,
+		jobs:                 jobs,
+		statuses:             make(map[string]NodeStatus),
+		idempotency:          make(map[string]IdempotencyRecord),
+		now:                  time.Now,
+		newJobID:             randomReconciliationID,
+		leaseRollbackTimeout: defaultControllerLeaseRollbackTimeout,
 	}
 	for _, option := range options {
 		if option != nil {
@@ -119,7 +133,17 @@ func NewController(desiredStore desiredConfigStore, runtimeStore runtimePersiste
 		return nil, errors.New("live runtime load failed")
 	}
 	if snapshot.ConfigRevision > desired.Revision {
-		return nil, errors.New("live runtime revision is ahead of desired configuration")
+		// Desired state is authoritative. A prior ambiguous desired-directory
+		// sync may leave observational runtime metadata one revision ahead after
+		// a crash. Discard it and reconcile from the durable desired revision.
+		snapshot = RuntimeSnapshot{
+			SchemaVersion:  RuntimeSnapshotSchemaVersion,
+			ConfigRevision: desired.Revision,
+			Jobs:           NewJobStore().Snapshot(),
+		}
+		if err := runtimeStore.Save(context.Background(), snapshot); err != nil {
+			return nil, errors.New("live runtime rollback reconciliation failed")
+		}
 	}
 	if err := jobs.Restore(snapshot.Jobs); err != nil {
 		return nil, errors.New("live runtime jobs are invalid")
@@ -152,6 +176,53 @@ func (controller *Controller) AttachScheduler(scheduler schedulerSubmitter) {
 	controller.scheduler = scheduler
 }
 
+// ReconcileStartup durably queues every enabled node that is not already
+// covered by unfinished work. Restored "online" state is only an observation;
+// the scheduler must re-probe the owned session and republish its expiring
+// dataplane leases before clients can use it again.
+func (controller *Controller) ReconcileStartup(ctx context.Context) error {
+	if controller == nil || contextDone(ctx) != nil {
+		return errors.New("startup reconciliation is unavailable")
+	}
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	covered := make(map[string]struct{})
+	for _, job := range controller.jobs.List() {
+		if isTerminalJob(job.State) {
+			continue
+		}
+		for _, progress := range job.Nodes {
+			covered[progress.NodeID] = struct{}{}
+		}
+	}
+	nodeIDs := make([]string, 0, len(controller.desired.Nodes))
+	for nodeID, node := range controller.desired.Nodes {
+		if !controller.desired.Global.Enabled || !node.Enabled {
+			continue
+		}
+		if _, exists := covered[nodeID]; !exists {
+			nodeIDs = append(nodeIDs, nodeID)
+		}
+	}
+	if len(nodeIDs) == 0 {
+		return nil
+	}
+	sort.Strings(nodeIDs)
+	job := newControllerJob(controller.newJobID(), "system.recover", controller.now(), controller.desired.Revision, nodeIDs)
+	beforeJobs := controller.jobs.Snapshot()
+	if err := controller.jobs.Put(job); err != nil {
+		return err
+	}
+	if err := controller.persistLocked(ctx); err != nil {
+		_ = controller.jobs.Restore(beforeJobs)
+		return err
+	}
+	if controller.scheduler != nil {
+		controller.scheduler.Submit(job)
+	}
+	return nil
+}
+
 func (controller *Controller) Handle(ctx context.Context, request api.Request) api.Response {
 	if contextDone(ctx) != nil {
 		return controllerError(request.ID, "operation_timeout")
@@ -173,6 +244,8 @@ func (controller *Controller) Handle(ctx context.Context, request api.Request) a
 		return controller.handleJobList(request)
 	case "system.events":
 		return controller.handleEvents(request)
+	case "system.interface_event":
+		return controller.handleInterfaceEvent(ctx, request)
 	default:
 		return api.Response{Version: api.ProtocolVersion, ID: request.ID, Error: &api.Error{Code: "unknown_method", Message: "unknown control method"}}
 	}
@@ -206,9 +279,20 @@ type eventsParams struct {
 	Limit         int    `json:"limit"`
 }
 
+type interfaceEventParams struct {
+	Interface string `json:"interface"`
+	Action    string `json:"action"`
+}
+
 type mutationResult struct {
 	JobID          string `json:"job_id"`
 	ConfigRevision uint64 `json:"config_revision"`
+}
+
+type interfaceEventResult struct {
+	JobID          string `json:"job_id,omitempty"`
+	ConfigRevision uint64 `json:"config_revision"`
+	Ignored        bool   `json:"ignored,omitempty"`
 }
 
 func (controller *Controller) handleStatus(request api.Request) api.Response {
@@ -280,10 +364,15 @@ func (controller *Controller) handleDeviceBind(ctx context.Context, request api.
 	if current.Revision != *params.ExpectedRevision {
 		return controllerError(request.ID, ErrorCodeRevisionConflict)
 	}
-	if _, exists := current.Nodes[params.NodeID]; !exists {
+	targetNode, exists := current.Nodes[params.NodeID]
+	if !exists {
 		return controllerError(request.ID, ErrorCodeNotFound)
 	}
+	if !targetNode.Enabled || !current.Global.Enabled {
+		return controllerError(request.ID, ErrorCodeInvalidConfig)
+	}
 	device, configured := current.Devices[params.DeviceID]
+	oldNodeID := device.NodeID
 	if controller.deviceSource != nil {
 		discovered, err := controller.findDiscoveredDeviceLocked(ctx, params.DeviceID)
 		if err != nil {
@@ -317,7 +406,11 @@ func (controller *Controller) handleDeviceBind(ctx context.Context, request api.
 		}
 		return controllerModelError(request.ID, err)
 	}
-	return controller.finishMutationLocked(ctx, request, digest, stored, "device.bind", []string{params.NodeID})
+	nodeIDs := []string{params.NodeID}
+	if oldNodeID != "" && oldNodeID != params.NodeID {
+		nodeIDs = []string{oldNodeID, params.NodeID}
+	}
+	return controller.finishMutationLocked(ctx, request, digest, stored, "device.bind", nodeIDs)
 }
 
 type DeviceListEntry struct {
@@ -408,13 +501,46 @@ func (controller *Controller) handleDeviceUnbind(ctx context.Context, request ap
 	device.NodeID = ""
 	device.Enabled = false
 	next.Devices[params.DeviceID] = device
-	stored, err := controller.desiredStore.Replace(ctx, current.Revision, next)
-	if err != nil {
-		return controllerModelError(request.ID, err)
+	if controller.leaseManager != nil {
+		if err := controller.leaseManager.Remove(ctx, current.Devices[params.DeviceID], current.Revision+1); err != nil {
+			return controllerError(request.ID, ErrorCodeInternal)
+		}
 	}
 	nodeIDs := []string(nil)
 	if oldNodeID != "" {
 		nodeIDs = []string{oldNodeID}
+	}
+	stored, err := controller.desiredStore.Replace(ctx, current.Revision, next)
+	if err != nil {
+		observed, observeErr := controller.desiredStore.Load()
+		if observeErr == nil && controllerConfigMatchesStoredMutation(current.Revision, next, observed) {
+			return controller.finishObservedMutationLocked(request, digest, observed, "device.unbind", nodeIDs)
+		}
+		if observeErr == nil && !controllerConfigsEqual(observed, current) {
+			return controllerError(request.ID, ErrorCodeInternal)
+		}
+		if controller.leaseManager != nil {
+			rollbackCtx, cancelRollback := context.WithTimeout(context.Background(), controller.leaseRollbackTimeout)
+			rollbackErr := controller.leaseManager.Apply(rollbackCtx, current.Devices[params.DeviceID], current.Revision+1)
+			cancelRollback()
+			if rollbackErr != nil {
+				repairCtx, cancelRepair := context.WithTimeout(context.Background(), controller.leaseRollbackTimeout)
+				repaired, repairErr := controller.desiredStore.Replace(repairCtx, current.Revision, next)
+				if repairErr == nil {
+					response := controller.finishMutationLocked(repairCtx, request, digest, repaired, "device.unbind", nodeIDs)
+					cancelRepair()
+					return response
+				}
+				observed, observeErr = controller.desiredStore.Load()
+				if observeErr == nil && controllerConfigMatchesStoredMutation(current.Revision, next, observed) {
+					response := controller.finishObservedMutationLocked(request, digest, observed, "device.unbind", nodeIDs)
+					cancelRepair()
+					return response
+				}
+				cancelRepair()
+			}
+		}
+		return controllerModelError(request.ID, err)
 	}
 	return controller.finishMutationLocked(ctx, request, digest, stored, "device.unbind", nodeIDs)
 }
@@ -476,19 +602,42 @@ func (controller *Controller) finishMutationLocked(ctx context.Context, request 
 		RequestID: request.ID, Method: request.Method, Digest: digest,
 		Result: append(json.RawMessage(nil), resultBytes...), ConfigRevision: desired.Revision, CreatedAt: controller.now(),
 	}
-	removed := controller.addIdempotencyLocked(record)
+	controller.addIdempotencyLocked(record)
 	if err := controller.persistLocked(ctx); err != nil {
-		_ = controller.jobs.Restore(beforeJobs)
-		controller.removeIdempotencyLocked(record.RequestID)
-		if removed != nil {
-			controller.restoreIdempotencyFrontLocked(*removed)
+		// Desired state is already committed. Runtime metadata is observational,
+		// so retain and submit the in-memory cleanup job even when its first
+		// snapshot write fails. Later scheduler transitions retry persistence;
+		// startup reconciliation covers a restart in the meantime.
+		if controller.scheduler != nil && !isTerminalJob(job.State) {
+			controller.scheduler.Submit(job)
 		}
-		return controllerError(request.ID, ErrorCodeInternal)
+		return api.Response{Version: api.ProtocolVersion, ID: request.ID, Result: resultBytes}
 	}
 	if controller.scheduler != nil && !isTerminalJob(job.State) {
 		controller.scheduler.Submit(job)
 	}
 	return api.Response{Version: api.ProtocolVersion, ID: request.ID, Result: resultBytes}
+}
+
+func (controller *Controller) finishObservedMutationLocked(request api.Request, digest string, desired model.DesiredConfig, kind string, nodeIDs []string) api.Response {
+	durableCtx, cancel := context.WithTimeout(context.Background(), controller.leaseRollbackTimeout)
+	err := controller.desiredStore.EnsureDurable(durableCtx)
+	if err == nil {
+		response := controller.finishMutationLocked(durableCtx, request, digest, desired, kind, nodeIDs)
+		cancel()
+		return response
+	}
+	cancel()
+
+	// The new desired state is visible but crash durability is uncertain. Do
+	// not claim success or persist a possibly-ahead runtime revision, but still
+	// revoke old access immediately in this process.
+	controller.desired = cloneControllerConfig(desired)
+	job := newControllerJob(controller.newJobID(), kind, controller.now(), desired.Revision, nodeIDs)
+	if err := controller.jobs.Put(job); err == nil && controller.scheduler != nil && !isTerminalJob(job.State) {
+		controller.scheduler.Submit(job)
+	}
+	return controllerError(request.ID, ErrorCodeInternal)
 }
 
 func (controller *Controller) handleJobGet(request api.Request) api.Response {
@@ -531,6 +680,60 @@ func (controller *Controller) handleEvents(request api.Request) api.Response {
 	return controllerResult(request.ID, struct {
 		Events []NodeEvent `json:"events"`
 	}{filtered})
+}
+
+func (controller *Controller) handleInterfaceEvent(ctx context.Context, request api.Request) api.Response {
+	var params interfaceEventParams
+	if decodeControllerParams(request.Params, &params) != nil || request.ID == "" || len(params.Interface) != 8 || params.Interface[:4] != "ppv2" ||
+		(params.Action != "ifup" && params.Action != "ifdown" && params.Action != "update") {
+		return controllerError(request.ID, ErrorCodeInvalidRequest)
+	}
+	policy, err := strconv.ParseUint(params.Interface[4:], 10, 16)
+	if err != nil || policy == 0 || policy > 60 {
+		return controllerError(request.ID, ErrorCodeInvalidRequest)
+	}
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	if contextDone(ctx) != nil {
+		return controllerError(request.ID, "operation_timeout")
+	}
+	nodeID := ""
+	enabled := false
+	for id, node := range controller.desired.Nodes {
+		if node.PolicyID == uint16(policy) {
+			nodeID, enabled = id, node.Enabled && controller.desired.Global.Enabled
+			break
+		}
+	}
+	if nodeID == "" {
+		return controllerError(request.ID, ErrorCodeInvalidRequest)
+	}
+	if !enabled {
+		return controllerResult(request.ID, interfaceEventResult{ConfigRevision: controller.desired.Revision, Ignored: true})
+	}
+	for _, job := range controller.jobs.List() {
+		if isTerminalJob(job.State) {
+			continue
+		}
+		for _, progress := range job.Nodes {
+			if progress.NodeID == nodeID {
+				return controllerResult(request.ID, interfaceEventResult{JobID: job.ID, ConfigRevision: controller.desired.Revision})
+			}
+		}
+	}
+	job := newControllerJob(controller.newJobID(), "system.recover", controller.now(), controller.desired.Revision, []string{nodeID})
+	beforeJobs := controller.jobs.Snapshot()
+	if err := controller.jobs.Put(job); err != nil {
+		return controllerModelError(request.ID, err)
+	}
+	if err := controller.persistLocked(ctx); err != nil {
+		_ = controller.jobs.Restore(beforeJobs)
+		return controllerError(request.ID, ErrorCodeInternal)
+	}
+	if controller.scheduler != nil {
+		controller.scheduler.Submit(job)
+	}
+	return controllerResult(request.ID, interfaceEventResult{JobID: job.ID, ConfigRevision: controller.desired.Revision})
 }
 
 func (controller *Controller) replayLocked(request api.Request, digest string) (api.Response, bool) {
@@ -637,6 +840,21 @@ func controllerDigest(method string, params any) string {
 	}{method, params})
 	digest := sha256.Sum256(encoded)
 	return hex.EncodeToString(digest[:])
+}
+
+func controllerConfigMatchesStoredMutation(previousRevision uint64, next, observed model.DesiredConfig) bool {
+	if previousRevision == ^uint64(0) {
+		return false
+	}
+	expected := cloneControllerConfig(next)
+	expected.Revision = previousRevision + 1
+	return controllerConfigsEqual(expected, observed)
+}
+
+func controllerConfigsEqual(left, right model.DesiredConfig) bool {
+	leftJSON, leftErr := json.Marshal(left)
+	rightJSON, rightErr := json.Marshal(right)
+	return leftErr == nil && rightErr == nil && bytes.Equal(leftJSON, rightJSON)
 }
 
 func controllerResult(id string, value any) api.Response {

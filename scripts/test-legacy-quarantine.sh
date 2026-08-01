@@ -121,21 +121,16 @@ done
 run_readonly firewall_show "$STAGE/firewall.sh" show
 run_denied watchdog_run "$STAGE/watchdog.sh" run
 
-# The retained LuCI controller has one fail-closed gate before its dispatch.
+# LuCI no longer exposes any retained V1 mutation entry. All V2 reads and
+# writes cross the bounded local daemon protocol.
 CONTROLLER="$ROOT/luci-app-proxypool/luasrc/controller/proxypool.lua"
-MUTATIVE='save_client delete_client toggle_client start_client stop_client save_remark restart_client set_dhcp_lease reload probe_all clear_log batch_import batch_action'
-READONLY='status get_client get_dhcp_lease log syslog export_all backup_create'
-for action in $MUTATIVE; do
-	grep -Fq "[\"$action\"] = true" "$CONTROLLER" || fail "LuCI action $action is not quarantined"
-done
-for action in $READONLY; do
-	if grep -Fq "[\"$action\"] = true" "$CONTROLLER"; then
-		fail "LuCI read action $action is incorrectly quarantined"
+for forbidden in proxypool.sh l2tp-manager.sh socks5-manager.sh slp-manager.sh 'luci.model.uci' 'os.execute' 'luci.sys'; do
+	if grep -Fq "$forbidden" "$CONTROLLER"; then
+		fail "LuCI controller still reaches legacy or direct mutation path: $forbidden"
 	fi
 done
-gate_line=$(grep -n 'if LEGACY_MUTATION_ACTIONS\[action\] then' "$CONTROLLER" | head -n1 | cut -d: -f1 || true)
-dispatch_line=$(grep -n 'if action == "status" then' "$CONTROLLER" | head -n1 | cut -d: -f1 || true)
-[ -n "$gate_line" ] && [ -n "$dispatch_line" ] && [ "$gate_line" -lt "$dispatch_line" ] ||
-	fail 'LuCI mutation gate does not precede dispatch'
+for required in 'nixio.socket("unix", "stream")' 'status.get' 'device.bind' 'device.unbind' 'node.action' 'job.get' 'job.list' 'dispatcher.test_post_security()'; do
+	grep -Fq "$required" "$CONTROLLER" || fail "LuCI controller is missing V2 control contract: $required"
+done
 
-echo 'PASS: every retained legacy mutation entry is quarantined before side effects'
+echo 'PASS: legacy scripts remain quarantined and LuCI uses only the V2 daemon API'

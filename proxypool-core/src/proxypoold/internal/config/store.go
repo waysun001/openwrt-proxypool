@@ -66,6 +66,21 @@ func (s *Store) Load() (model.DesiredConfig, error) {
 	return s.loadLocked()
 }
 
+// EnsureDurable retries the directory sync required after an atomic rename.
+// It lets callers distinguish a visible replacement from a crash-durable one
+// after Replace reports an ambiguous post-rename error.
+func (s *Store) EnsureDurable(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := contextError(ctx); err != nil {
+		return err
+	}
+	if err := s.ops.SyncDir(filepath.Dir(s.path)); err != nil {
+		return errors.New("configuration directory sync failed")
+	}
+	return contextError(ctx)
+}
+
 // Replace persists next only if expectedRevision matches the on-disk revision.
 func (s *Store) Replace(ctx context.Context, expectedRevision uint64, next model.DesiredConfig) (model.DesiredConfig, error) {
 	s.mu.Lock()
@@ -88,7 +103,7 @@ func (s *Store) Replace(ctx context.Context, expectedRevision uint64, next model
 			return model.DesiredConfig{}, invalidConfig()
 		}
 	}
-	next = withRevision(cloneConfig(next), current.Revision+1)
+	next = withRevision(current, cloneConfig(next), current.Revision+1)
 	if err := contextError(ctx); err != nil {
 		return model.DesiredConfig{}, err
 	}
@@ -157,13 +172,26 @@ func (s *Store) loadLocked() (model.DesiredConfig, error) {
 	return cfg, nil
 }
 
-func withRevision(cfg model.DesiredConfig, revision uint64) model.DesiredConfig {
-	cfg.Revision = revision
-	for id, node := range cfg.Nodes {
-		node.Revision = revision
-		cfg.Nodes[id] = node
+func withRevision(current, next model.DesiredConfig, revision uint64) model.DesiredConfig {
+	next.Revision = revision
+	for id, node := range next.Nodes {
+		previous, exists := current.Nodes[id]
+		if exists && sameNodeIgnoringRevision(previous, node) {
+			node.Revision = previous.Revision
+		} else {
+			node.Revision = revision
+		}
+		next.Nodes[id] = node
 	}
-	return cfg
+	return next
+}
+
+func sameNodeIgnoringRevision(a, b model.Node) bool {
+	return a.ID == b.ID && a.Name == b.Name && a.Protocol == b.Protocol && a.Enabled == b.Enabled &&
+		a.Server == b.Server && a.Port == b.Port && a.Username == b.Username && a.Password == b.Password &&
+		a.SLPToken == b.SLPToken && a.SLPTransport == b.SLPTransport && a.SLPObfs == b.SLPObfs &&
+		a.SLPObfsKey == b.SLPObfsKey && a.SLPInsecure == b.SLPInsecure && a.PolicyID == b.PolicyID &&
+		equalTime(a.ExpiresAt, b.ExpiresAt)
 }
 
 func cloneConfig(cfg model.DesiredConfig) model.DesiredConfig {

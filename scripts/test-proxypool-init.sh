@@ -880,14 +880,15 @@ esac
 assert_not_contains "ctl:classify:$LEGACY_CONFIG_FILE"
 assert_not_contains_fragment "--config $LEGACY_CONFIG_FILE"
 
-# A fresh image selects V2 from its separate selector/config snapshot. The
-# daemon never consumes either live source path.
+# A fresh image selects V2 from its validated snapshot, then gives the daemon
+# the persistent V2 source so LuCI mutations survive service restarts.
 reset_case
 set_selector v2_shadow
 expect_success run_start
 assert_contains_fragment 'procd:open:shadow-'
-assert_contains_fragment 'procd:param:command /usr/sbin/proxypoold --config '
-assert_not_contains_fragment "--config $V2_CONFIG_FILE"
+assert_contains_fragment "procd:param:command /usr/sbin/proxypoold --config $V2_CONFIG_FILE"
+assert_contains_fragment "--state $PERSISTENT_STATE_DIR/runtime-v2.json --socket /var/run/proxypoold.sock --live"
+assert_not_contains_fragment '--shadow'
 instance=$(cat "$PROCD_RUNNING_FILE")
 assert_contains "ctl:procd:$instance"
 assert_file_line "$MARKER_FILE" v2_shadow

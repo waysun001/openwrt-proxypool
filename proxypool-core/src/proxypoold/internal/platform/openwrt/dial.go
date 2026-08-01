@@ -23,6 +23,24 @@ type BoundDialer struct {
 	dial      boundDialFunc
 }
 
+type bootstrapDialer struct{ bootstrap netip.Addr }
+
+func (dialer bootstrapDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	if network != "tcp" && network != "tcp4" {
+		return nil, errors.New("bootstrap dial request is invalid")
+	}
+	_, portText, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, errors.New("bootstrap dial request is invalid")
+	}
+	port, err := strconv.ParseUint(portText, 10, 16)
+	if err != nil || port == 0 {
+		return nil, errors.New("bootstrap dial request is invalid")
+	}
+	target := net.JoinHostPort(dialer.bootstrap.String(), strconv.FormatUint(port, 10))
+	return (&net.Dialer{}).DialContext(ctx, network, target)
+}
+
 func newBoundDialer(device, bootstrap string, dial boundDialFunc) (*BoundDialer, error) {
 	address, err := netip.ParseAddr(bootstrap)
 	if err != nil || !address.Is4() || !address.IsGlobalUnicast() || !safeInterface.MatchString(device) || !strings.HasPrefix(device, "l2tp-ppv2") || dial == nil {
@@ -70,5 +88,23 @@ func NewDoHTransport(endpoint model.DoHEndpoint, device string) (*http.Transport
 		MaxIdleConns:        8,
 		MaxIdleConnsPerHost: 4,
 		IdleConnTimeout:     30 * time.Second,
+	}, nil
+}
+
+// NewBootstrapDoHTransport is used only by router-originated endpoint lookup
+// before a node PPP interface exists. Client traffic is never sent through it.
+func NewBootstrapDoHTransport(endpoint model.DoHEndpoint) (*http.Transport, error) {
+	parsed, err := url.Parse(endpoint.URL)
+	bootstrap, bootstrapErr := netip.ParseAddr(endpoint.BootstrapIP)
+	if err != nil || bootstrapErr != nil || !bootstrap.Is4() || !bootstrap.IsGlobalUnicast() ||
+		parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" ||
+		endpoint.ServerName == "" || strings.ContainsAny(endpoint.ServerName, "\x00/\\: ") || !strings.EqualFold(parsed.Hostname(), endpoint.ServerName) {
+		return nil, errors.New("bootstrap DoH transport endpoint is invalid")
+	}
+	dialer := bootstrapDialer{bootstrap: bootstrap}
+	return &http.Transport{
+		Proxy: nil, DialContext: dialer.DialContext, ForceAttemptHTTP2: true, DisableCompression: true,
+		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, ServerName: endpoint.ServerName},
+		MaxIdleConns:    4, MaxIdleConnsPerHost: 2, IdleConnTimeout: 30 * time.Second,
 	}, nil
 }
