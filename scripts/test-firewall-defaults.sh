@@ -289,7 +289,7 @@ write_staged_ucode_defaults_fixture() {
 JSON_FIREWALL
 	cat >"$directory/dhcp" <<'JSON_DHCP'
 {
-  "dnsmasq_main": { ".type": "dnsmasq", "noresolv": "0", "server": "/tmp/resolv.conf" },
+  "dnsmasq_main": { ".type": "dnsmasq", "noresolv": "0", "port": "53", "server": "/tmp/resolv.conf" },
   "lan_dhcp": { ".type": "dhcp", "interface": "lan", "ra": "server", "dhcpv6": "server", "ndp": "relay" }
 }
 JSON_DHCP
@@ -1307,6 +1307,7 @@ set_value "dhcp.$lan_dhcp.ra" disabled
 set_value "dhcp.$lan_dhcp.dhcpv6" disabled
 set_value "dhcp.$lan_dhcp.ndp" disabled
 set_value "dhcp.$dnsmasq.noresolv" 1
+set_value "dhcp.$dnsmasq.port" 0
 delete_value "dhcp.$dnsmasq.server"
 set_value "network.$lan_network.delegate" 0
 delete_value "network.$lan_network.ip6assign"
@@ -1797,6 +1798,7 @@ EOF_FIREWALL
 	cat >"$directory/dhcp" <<'EOF_DHCP'
 dhcp.dnsmasq_main=dnsmasq
 dhcp.dnsmasq_main.noresolv=0
+dhcp.dnsmasq_main.port=53
 dhcp.dnsmasq_main.server=/tmp/resolv.conf.d/resolv.conf.auto
 dhcp.lan_custom=dhcp
 dhcp.lan_custom.interface=lan
@@ -2041,6 +2043,7 @@ assert_success_state() {
 	assert_value "$config_dir" "dhcp.$lan_dhcp.dhcpv6" disabled
 	assert_value "$config_dir" "dhcp.$lan_dhcp.ndp" disabled
 	assert_value "$config_dir" dhcp.dnsmasq_main.noresolv 1
+	assert_value "$config_dir" dhcp.dnsmasq_main.port 0
 	assert_missing_value "$config_dir" dhcp.dnsmasq_main.server
 	assert_value "$config_dir" "network.$lan_network.delegate" 0
 	assert_missing_value "$config_dir" "network.$lan_network.ip6assign"
@@ -2571,6 +2574,7 @@ FOCUSED_FIREWALL
 	cat >"$config_dir/dhcp" <<'FOCUSED_DHCP'
 dhcp.dnsmasq_main=dnsmasq
 dhcp.dnsmasq_main.noresolv=1
+dhcp.dnsmasq_main.port=0
 dhcp.lan_main=dhcp
 dhcp.lan_main.interface=lan
 dhcp.lan_main.ra=disabled
@@ -2670,6 +2674,12 @@ FOCUSED_NETWORK
 					fail 'focused authority accepted restored DNS server'
 				fi
 				;;
+			port)
+				UCI_CONFIG_DIR="$config_dir" "$BIN/uci" -q set dhcp.dnsmasq_main.port=53
+				if activation_current_for_fixture "$config_dir" >/dev/null 2>&1; then
+					fail 'focused authority accepted dnsmasq port=53'
+				fi
+				;;
 			ra|dhcpv6|ndp)
 				UCI_CONFIG_DIR="$config_dir" "$BIN/uci" -q set "dhcp.$lan_dhcp.$projection_case=server"
 				if activation_current_for_fixture "$config_dir" >/dev/null 2>&1; then
@@ -2738,7 +2748,7 @@ FOCUSED_NETWORK
 			all)
 				# The complete Linux suite exercises every case above.  Keep this
 				# branch for CI; Windows-focused runs select one fork-heavy case.
-				for delegated_case in lease noresolv server ra dhcpv6 ndp forwarding network_topology contract contract_iface contract_worker contract_guard_init contract_ucode contract_legacy contract_mode contract_owner contract_links; do
+				for delegated_case in lease noresolv server port ra dhcpv6 ndp forwarding network_topology contract contract_iface contract_worker contract_guard_init contract_ucode contract_legacy contract_mode contract_owner contract_links; do
 					PROXYPOOL_TEST_FOCUS_ACTIVATION_CASE=projection \
 					PROXYPOOL_TEST_PROJECTION_CASE="$delegated_case" \
 						"$0"

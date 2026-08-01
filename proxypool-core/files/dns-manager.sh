@@ -1,11 +1,12 @@
 #!/bin/sh
-# ProxyPool DNS compatibility gate.
+# ProxyPool DNS listener handoff and compatibility gate.
 #
 # Phase 1 deliberately has no publishable DNS data plane.  The legacy SLP files
 # prove only that a PID existed and a port was assigned; they do not bind the
 # process executable, configuration, generation, owner, or listener socket to
-# ProxyPool.  Consequently configure/check/restore all converge dnsmasq to an
-# base-UCI fallback-disabled state while the guardian closes LAN TCP/UDP 53.
+# ProxyPool. Consequently configure/check/restore converge dnsmasq to
+# DHCP-only port=0 with WAN fallback disabled. The V2 daemon may bind TCP/UDP
+# 53 only after this exact state has been restarted and read back.
 # noresolv plus deleting `server` does not prove that serversfile/confdir or
 # other dnsmasq fragments contain no upstream.  A later owned DNS data plane
 # must validate every configuration source and replace this gate as one atomic
@@ -79,6 +80,7 @@ write_unavailable_dnsmasq_config() {
 	dnsmasq_section=$(find_unique_dnsmasq_section) || return 1
 
 	"$UCI" set "${dnsmasq_section}.noresolv=1" >/dev/null 2>&1 || return 1
+	"$UCI" set "${dnsmasq_section}.port=0" >/dev/null 2>&1 || return 1
 	# A missing option is already the desired state.  Any other delete failure
 	# is caught by the post-commit, full-section verification below.
 	"$UCI" -q delete "${dnsmasq_section}.server" >/dev/null 2>&1 || :
@@ -88,6 +90,8 @@ write_unavailable_dnsmasq_config() {
 	[ "$verified_section" = "$dnsmasq_section" ] || return 1
 	noresolv=$("$UCI" -q get "${dnsmasq_section}.noresolv" 2>/dev/null) || return 1
 	[ "$noresolv" = 1 ] || return 1
+	port=$("$UCI" -q get "${dnsmasq_section}.port" 2>/dev/null) || return 1
+	[ "$port" = 0 ] || return 1
 	section_dump=$("$UCI" -q show "$dnsmasq_section" 2>/dev/null) || return 1
 	if printf '%s\n' "$section_dump" | grep -Fq "${dnsmasq_section}.server="; then
 		return 1
@@ -112,7 +116,7 @@ enforce_dns_unavailable() {
 	fi
 
 	[ "$legacy_claim_ok" -eq 1 ] || log_error 'Obsolete DNS listener claim remains, but it is never trusted'
-	log_info 'DNS path unavailable: base UCI fallback disabled and LAN TCP/UDP 53 remains closed'
+	log_info 'DNS handoff ready: dnsmasq is DHCP-only on port=0 with WAN resolver fallback disabled'
 	# Internal callers may use this success only to confirm safe convergence.
 	# It does not mean that an Internet DNS path exists.
 	return 0

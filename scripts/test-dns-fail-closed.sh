@@ -92,6 +92,9 @@ case "$action" in
 				if [ -f "$state_dir/server" ]; then
 					printf "dhcp.dnsmasq_main.server='%s'\n" "$(cat "$state_dir/server")"
 				fi
+				if [ -f "$state_dir/port" ]; then
+					printf "dhcp.dnsmasq_main.port='%s'\n" "$(cat "$state_dir/port")"
+				fi
 				;;
 			*) exit 1 ;;
 		esac
@@ -100,6 +103,7 @@ case "$action" in
 		case "${1-}" in
 			*.noresolv) [ -f "$state_dir/noresolv" ] || exit 1; cat "$state_dir/noresolv" ;;
 			*.server) [ -f "$state_dir/server" ] || exit 1; cat "$state_dir/server" ;;
+			*.port) [ -f "$state_dir/port" ] || exit 1; cat "$state_dir/port" ;;
 			*) exit 1 ;;
 		esac
 		;;
@@ -108,6 +112,7 @@ case "$action" in
 		case "$assignment" in
 			*.noresolv=*) printf '%s\n' "${assignment#*=}" >"$state_dir/noresolv" ;;
 			*.server=*) printf '%s\n' "${assignment#*=}" >"$state_dir/server" ;;
+			*.port=*) printf '%s\n' "${assignment#*=}" >"$state_dir/port" ;;
 			*) exit 1 ;;
 		esac
 		;;
@@ -195,6 +200,7 @@ new_dns_fixture() {
 	mkdir -p "$fixture/state" "$fixture/run" "$fixture/slp/client_a"
 	printf '0\n' >"$fixture/state/noresolv"
 	printf '/tmp/resolv.conf.d/resolv.conf.auto\n' >"$fixture/state/server"
+	printf '53\n' >"$fixture/state/port"
 	printf '5301\n' >"$fixture/run/dns-proxy-port"
 	printf 'running\n' >"$fixture/dnsmasq.state"
 	: >"$fixture/trace"
@@ -226,6 +232,7 @@ run_dns() {
 assert_dns_unavailable() {
 	fixture=$1
 	assert_file_line "$fixture/state/noresolv" 1 || return 1
+	assert_file_line "$fixture/state/port" 0 || return 1
 	assert_file_absent "$fixture/state/server" || return 1
 	assert_file_absent "$fixture/run/dns-proxy-port" || return 1
 	assert_trace_absent "$fixture/trace" 'noresolv=0' || return 1

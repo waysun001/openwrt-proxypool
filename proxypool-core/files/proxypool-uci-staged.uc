@@ -987,6 +987,7 @@ set_option("dhcp", lan_dhcp, "ra", "disabled");
 set_option("dhcp", lan_dhcp, "dhcpv6", "disabled");
 set_option("dhcp", lan_dhcp, "ndp", "disabled");
 set_option("dhcp", dnsmasq[0], "noresolv", "1");
+set_option("dhcp", dnsmasq[0], "port", "0");
 
 const dnsmasq_values = cursor.get_all("dhcp", dnsmasq[0]);
 
