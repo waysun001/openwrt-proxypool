@@ -303,8 +303,10 @@ func runtimeSnapshotFixture() RuntimeSnapshot {
 
 type recordingRuntimeFS struct {
 	runtimeFS
-	operations []string
-	failRename bool
+	operations    []string
+	failRename    bool
+	failSyncDirAt int
+	syncDirCount  int
 }
 
 func (f *recordingRuntimeFS) CreateTemp(dir, pattern string) (runtimeTempFile, error) {
@@ -326,6 +328,10 @@ func (f *recordingRuntimeFS) Rename(oldPath, newPath string) error {
 
 func (f *recordingRuntimeFS) SyncDir(path string) error {
 	f.operations = append(f.operations, "dir-sync")
+	f.syncDirCount++
+	if f.failSyncDirAt > 0 && f.syncDirCount == f.failSyncDirAt {
+		return errors.New("injected directory sync failure")
+	}
 	return f.runtimeFS.SyncDir(path)
 }
 

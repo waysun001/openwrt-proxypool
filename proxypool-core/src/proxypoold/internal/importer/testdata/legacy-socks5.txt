@@ -1,0 +1,2 @@
+proxy-a.example|1080|alice|password-a|2027-01-31
+proxy-b.example|1081|||2027-02-28

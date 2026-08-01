@@ -110,7 +110,7 @@ func runLive(ctx context.Context, options daemonOptions) error {
 		Path: options.socketPath, Handler: controller,
 		Methods: map[string]struct{}{
 			"status.get": {}, "device.list": {}, "device.bind": {}, "device.unbind": {},
-			"node.action": {}, "job.get": {}, "job.list": {}, "system.events": {}, "system.interface_event": {},
+			"node.action": {}, "import.preview": {}, "import.commit": {}, "job.get": {}, "job.list": {}, "system.events": {}, "system.interface_event": {},
 		},
 	}
 	return serveLive(ctx, controller, scheduler, dnsServer, authorizationGate, authorizer, server, desired.Global.StopTimeout)

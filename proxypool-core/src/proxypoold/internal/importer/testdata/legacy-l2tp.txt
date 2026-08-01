@@ -1,0 +1,4 @@
+vpn-a.example|alice|password-a
+vpn-b.example|1702|bob|password-b
+vpn-c.example|carol|password-c|2027-01-31
+vpn-d.example|1703|dave|password-d|2027-02-28

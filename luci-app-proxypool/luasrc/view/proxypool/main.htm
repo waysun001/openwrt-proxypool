@@ -3,7 +3,7 @@
 <script type="text/javascript" src="<%=resource%>/proxypool-global.js"></script>
 
 <style>
-.pp-panel{background:#fff;border:1px solid #dfe5ec;border-radius:8px;padding:16px;margin:14px 0}.pp-head{display:flex;justify-content:space-between;align-items:center;gap:12px}.pp-grid{display:grid;grid-template-columns:repeat(3,minmax(120px,1fr));gap:12px;margin:12px 0}.pp-card{background:#f5f8fb;border-radius:7px;padding:12px}.pp-card strong{display:block;font-size:24px}.pp-table{width:100%;border-collapse:collapse}.pp-table th,.pp-table td{padding:9px;border-bottom:1px solid #e8edf2;text-align:left}.pp-actions{display:flex;gap:6px;flex-wrap:wrap}.pp-state-online{color:#16843d}.pp-state-failed,.pp-state-backoff{color:#b42318}.pp-error{color:#b42318;white-space:pre-wrap}.pp-muted{color:#687386}.pp-job{font-family:monospace;font-size:12px}.pp-busy{opacity:.55;pointer-events:none}@media(max-width:760px){.pp-grid{grid-template-columns:1fr}.pp-table{font-size:12px}.pp-panel{overflow-x:auto}}
+.pp-panel{background:#fff;border:1px solid #dfe5ec;border-radius:8px;padding:16px;margin:14px 0}.pp-head{display:flex;justify-content:space-between;align-items:center;gap:12px}.pp-grid{display:grid;grid-template-columns:repeat(3,minmax(120px,1fr));gap:12px;margin:12px 0}.pp-card{background:#f5f8fb;border-radius:7px;padding:12px}.pp-card strong{display:block;font-size:24px}.pp-table{width:100%;border-collapse:collapse}.pp-table th,.pp-table td{padding:9px;border-bottom:1px solid #e8edf2;text-align:left}.pp-actions{display:flex;gap:6px;flex-wrap:wrap}.pp-state-online{color:#16843d}.pp-state-failed,.pp-state-backoff{color:#b42318}.pp-error{color:#b42318;white-space:pre-wrap}.pp-muted{color:#687386}.pp-job{font-family:monospace;font-size:12px}.pp-busy{opacity:.55;pointer-events:none}.pp-import{width:100%;min-height:130px;box-sizing:border-box;font-family:monospace}.pp-preview{max-height:260px;overflow:auto;margin-top:10px;white-space:pre-wrap}@media(max-width:760px){.pp-grid{grid-template-columns:1fr}.pp-table{font-size:12px}.pp-panel{overflow-x:auto}}
 </style>
 
 <div class="cbi-map" id="pp-app">
@@ -14,6 +14,13 @@
     <div class="pp-card">在线节点<strong id="pp-online">-</strong></div>
     <div class="pp-card">已绑定设备<strong id="pp-bound">-</strong></div>
   </div>
+  <div class="pp-panel">
+    <div class="pp-head"><h3>批量导入</h3><span class="pp-muted">一次提交，后台最多 4 路 L2TP 并发</span></div>
+    <p><select id="pp-import-protocol"><option value="l2tp">L2TP</option><option value="socks5">SOCKS5（仅保存）</option><option value="slp">SLP（仅保存）</option></select></p>
+    <textarea id="pp-import-raw" class="pp-import" placeholder="L2TP: server|username|password（每行一个）"></textarea>
+    <div class="pp-actions"><button class="cbi-button cbi-button-apply" id="pp-import-preview">安全预览</button><button class="cbi-button cbi-button-save" id="pp-import-commit" disabled="disabled">确认导入</button></div>
+    <div id="pp-import-result" class="pp-preview pp-muted"></div>
+  </div>
   <div class="pp-panel"><div class="pp-head"><h3>节点</h3><span class="pp-muted">L2TP 实时链路</span></div><table class="pp-table"><thead><tr><th>名称</th><th>协议</th><th>策略</th><th>状态</th><th>操作</th></tr></thead><tbody id="pp-nodes"></tbody></table></div>
   <div class="pp-panel"><div class="pp-head"><h3>设备发现与绑定</h3><span class="pp-muted">MAC 自动识别，无需手工输入</span></div><table class="pp-table"><thead><tr><th>设备</th><th>IP / 接口</th><th>当前节点</th><th>操作</th></tr></thead><tbody id="pp-devices"></tbody></table></div>
   <div class="pp-panel"><div class="pp-head"><h3>最近任务</h3><span class="pp-muted">页面只使用一个轮询器</span></div><div id="pp-jobs"></div></div>
@@ -22,7 +29,7 @@
 <script type="text/javascript">
 (function(){
   'use strict';
-  var api='<%=url([[admin]], [[services]], [[proxypool]], [[api]])%>', token='<%=token%>', revision=0, timer=null, busy=false;
+  var api='<%=url([[admin]], [[services]], [[proxypool]], [[api]])%>', token='<%=token%>', revision=0, timer=null, busy=false, pendingPreview=null;
   function call(action, params, mutation){
     params=params||{}; params.action=action;
     var options={method:mutation?'POST':'GET',credentials:'same-origin',headers:{'Accept':'application/json'}};
@@ -33,8 +40,11 @@
   }
   function cell(row,text,cls){var td=document.createElement('td');td.textContent=text==null?'':String(text);if(cls)td.className=cls;row.appendChild(td);return td;}
   function button(label,handler){var b=document.createElement('button');b.className='cbi-button';b.textContent=label;b.onclick=handler;return b;}
-  function mutate(action,params){if(busy)return;busy=true;document.getElementById('pp-app').classList.add('pp-busy');call(action,params,true).then(function(result){return pollJob(result.job_id);}).catch(showError).then(function(){busy=false;document.getElementById('pp-app').classList.remove('pp-busy');refresh();});}
-  function pollJob(id){if(!id)return Promise.resolve();return new Promise(function(resolve,reject){var attempts=0;function next(){call('job',{job_id:id},false).then(function(job){if(job.state==='succeeded'||job.state==='failed'||job.state==='cancelled'||job.state==='replaced'){if(job.state!=='succeeded')reject(new Error('任务 '+job.state));else resolve();return;}if(++attempts>120){reject(new Error('任务等待超时'));return;}setTimeout(next,1000);}).catch(reject);}next();});}
+  function setBusy(value){busy=value;document.getElementById('pp-app').classList.toggle('pp-busy',value);}
+  function mutate(action,params){if(busy)return;setBusy(true);call(action,params,true).catch(showError).then(function(){setBusy(false);refresh();});}
+  function renderImportPreview(preview){var target=document.getElementById('pp-import-result'),lines=[];lines.push('新增 '+preview.added+'，跳过 '+preview.skipped+(preview.blocked?'，存在阻断错误':'，可以提交'));(preview.rows||[]).forEach(function(row){lines.push('第 '+row.line+' 行  '+row.action+'  '+row.protocol+' '+row.server+':'+row.port+'  凭据：'+(row.secret_set?'已填写':'无'));});(preview.errors||[]).forEach(function(issue){lines.push((issue.line?'第 '+issue.line+' 行  ':'')+issue.code+'：'+issue.message);});target.textContent=lines.join('\n');document.getElementById('pp-import-commit').disabled=!!preview.blocked;}
+  function previewImport(){if(busy)return;var box=document.getElementById('pp-import-raw'),raw=box.value,protocol=document.getElementById('pp-import-protocol').value;if(!raw){showError(new Error('请输入节点列表'));return;}box.value='';pendingPreview=null;document.getElementById('pp-import-commit').disabled=true;setBusy(true);call('import_preview',{protocol:protocol,raw:raw,expected_revision:revision},true).then(function(result){pendingPreview=result;renderImportPreview(result);}).catch(showError).then(function(){setBusy(false);});}
+  function commitImport(){if(busy||!pendingPreview||pendingPreview.blocked)return;var preview=pendingPreview;pendingPreview=null;document.getElementById('pp-import-commit').disabled=true;setBusy(true);call('import_commit',{preview_id:preview.preview_id,preview_hash:preview.preview_hash,expected_revision:preview.base_revision},true).then(function(result){document.getElementById('pp-import-result').textContent='导入已保存，后台任务：'+result.job_id;}).catch(showError).then(function(){setBusy(false);refresh();});}
   function showError(error){document.getElementById('pp-error').textContent=error&&error.message?error.message:String(error||'未知错误');}
   function render(status,devices,jobs){
     revision=status.config.revision;var nodes=status.desired.nodes||[], runtime=status.runtime.nodes||[], states={};runtime.forEach(function(item){states[item.node_id]=item.state;});
@@ -47,7 +57,7 @@
     if(!(jobs.jobs||[]).length)jt.textContent='暂无任务';
   }
   function refresh(){if(busy)return;if(timer)clearTimeout(timer);Promise.all([call('status',{},false),call('devices',{},false),call('jobs',{},false)]).then(function(values){document.getElementById('pp-error').textContent='';render(values[0],values[1],values[2]);}).catch(showError).then(function(){timer=setTimeout(refresh,3000);});}
-  document.getElementById('pp-refresh').onclick=refresh;refresh();
+  document.getElementById('pp-refresh').onclick=refresh;document.getElementById('pp-import-preview').onclick=previewImport;document.getElementById('pp-import-commit').onclick=commitImport;refresh();
 })();
 </script>
 <%+footer%>

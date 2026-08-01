@@ -2,12 +2,15 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"proxypoold/internal/importer"
 	"proxypoold/internal/model"
 	"proxypoold/internal/platform"
 )
@@ -98,6 +101,55 @@ func TestSchedulerLimitsL2TPConcurrencyToFourAndIsolatesNodeFailure(t *testing.T
 	waitForNodeStateOneOf(t, controller, "node_2", model.StateBackoff, model.StateFailed)
 	if status, _ := controller.schedulerStatus("node_1"); status.State != model.StateOnline {
 		t.Fatalf("node_2 failure contaminated node_1: %#v", status)
+	}
+}
+
+func TestSchedulerCompletesSixtyNodeImportWithFourConcurrentStarts(t *testing.T) {
+	desired := controllerConfig()
+	desired.Nodes = map[string]model.Node{}
+	desired.Devices = map[string]model.Device{}
+	imports := importer.New(importer.WithIDSource(func() string { return "preview-sixty" }))
+	controller, err := NewController(
+		&memoryDesiredStore{cfg: desired}, &memoryRuntimePersistence{}, NewMachine(nil), NewJobStore(),
+		WithImporter(imports), WithControllerJobIDSource(func() string { return "job-import-sixty" }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	adapter := &schedulerAdapter{startRelease: release}
+	scheduler := NewScheduler(controller, adapter, SchedulerConfig{L2TPConcurrency: 4, ProxyConcurrency: 8, ConnectTimeout: time.Second, StopTimeout: time.Second})
+	controller.AttachScheduler(scheduler)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go scheduler.Run(ctx)
+
+	lines := make([]string, 60)
+	for index := range lines {
+		lines[index] = fmt.Sprintf("vpn-%02d.example|user-%02d|password-%02d", index, index, index)
+	}
+	previewResponse := controller.Handle(context.Background(), controllerRequest("preview-sixty", "import.preview", fmt.Sprintf(`{"protocol":"l2tp","raw":%q,"expected_revision":3}`, strings.Join(lines, "\n"))))
+	assertControllerSuccess(t, previewResponse)
+	var preview importer.Preview
+	if err := json.Unmarshal(previewResponse.Result, &preview); err != nil {
+		t.Fatal(err)
+	}
+	commitResponse := controller.Handle(context.Background(), controllerRequest("commit-sixty", "import.commit", fmt.Sprintf(`{"preview_id":%q,"preview_hash":%q,"expected_revision":3}`, preview.ID, preview.Hash)))
+	assertControllerSuccess(t, commitResponse)
+	waitForActiveStarts(t, adapter, 4)
+	adapter.mu.Lock()
+	maxActive := adapter.maxActive
+	adapter.mu.Unlock()
+	if maxActive != 4 {
+		t.Fatalf("60-node import max concurrent starts = %d", maxActive)
+	}
+	close(release)
+	waitForJobState(t, controller.jobs, "job-import-sixty", JobSucceeded)
+	adapter.mu.Lock()
+	starts := adapter.startCalls
+	adapter.mu.Unlock()
+	if starts != 60 {
+		t.Fatalf("60-node import starts = %d", starts)
 	}
 }
 
@@ -524,8 +576,9 @@ func TestSchedulerReconnectEnablesPersistedDisabledNode(t *testing.T) {
 }
 
 type memoryDesiredStore struct {
-	mu  sync.Mutex
-	cfg model.DesiredConfig
+	mu           sync.Mutex
+	cfg          model.DesiredConfig
+	replaceCount int
 }
 
 func (store *memoryDesiredStore) Load() (model.DesiredConfig, error) {
@@ -537,6 +590,7 @@ func (store *memoryDesiredStore) Load() (model.DesiredConfig, error) {
 func (store *memoryDesiredStore) Replace(_ context.Context, expected uint64, next model.DesiredConfig) (model.DesiredConfig, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	store.replaceCount++
 	if store.cfg.Revision != expected {
 		return model.DesiredConfig{}, codeError(ErrorCodeRevisionConflict, "revision conflict")
 	}

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"proxypoold/internal/api"
+	"proxypoold/internal/importer"
 	"proxypoold/internal/model"
 	"proxypoold/internal/platform"
 )
@@ -69,6 +70,14 @@ func WithControllerLeaseRollbackTimeout(timeout time.Duration) ControllerOption 
 	}
 }
 
+func WithImporter(manager *importer.Manager) ControllerOption {
+	return func(controller *Controller) {
+		if manager != nil {
+			controller.importer = manager
+		}
+	}
+}
+
 // Controller is the formal V2 single writer. Platform work is deliberately
 // only queued here; Scheduler becomes the sole side-effect owner in Task 4.
 type Controller struct {
@@ -81,6 +90,7 @@ type Controller struct {
 	deviceSource platform.DeviceSource
 	leaseManager platform.LeaseManager
 	scheduler    schedulerSubmitter
+	importer     *importer.Manager
 
 	desired              model.DesiredConfig
 	statuses             map[string]NodeStatus
@@ -111,6 +121,7 @@ func NewController(desiredStore desiredConfigStore, runtimeStore runtimePersiste
 		now:                  time.Now,
 		newJobID:             randomReconciliationID,
 		leaseRollbackTimeout: defaultControllerLeaseRollbackTimeout,
+		importer:             importer.New(),
 	}
 	for _, option := range options {
 		if option != nil {
@@ -238,6 +249,10 @@ func (controller *Controller) Handle(ctx context.Context, request api.Request) a
 		return controller.handleDeviceUnbind(ctx, request)
 	case "node.action":
 		return controller.handleNodeAction(ctx, request)
+	case "import.preview":
+		return controller.handleImportPreview(ctx, request)
+	case "import.commit":
+		return controller.handleImportCommit(ctx, request)
 	case "job.get":
 		return controller.handleJobGet(request)
 	case "job.list":
@@ -282,6 +297,18 @@ type eventsParams struct {
 type interfaceEventParams struct {
 	Interface string `json:"interface"`
 	Action    string `json:"action"`
+}
+
+type importPreviewParams struct {
+	Protocol         model.Protocol `json:"protocol"`
+	Raw              string         `json:"raw"`
+	ExpectedRevision *uint64        `json:"expected_revision"`
+}
+
+type importCommitParams struct {
+	PreviewID        string  `json:"preview_id"`
+	PreviewHash      string  `json:"preview_hash"`
+	ExpectedRevision *uint64 `json:"expected_revision"`
 }
 
 type mutationResult struct {
@@ -584,7 +611,82 @@ func (controller *Controller) handleNodeAction(ctx context.Context, request api.
 	return controller.finishMutationLocked(ctx, request, digest, stored, "node."+params.Action, []string{params.NodeID})
 }
 
+func (controller *Controller) handleImportPreview(ctx context.Context, request api.Request) api.Response {
+	var params importPreviewParams
+	if decodeControllerParams(request.Params, &params) != nil || request.ID == "" || params.Raw == "" || params.ExpectedRevision == nil || *params.ExpectedRevision == 0 {
+		return controllerError(request.ID, ErrorCodeInvalidRequest)
+	}
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	if contextDone(ctx) != nil {
+		return controllerError(request.ID, "operation_timeout")
+	}
+	current, err := controller.desiredStore.Load()
+	if err != nil {
+		return controllerError(request.ID, ErrorCodeInternal)
+	}
+	if current.Revision != *params.ExpectedRevision {
+		return controllerError(request.ID, ErrorCodeRevisionConflict)
+	}
+	preview, err := controller.importer.Preview(ctx, importer.PreviewRequest{Protocol: params.Protocol, Raw: params.Raw, Base: current})
+	if err != nil {
+		return controllerImporterError(request.ID, err)
+	}
+	return controllerResult(request.ID, preview)
+}
+
+func (controller *Controller) handleImportCommit(ctx context.Context, request api.Request) api.Response {
+	var params importCommitParams
+	if decodeControllerParams(request.Params, &params) != nil || request.ID == "" || params.PreviewID == "" || params.PreviewHash == "" || params.ExpectedRevision == nil || *params.ExpectedRevision == 0 {
+		return controllerError(request.ID, ErrorCodeInvalidRequest)
+	}
+	digest := controllerDigest(request.Method, params)
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	if response, handled := controller.replayLocked(request, digest); handled {
+		return response
+	}
+	if contextDone(ctx) != nil {
+		return controllerError(request.ID, "operation_timeout")
+	}
+	current, err := controller.desiredStore.Load()
+	if err != nil {
+		return controllerError(request.ID, ErrorCodeInternal)
+	}
+	if current.Revision != *params.ExpectedRevision {
+		return controllerError(request.ID, ErrorCodeRevisionConflict)
+	}
+	commit := importer.CommitRequest{PreviewID: params.PreviewID, PreviewHash: params.PreviewHash, ExpectedRevision: *params.ExpectedRevision}
+	candidates, err := controller.importer.ValidateCommit(ctx, commit)
+	if err != nil {
+		return controllerImporterError(request.ID, err)
+	}
+	next, nodeIDs, err := importer.Merge(current, candidates)
+	if err != nil {
+		return controllerModelError(request.ID, err)
+	}
+	stored, err := controller.desiredStore.Replace(ctx, current.Revision, next)
+	if err != nil {
+		observed, observeErr := controller.desiredStore.Load()
+		if observeErr == nil && controllerConfigMatchesStoredMutation(current.Revision, next, observed) {
+			controller.importer.Consume(params.PreviewID)
+			return controller.finishObservedDurableMutationLocked(request, digest, observed, "import.commit", nodeIDs)
+		}
+		return controllerModelError(request.ID, err)
+	}
+	controller.importer.Consume(params.PreviewID)
+	return controller.finishDurableMutationLocked(ctx, request, digest, stored, "import.commit", nodeIDs)
+}
+
 func (controller *Controller) finishMutationLocked(ctx context.Context, request api.Request, digest string, desired model.DesiredConfig, kind string, nodeIDs []string) api.Response {
+	return controller.finishMutationWithDurabilityLocked(ctx, request, digest, desired, kind, nodeIDs, false)
+}
+
+func (controller *Controller) finishDurableMutationLocked(ctx context.Context, request api.Request, digest string, desired model.DesiredConfig, kind string, nodeIDs []string) api.Response {
+	return controller.finishMutationWithDurabilityLocked(ctx, request, digest, desired, kind, nodeIDs, true)
+}
+
+func (controller *Controller) finishMutationWithDurabilityLocked(ctx context.Context, request api.Request, digest string, desired model.DesiredConfig, kind string, nodeIDs []string, requireRuntimeDurable bool) api.Response {
 	beforeJobs := controller.jobs.Snapshot()
 	// Desired configuration was durably replaced before this function. Keep
 	// the in-memory revision aligned even if later runtime persistence fails.
@@ -601,6 +703,25 @@ func (controller *Controller) finishMutationLocked(ctx context.Context, request 
 	record := IdempotencyRecord{
 		RequestID: request.ID, Method: request.Method, Digest: digest,
 		Result: append(json.RawMessage(nil), resultBytes...), ConfigRevision: desired.Revision, CreatedAt: controller.now(),
+	}
+	if requireRuntimeDurable {
+		// Persist the promised job before adding the success replay record. If
+		// Save reports an error after its atomic rename, a restart may observe
+		// the job, but it can never observe a success response we did not return.
+		if err := controller.persistLocked(ctx); err != nil {
+			if controller.scheduler != nil && !isTerminalJob(job.State) {
+				controller.scheduler.Submit(job)
+			}
+			return controllerError(request.ID, ErrorCodeInternal)
+		}
+		controller.addIdempotencyLocked(record)
+		// The job is already durable. Failure of this best-effort second write
+		// only means a restart may lose idempotent replay, not the returned job.
+		_ = controller.persistLocked(ctx)
+		if controller.scheduler != nil && !isTerminalJob(job.State) {
+			controller.scheduler.Submit(job)
+		}
+		return api.Response{Version: api.ProtocolVersion, ID: request.ID, Result: resultBytes}
 	}
 	controller.addIdempotencyLocked(record)
 	if err := controller.persistLocked(ctx); err != nil {
@@ -620,10 +741,18 @@ func (controller *Controller) finishMutationLocked(ctx context.Context, request 
 }
 
 func (controller *Controller) finishObservedMutationLocked(request api.Request, digest string, desired model.DesiredConfig, kind string, nodeIDs []string) api.Response {
+	return controller.finishObservedMutationWithDurabilityLocked(request, digest, desired, kind, nodeIDs, false)
+}
+
+func (controller *Controller) finishObservedDurableMutationLocked(request api.Request, digest string, desired model.DesiredConfig, kind string, nodeIDs []string) api.Response {
+	return controller.finishObservedMutationWithDurabilityLocked(request, digest, desired, kind, nodeIDs, true)
+}
+
+func (controller *Controller) finishObservedMutationWithDurabilityLocked(request api.Request, digest string, desired model.DesiredConfig, kind string, nodeIDs []string, requireRuntimeDurable bool) api.Response {
 	durableCtx, cancel := context.WithTimeout(context.Background(), controller.leaseRollbackTimeout)
 	err := controller.desiredStore.EnsureDurable(durableCtx)
 	if err == nil {
-		response := controller.finishMutationLocked(durableCtx, request, digest, desired, kind, nodeIDs)
+		response := controller.finishMutationWithDurabilityLocked(durableCtx, request, digest, desired, kind, nodeIDs, requireRuntimeDurable)
 		cancel()
 		return response
 	}
@@ -760,21 +889,6 @@ func (controller *Controller) addIdempotencyLocked(record IdempotencyRecord) *Id
 	return &oldest
 }
 
-func (controller *Controller) removeIdempotencyLocked(requestID string) {
-	delete(controller.idempotency, requestID)
-	for index, id := range controller.idempotencyOrder {
-		if id == requestID {
-			controller.idempotencyOrder = append(controller.idempotencyOrder[:index], controller.idempotencyOrder[index+1:]...)
-			return
-		}
-	}
-}
-
-func (controller *Controller) restoreIdempotencyFrontLocked(record IdempotencyRecord) {
-	controller.idempotency[record.RequestID] = cloneIdempotencyRecord(record)
-	controller.idempotencyOrder = append([]string{record.RequestID}, controller.idempotencyOrder...)
-}
-
 func (controller *Controller) persistLocked(ctx context.Context) error {
 	statuses := make([]NodeStatus, 0, len(controller.statuses))
 	statusIDs := make([]string, 0, len(controller.statuses))
@@ -877,6 +991,25 @@ func controllerModelError(id string, err error) api.Response {
 		return controllerError(id, "operation_timeout")
 	}
 	return controllerError(id, ErrorCodeInternal)
+}
+
+func controllerImporterError(id string, err error) api.Response {
+	var coded *model.CodeError
+	if !errors.As(err, &coded) {
+		return controllerModelError(id, err)
+	}
+	switch coded.Code {
+	case importer.ErrorRevisionConflict:
+		return controllerError(id, ErrorCodeRevisionConflict)
+	case importer.ErrorCapacityExceeded, importer.ErrorPreviewCapacity:
+		return controllerError(id, ErrorCodeCapacityExceeded)
+	case importer.ErrorPreviewNotFound, importer.ErrorPreviewExpired:
+		return controllerError(id, ErrorCodeNotFound)
+	case importer.ErrorPreviewBlocked:
+		return controllerError(id, ErrorCodeInvalidConfig)
+	default:
+		return controllerError(id, ErrorCodeInvalidRequest)
+	}
 }
 
 func controllerError(id, code string) api.Response {

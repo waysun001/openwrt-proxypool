@@ -11,7 +11,9 @@ local ACTIONS = {
     events = { method = "system.events", mutation = false },
     bind = { method = "device.bind", mutation = true },
     unbind = { method = "device.unbind", mutation = true },
-    node_action = { method = "node.action", mutation = true }
+    node_action = { method = "node.action", mutation = true },
+    import_preview = { method = "import.preview", mutation = true },
+    import_commit = { method = "import.commit", mutation = true }
 }
 
 function index()
@@ -48,6 +50,12 @@ local function exact_revision(value)
     return number
 end
 
+local function exact_hash(value)
+    value = tostring(value or "")
+    if #value ~= 64 or not value:match("^[a-f0-9]+$") then return nil end
+    return value
+end
+
 local function params_for(action, http)
     if action == "status" or action == "devices" or action == "jobs" then return {} end
     if action == "job" then
@@ -60,6 +68,21 @@ local function params_for(action, http)
         local limit = tonumber(http.formvalue("limit") or "100")
         if not after or after < 0 or after ~= math.floor(after) or not limit or limit < 1 or limit > 200 or limit ~= math.floor(limit) then return nil end
         return { after_sequence = after, limit = limit }
+    end
+    if action == "import_preview" then
+        local protocol = tostring(http.formvalue("protocol") or "")
+        local raw = tostring(http.formvalue("raw") or "")
+        local revision = exact_revision(http.formvalue("expected_revision"))
+        if (protocol ~= "l2tp" and protocol ~= "socks5" and protocol ~= "slp") or
+            #raw < 1 or #raw > MAX_RESPONSE or not revision then return nil end
+        return { protocol = protocol, raw = raw, expected_revision = revision }
+    end
+    if action == "import_commit" then
+        local preview = exact_id(http.formvalue("preview_id"))
+        local hash = exact_hash(http.formvalue("preview_hash"))
+        local revision = exact_revision(http.formvalue("expected_revision"))
+        if not preview or not hash or not revision then return nil end
+        return { preview_id = preview, preview_hash = hash, expected_revision = revision }
     end
     local revision = exact_revision(http.formvalue("expected_revision"))
     local device = exact_id(http.formvalue("device_id"))

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 
 	"proxypoold/internal/api"
 	"proxypoold/internal/config"
+	"proxypoold/internal/importer"
 	"proxypoold/internal/model"
 	"proxypoold/internal/platform"
 )
@@ -100,6 +102,8 @@ func TestControllerStrictWriteSchemasAndRevisionConflictsHaveZeroMutation(t *tes
 		{name: "missing node", method: "device.bind", params: `{"device_id":"device_a","node_id":"missing","expected_revision":3}`, code: ErrorCodeNotFound},
 		{name: "stale revision", method: "device.bind", params: `{"device_id":"device_a","node_id":"node_b","expected_revision":2}`, code: ErrorCodeRevisionConflict},
 		{name: "unknown action", method: "node.action", params: `{"node_id":"node_a","action":"explode","expected_revision":3}`, code: ErrorCodeInvalidRequest},
+		{name: "import preview unknown field", method: "import.preview", params: `{"protocol":"l2tp","raw":"vpn.example|user|password","expected_revision":3,"future":true}`, code: ErrorCodeInvalidRequest},
+		{name: "import commit missing revision", method: "import.commit", params: `{"preview_id":"preview","preview_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`, code: ErrorCodeInvalidRequest},
 		{name: "unknown method", method: "node.save", params: `{}`, code: "unknown_method"},
 	}
 	for _, test := range tests {
@@ -127,6 +131,177 @@ func TestControllerStrictWriteSchemasAndRevisionConflictsHaveZeroMutation(t *tes
 			}
 		})
 	}
+}
+
+func TestControllerBulkImportPreviewCommitIsOneAtomicJob(t *testing.T) {
+	cfg := controllerConfig()
+	cfg.Nodes = map[string]model.Node{}
+	cfg.Devices = map[string]model.Device{}
+	desired := &memoryDesiredStore{cfg: cfg}
+	imports := importer.New(importer.WithIDSource(func() string { return "preview-forty" }))
+	controller, err := NewController(
+		desired, &memoryRuntimePersistence{}, NewMachine(nil), NewJobStore(),
+		WithImporter(imports), WithControllerJobIDSource(func() string { return "job-import-forty" }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := make([]string, 40)
+	for index := range lines {
+		lines[index] = fmt.Sprintf("vpn-%02d.example|user-%02d|password-%02d", index, index, index)
+	}
+	raw := strings.Join(lines, "\n")
+	previewParams, _ := json.Marshal(map[string]any{"protocol": "l2tp", "raw": raw, "expected_revision": 3})
+	previewResponse := controller.Handle(context.Background(), controllerRequest("preview-forty", "import.preview", string(previewParams)))
+	assertControllerSuccess(t, previewResponse)
+	var preview importer.Preview
+	if err := json.Unmarshal(previewResponse.Result, &preview); err != nil {
+		t.Fatal(err)
+	}
+	if preview.Added != 40 || preview.Blocked || strings.Contains(string(previewResponse.Result), "password-") {
+		t.Fatalf("preview = %s", previewResponse.Result)
+	}
+	commitParams, _ := json.Marshal(map[string]any{"preview_id": preview.ID, "preview_hash": preview.Hash, "expected_revision": 3})
+	commitResponse := controller.Handle(context.Background(), controllerRequest("commit-forty", "import.commit", string(commitParams)))
+	assertControllerSuccess(t, commitResponse)
+	stored, _ := desired.Load()
+	job, exists := controller.jobs.Get("job-import-forty")
+	desired.mu.Lock()
+	replaceCalls := desired.replaceCount
+	desired.mu.Unlock()
+	if stored.Revision != 4 || len(stored.Nodes) != 40 || replaceCalls != 1 || !exists || job.Kind != "import.commit" || job.Total != 40 {
+		t.Fatalf("bulk commit = revision %d nodes %d replaces %d job %#v exists=%t", stored.Revision, len(stored.Nodes), replaceCalls, job, exists)
+	}
+}
+
+func TestControllerBlockedImportDoesNotMutateDesiredOrCreateJob(t *testing.T) {
+	desired := &memoryDesiredStore{cfg: controllerConfig()}
+	imports := importer.New(importer.WithIDSource(func() string { return "preview-blocked" }))
+	controller, err := NewController(desired, &memoryRuntimePersistence{}, NewMachine(nil), NewJobStore(), WithImporter(imports))
+	if err != nil {
+		t.Fatal(err)
+	}
+	previewResponse := controller.Handle(context.Background(), controllerRequest("preview-blocked", "import.preview", `{"protocol":"l2tp","raw":"invalid","expected_revision":3}`))
+	assertControllerSuccess(t, previewResponse)
+	var preview importer.Preview
+	if err := json.Unmarshal(previewResponse.Result, &preview); err != nil {
+		t.Fatal(err)
+	}
+	commitParams, _ := json.Marshal(map[string]any{"preview_id": preview.ID, "preview_hash": preview.Hash, "expected_revision": 3})
+	commitResponse := controller.Handle(context.Background(), controllerRequest("commit-blocked", "import.commit", string(commitParams)))
+	assertControllerError(t, commitResponse, ErrorCodeInvalidConfig)
+	stored, _ := desired.Load()
+	if stored.Revision != 3 || desired.replaceCount != 0 || len(controller.jobs.List()) != 0 {
+		t.Fatalf("blocked import mutated state: revision=%d replaces=%d jobs=%#v", stored.Revision, desired.replaceCount, controller.jobs.List())
+	}
+}
+
+func TestControllerFailedImportPersistenceKeepsPreviewRetryable(t *testing.T) {
+	desired := &failOnceDesiredStore{cfg: controllerConfig()}
+	imports := importer.New(importer.WithIDSource(func() string { return "preview-retry" }))
+	controller, err := NewController(
+		desired, &memoryRuntimePersistence{}, NewMachine(nil), NewJobStore(),
+		WithImporter(imports), WithControllerJobIDSource(func() string { return "job-import-retry" }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previewResponse := controller.Handle(context.Background(), controllerRequest("preview-retry", "import.preview", `{"protocol":"l2tp","raw":"vpn-retry.example|user|password","expected_revision":3}`))
+	assertControllerSuccess(t, previewResponse)
+	var preview importer.Preview
+	if err := json.Unmarshal(previewResponse.Result, &preview); err != nil {
+		t.Fatal(err)
+	}
+	params, _ := json.Marshal(map[string]any{"preview_id": preview.ID, "preview_hash": preview.Hash, "expected_revision": 3})
+	first := controller.Handle(context.Background(), controllerRequest("commit-retry-first", "import.commit", string(params)))
+	assertControllerError(t, first, ErrorCodeInternal)
+	stored, _ := desired.Load()
+	if stored.Revision != 3 || len(controller.jobs.List()) != 0 {
+		t.Fatalf("failed first commit mutated state: revision=%d jobs=%#v", stored.Revision, controller.jobs.List())
+	}
+	second := controller.Handle(context.Background(), controllerRequest("commit-retry-second", "import.commit", string(params)))
+	assertControllerSuccess(t, second)
+	stored, _ = desired.Load()
+	if stored.Revision != 4 || len(stored.Nodes) != 3 || len(controller.jobs.List()) != 1 {
+		t.Fatalf("retry commit = revision %d nodes %d jobs %#v", stored.Revision, len(stored.Nodes), controller.jobs.List())
+	}
+}
+
+func TestControllerImportDoesNotPromiseJobWhenRuntimePersistenceFails(t *testing.T) {
+	cfg := controllerConfig()
+	cfg.Nodes = map[string]model.Node{}
+	cfg.Devices = map[string]model.Device{}
+	desired := &memoryDesiredStore{cfg: cfg}
+	runtime := &memoryRuntimePersistence{failSaveAt: 2}
+	recorder := &controllerSchedulerRecorder{}
+	imports := importer.New(importer.WithIDSource(func() string { return "preview-runtime-failure" }))
+	controller, err := NewController(
+		desired, runtime, NewMachine(nil), NewJobStore(),
+		WithImporter(imports), WithControllerJobIDSource(func() string { return "job-runtime-failure-import" }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.AttachScheduler(recorder)
+	previewResponse := controller.Handle(context.Background(), controllerRequest(
+		"preview-runtime-failure", "import.preview", `{"protocol":"l2tp","raw":"vpn.example|user|password","expected_revision":3}`,
+	))
+	assertControllerSuccess(t, previewResponse)
+	var preview importer.Preview
+	if err := json.Unmarshal(previewResponse.Result, &preview); err != nil {
+		t.Fatal(err)
+	}
+	params, _ := json.Marshal(map[string]any{"preview_id": preview.ID, "preview_hash": preview.Hash, "expected_revision": 3})
+	request := controllerRequest("commit-runtime-failure", "import.commit", string(params))
+	response := controller.Handle(context.Background(), request)
+	assertControllerError(t, response, ErrorCodeInternal)
+	stored, err := desired.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, exists := controller.jobs.Get("job-runtime-failure-import")
+	if stored.Revision != 4 || !exists || len(recorder.jobs) != 1 || recorder.jobs[0].ID != job.ID {
+		t.Fatalf("fail-closed import = revision %d job %#v exists=%t submitted=%#v", stored.Revision, job, exists, recorder.jobs)
+	}
+	replayed := controller.Handle(context.Background(), request)
+	assertControllerError(t, replayed, ErrorCodeRevisionConflict)
+}
+
+func TestControllerImportPostRenameFailureCannotReplaySuccessAfterRestart(t *testing.T) {
+	cfg := controllerConfig()
+	cfg.Nodes = map[string]model.Node{}
+	cfg.Devices = map[string]model.Device{}
+	desired := &memoryDesiredStore{cfg: cfg}
+	path := filepath.Join(t.TempDir(), "runtime.json")
+	ops := &recordingRuntimeFS{runtimeFS: osRuntimeFS{}, failSyncDirAt: 2}
+	imports := importer.New(importer.WithIDSource(func() string { return "preview-post-rename" }))
+	controller, err := NewController(
+		desired, newRuntimeStore(path, ops), NewMachine(nil), NewJobStore(),
+		WithImporter(imports), WithControllerJobIDSource(func() string { return "job-post-rename-import" }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previewResponse := controller.Handle(context.Background(), controllerRequest(
+		"preview-post-rename", "import.preview", `{"protocol":"l2tp","raw":"vpn.example|user|password","expected_revision":3}`,
+	))
+	assertControllerSuccess(t, previewResponse)
+	var preview importer.Preview
+	if err := json.Unmarshal(previewResponse.Result, &preview); err != nil {
+		t.Fatal(err)
+	}
+	params, _ := json.Marshal(map[string]any{"preview_id": preview.ID, "preview_hash": preview.Hash, "expected_revision": 3})
+	request := controllerRequest("commit-post-rename", "import.commit", string(params))
+	assertControllerError(t, controller.Handle(context.Background(), request), ErrorCodeInternal)
+
+	restarted, err := NewController(desired, NewRuntimeStore(path), NewMachine(nil), NewJobStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := restarted.jobs.Get("job-post-rename-import"); !exists {
+		t.Fatal("post-rename snapshot did not retain the fail-closed import job")
+	}
+	assertControllerError(t, restarted.Handle(context.Background(), request), ErrorCodeRevisionConflict)
 }
 
 func TestControllerUnbindAndNodeActionsUseOneDeviceOneNodeSemantics(t *testing.T) {

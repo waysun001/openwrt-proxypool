@@ -34,12 +34,16 @@ case "$live_line" in *--shadow*) fail 'OpenWrt init still launches shadow mode' 
 for forbidden in proxypool.sh l2tp-manager.sh socks5-manager.sh slp-manager.sh 'luci.model.uci' 'os.execute'; do
 	if grep -Fq "$forbidden" "$LUCI"; then fail "LuCI directly invokes forbidden path: $forbidden"; fi
 done
-for contract in 'nixio.socket("unix", "stream")' 'device.bind' 'device.unbind' 'node.action' 'job.get' 'job.list'; do
+for contract in 'nixio.socket("unix", "stream")' 'device.bind' 'device.unbind' 'node.action' 'import.preview' 'import.commit' 'job.get' 'job.list'; do
 	require "$LUCI" "$contract" "LuCI is missing control contract: $contract"
 done
 require "$LUCI" 'socket:setopt("socket", "sndtimeo", 12, 0)' 'LuCI control writes can hang without a deadline'
 require "$LUCI" 'socket:setopt("socket", "rcvtimeo", 12, 0)' 'LuCI control reads can hang without a deadline'
 require "$VIEW" '页面只使用一个轮询器' 'LuCI does not expose bounded job polling'
 require "$VIEW" 'MAC 自动识别，无需手工输入' 'LuCI does not expose automatic device discovery'
+
+require "$VIEW" "call('import_preview'" 'LuCI does not submit raw import text for server preview'
+require "$VIEW" "call('import_commit'" 'LuCI does not commit one server-side import transaction'
+if grep -Fq 'function pollJob' "$VIEW"; then fail 'LuCI still blocks mutation UI while polling a whole job'; fi
 
 echo 'PASS: V2 live L2TP assembly and LuCI control contract'
