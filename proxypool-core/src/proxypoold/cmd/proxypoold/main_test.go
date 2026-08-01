@@ -55,6 +55,37 @@ func TestRunPreservesVersionAndStrictlyRequiresShadow(t *testing.T) {
 	}
 }
 
+func TestRunStrictlySelectsShadowOrLiveMode(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     []string
+		wantCode int
+	}{
+		{name: "live complete", args: []string{"--live", "--config", "config", "--state", "state", "--socket", "socket"}, wantCode: 0},
+		{name: "live default config", args: []string{"--live", "--state", "state"}, wantCode: 0},
+		{name: "live missing state", args: []string{"--live"}, wantCode: 2},
+		{name: "both modes", args: []string{"--shadow", "--live", "--state", "state"}, wantCode: 2},
+		{name: "state forbidden in shadow", args: []string{"--shadow", "--state", "state"}, wantCode: 2},
+		{name: "duplicate live", args: []string{"--live", "--live", "--state", "state"}, wantCode: 2},
+		{name: "duplicate state", args: []string{"--live", "--state", "one", "--state", "two"}, wantCode: 2},
+		{name: "empty state", args: []string{"--live", "--state", ""}, wantCode: 2},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			var stdout, stderr bytes.Buffer
+			code := run(ctx, test.args, &stdout, &stderr)
+			if code != test.wantCode {
+				t.Fatalf("code = %d, want %d; stderr=%q", code, test.wantCode, stderr.String())
+			}
+			if test.wantCode == 2 && !strings.Contains(stderr.String(), "usage:") {
+				t.Fatalf("invalid mode did not print usage: %q", stderr.String())
+			}
+		})
+	}
+}
+
 func TestRunServesOnlyStatusAndShutsDownAfterCancellation(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Go's Unix socket server is not available on Windows")

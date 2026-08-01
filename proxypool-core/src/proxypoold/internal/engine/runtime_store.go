@@ -11,21 +11,37 @@ import (
 	"reflect"
 	"runtime"
 	"sync"
+	"time"
 )
 
 const (
 	RuntimeSnapshotSchemaVersion = 1
 	MaxRuntimeNodeStatuses       = 60
+	MaxRuntimeIdempotencyRecords = 256
 	maxRuntimeSnapshotBytes      = 4 << 20
 )
+
+var ErrRuntimeSnapshotNotFound = errors.New("runtime snapshot not found")
 
 // RuntimeSnapshot contains only restart metadata. Desired node configuration
 // and credentials remain exclusively in the root-owned configuration store.
 type RuntimeSnapshot struct {
-	SchemaVersion  int          `json:"schema_version"`
-	ConfigRevision uint64       `json:"config_revision"`
-	Jobs           JobSnapshot  `json:"jobs"`
-	NodeStatuses   []NodeStatus `json:"node_statuses"`
+	SchemaVersion  int                 `json:"schema_version"`
+	ConfigRevision uint64              `json:"config_revision"`
+	Jobs           JobSnapshot         `json:"jobs"`
+	NodeStatuses   []NodeStatus        `json:"node_statuses"`
+	Idempotency    []IdempotencyRecord `json:"idempotency,omitempty"`
+}
+
+// IdempotencyRecord persists only a successful mutation's safe public result.
+// Digest is the SHA-256 digest of its method-specific canonical parameters.
+type IdempotencyRecord struct {
+	RequestID      string          `json:"request_id"`
+	Method         string          `json:"method"`
+	Digest         string          `json:"digest"`
+	Result         json.RawMessage `json:"result"`
+	ConfigRevision uint64          `json:"config_revision"`
+	CreatedAt      time.Time       `json:"created_at"`
 }
 
 // RuntimeStore serializes all runtime snapshot writes for one daemon process.
@@ -88,6 +104,9 @@ func (s *RuntimeStore) Load() (RuntimeSnapshot, error) {
 		return RuntimeSnapshot{}, err
 	}
 	contents, err := s.ops.ReadFile(s.path)
+	if errors.Is(err, os.ErrNotExist) {
+		return RuntimeSnapshot{}, ErrRuntimeSnapshotNotFound
+	}
 	if err != nil || len(contents) > maxRuntimeSnapshotBytes {
 		return RuntimeSnapshot{}, errors.New("runtime snapshot read failed")
 	}
@@ -183,7 +202,7 @@ func decodeRuntimeSnapshot(contents []byte) (RuntimeSnapshot, error) {
 }
 
 func normalizeRuntimeSnapshot(snapshot RuntimeSnapshot) (RuntimeSnapshot, error) {
-	if snapshot.SchemaVersion != RuntimeSnapshotSchemaVersion || len(snapshot.NodeStatuses) > MaxRuntimeNodeStatuses {
+	if snapshot.SchemaVersion != RuntimeSnapshotSchemaVersion || len(snapshot.NodeStatuses) > MaxRuntimeNodeStatuses || len(snapshot.Idempotency) > MaxRuntimeIdempotencyRecords {
 		return RuntimeSnapshot{}, errors.New("runtime snapshot is invalid")
 	}
 	jobs, err := normalizeJobSnapshot(snapshot.Jobs)
@@ -196,6 +215,9 @@ func normalizeRuntimeSnapshot(snapshot RuntimeSnapshot) (RuntimeSnapshot, error)
 		Jobs:           jobs,
 		NodeStatuses:   make([]NodeStatus, 0, len(snapshot.NodeStatuses)),
 	}
+	if len(snapshot.Idempotency) > 0 {
+		normalized.Idempotency = make([]IdempotencyRecord, 0, len(snapshot.Idempotency))
+	}
 	seenNodes := make(map[string]struct{}, len(snapshot.NodeStatuses))
 	for _, status := range snapshot.NodeStatuses {
 		if status.NodeID == "" || status.JobID == "" || status.Generation == 0 || status.UpdatedAt.IsZero() || !validRuntimeState(status.State) {
@@ -205,9 +227,29 @@ func normalizeRuntimeSnapshot(snapshot RuntimeSnapshot) (RuntimeSnapshot, error)
 			return RuntimeSnapshot{}, errors.New("runtime snapshot is invalid")
 		}
 		seenNodes[status.NodeID] = struct{}{}
-		normalized.NodeStatuses = append(normalized.NodeStatuses, cloneNodeStatus(status))
+		status = cloneNodeStatus(status)
+		status.RetryAt = canonicalRuntimeTime(status.RetryAt)
+		status.UpdatedAt = canonicalRuntimeTime(status.UpdatedAt)
+		normalized.NodeStatuses = append(normalized.NodeStatuses, status)
+	}
+	seenRequests := make(map[string]struct{}, len(snapshot.Idempotency))
+	for _, record := range snapshot.Idempotency {
+		if record.RequestID == "" || record.Method == "" || len(record.Digest) != 64 || !json.Valid(record.Result) || record.CreatedAt.IsZero() {
+			return RuntimeSnapshot{}, errors.New("runtime snapshot is invalid")
+		}
+		if _, exists := seenRequests[record.RequestID]; exists {
+			return RuntimeSnapshot{}, errors.New("runtime snapshot is invalid")
+		}
+		seenRequests[record.RequestID] = struct{}{}
+		record.Result = append(json.RawMessage(nil), record.Result...)
+		record.CreatedAt = canonicalRuntimeTime(record.CreatedAt)
+		normalized.Idempotency = append(normalized.Idempotency, record)
 	}
 	return normalized, nil
+}
+
+func canonicalRuntimeTime(value time.Time) time.Time {
+	return value.UTC().Round(0)
 }
 
 func rejectRuntimeSymlink(ops runtimeFS, path string) error {

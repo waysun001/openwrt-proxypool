@@ -10,6 +10,7 @@ import (
 
 	"proxypoold/internal/api"
 	"proxypoold/internal/buildinfo"
+	"proxypoold/internal/config"
 	"proxypoold/internal/engine"
 )
 
@@ -36,15 +37,36 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	default:
 	}
 
-	shadow := engine.NewShadow(options.configPath, nil)
-	shadow.Start()
+	var handler api.Handler
+	methods := map[string]struct{}{"status.get": {}}
+	if options.mode == "shadow" {
+		shadow := engine.NewShadow(options.configPath, nil)
+		shadow.Start()
+		handler = shadow
+	} else {
+		controller, err := engine.NewController(
+			config.NewStore(options.configPath),
+			engine.NewRuntimeStore(options.statePath),
+			engine.NewMachine(nil),
+			engine.NewJobStore(),
+		)
+		if err != nil {
+			_, _ = fmt.Fprintln(stderr, "proxypoold: live control initialization failed")
+			return 1
+		}
+		handler = controller
+		methods = map[string]struct{}{
+			"status.get": {}, "device.list": {}, "device.bind": {}, "device.unbind": {},
+			"node.action": {}, "job.get": {}, "job.list": {}, "system.events": {},
+		}
+	}
 	server := &api.Server{
 		Path:    options.socketPath,
-		Handler: shadow,
-		Methods: map[string]struct{}{"status.get": {}},
+		Handler: handler,
+		Methods: methods,
 	}
 	if err := server.Serve(ctx); err != nil {
-		_, _ = fmt.Fprintln(stderr, "proxypoold: shadow control service failed")
+		_, _ = fmt.Fprintln(stderr, "proxypoold: control service failed")
 		return 1
 	}
 	return 0
@@ -52,19 +74,28 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 
 type daemonOptions struct {
 	configPath string
+	statePath  string
 	socketPath string
+	mode       string
 }
 
 func parseOptions(args []string) (daemonOptions, bool) {
 	options := daemonOptions{configPath: "/etc/config/proxypool", socketPath: api.DefaultSocketPath}
-	seenShadow, seenConfig, seenSocket := false, false, false
+	seenShadow, seenLive, seenConfig, seenState, seenSocket := false, false, false, false, false
 	for index := 0; index < len(args); index++ {
 		switch args[index] {
 		case "--shadow":
-			if seenShadow {
+			if seenShadow || seenLive {
 				return daemonOptions{}, false
 			}
 			seenShadow = true
+			options.mode = "shadow"
+		case "--live":
+			if seenLive || seenShadow {
+				return daemonOptions{}, false
+			}
+			seenLive = true
+			options.mode = "live"
 		case "--config":
 			if seenConfig || index+1 >= len(args) || args[index+1] == "" {
 				return daemonOptions{}, false
@@ -72,6 +103,13 @@ func parseOptions(args []string) (daemonOptions, bool) {
 			seenConfig = true
 			index++
 			options.configPath = args[index]
+		case "--state":
+			if seenState || index+1 >= len(args) || args[index+1] == "" {
+				return daemonOptions{}, false
+			}
+			seenState = true
+			index++
+			options.statePath = args[index]
 		case "--socket":
 			if seenSocket || index+1 >= len(args) || args[index+1] == "" {
 				return daemonOptions{}, false
@@ -83,9 +121,12 @@ func parseOptions(args []string) (daemonOptions, bool) {
 			return daemonOptions{}, false
 		}
 	}
-	return options, seenShadow
+	if seenShadow {
+		return options, !seenState
+	}
+	return options, seenLive && seenState
 }
 
 func printUsage(w io.Writer) {
-	_, _ = fmt.Fprintln(w, "usage: proxypoold --shadow [--config PATH] [--socket PATH]")
+	_, _ = fmt.Fprintln(w, "usage: proxypoold (--shadow | --live --state PATH) [--config PATH] [--socket PATH]")
 }

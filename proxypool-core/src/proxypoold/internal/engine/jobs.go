@@ -178,7 +178,12 @@ func normalizeJobSnapshot(snapshot JobSnapshot) (JobSnapshot, error) {
 			return JobSnapshot{}, codeError(ErrorCodeDuplicate, "runtime job snapshot contains a duplicate")
 		}
 		seenJobs[job.ID] = struct{}{}
-		normalized.Jobs = append(normalized.Jobs, cloneJob(job))
+		normalizedJob := cloneJob(job)
+		normalizedJob.CreatedAt = canonicalRuntimeTime(normalizedJob.CreatedAt)
+		for index := range normalizedJob.Nodes {
+			normalizedJob.Nodes[index].Deadline = canonicalRuntimeTime(normalizedJob.Nodes[index].Deadline)
+		}
+		normalized.Jobs = append(normalized.Jobs, normalizedJob)
 	}
 
 	var previousSequence uint64
@@ -187,7 +192,9 @@ func normalizeJobSnapshot(snapshot JobSnapshot) (JobSnapshot, error) {
 			return JobSnapshot{}, codeError(ErrorCodeInvalidConfig, "runtime event snapshot is invalid")
 		}
 		previousSequence = event.Sequence
-		normalized.Events = append(normalized.Events, cloneNodeEvent(event))
+		normalizedEvent := cloneNodeEvent(event)
+		normalizedEvent.At = canonicalRuntimeTime(normalizedEvent.At)
+		normalized.Events = append(normalized.Events, normalizedEvent)
 	}
 	if len(normalized.Events) > 0 && previousSequence != normalized.NextEventSequence {
 		return JobSnapshot{}, codeError(ErrorCodeInvalidConfig, "runtime event sequence is invalid")
