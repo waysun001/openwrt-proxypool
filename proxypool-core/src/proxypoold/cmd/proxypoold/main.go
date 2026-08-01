@@ -4,14 +4,17 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"proxypoold/internal/api"
 	"proxypoold/internal/buildinfo"
 	"proxypoold/internal/config"
 	"proxypoold/internal/engine"
+	openwrtplatform "proxypoold/internal/platform/openwrt"
 )
 
 func main() {
@@ -44,11 +47,19 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		shadow.Start()
 		handler = shadow
 	} else {
+		runner := openwrtplatform.NewRunner(10 * time.Second)
+		inventory := openwrtplatform.NewDeviceInventory("/tmp/dhcp.leases", runner)
+		leases := openwrtplatform.NewLeaseManager(
+			runner, inventory,
+			netip.MustParsePrefix("192.168.9.0/24"),
+			netip.MustParseAddr("192.168.9.1"),
+		)
 		controller, err := engine.NewController(
 			config.NewStore(options.configPath),
 			engine.NewRuntimeStore(options.statePath),
 			engine.NewMachine(nil),
 			engine.NewJobStore(),
+			engine.WithDeviceServices(inventory, leases),
 		)
 		if err != nil {
 			_, _ = fmt.Fprintln(stderr, "proxypoold: live control initialization failed")

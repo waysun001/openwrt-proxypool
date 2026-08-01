@@ -15,6 +15,7 @@ import (
 
 	"proxypoold/internal/api"
 	"proxypoold/internal/model"
+	"proxypoold/internal/platform"
 )
 
 type desiredConfigStore interface {
@@ -45,6 +46,13 @@ func WithControllerJobIDSource(source func() string) ControllerOption {
 	}
 }
 
+func WithDeviceServices(source platform.DeviceSource, leases platform.LeaseManager) ControllerOption {
+	return func(controller *Controller) {
+		controller.deviceSource = source
+		controller.leaseManager = leases
+	}
+}
+
 // Controller is the formal V2 single writer. Platform work is deliberately
 // only queued here; Scheduler becomes the sole side-effect owner in Task 4.
 type Controller struct {
@@ -54,6 +62,8 @@ type Controller struct {
 	runtimeStore runtimePersistence
 	machine      *Machine
 	jobs         *JobStore
+	deviceSource platform.DeviceSource
+	leaseManager platform.LeaseManager
 
 	desired          model.DesiredConfig
 	statuses         map[string]NodeStatus
@@ -218,13 +228,21 @@ func (controller *Controller) handleDeviceList(request api.Request) api.Response
 	if decodeControllerParams(request.Params, &params) != nil {
 		return controllerError(request.ID, ErrorCodeInvalidRequest)
 	}
+	var discovered []platform.DiscoveredDevice
+	var err error
+	if controller.deviceSource != nil {
+		discovered, err = controller.deviceSource.List(context.Background())
+		if err != nil {
+			return controllerError(request.ID, ErrorCodeInternal)
+		}
+	}
 	controller.mu.Lock()
 	defer controller.mu.Unlock()
-	desired, _ := summarizeDesired(controller.desired)
+	devices := mergeDeviceList(controller.desired, discovered)
 	return controllerResult(request.ID, struct {
-		ConfigRevision uint64                `json:"config_revision"`
-		Devices        []DesiredDeviceStatus `json:"devices"`
-	}{controller.desired.Revision, desired.Devices})
+		ConfigRevision uint64            `json:"config_revision"`
+		Devices        []DeviceListEntry `json:"devices"`
+	}{controller.desired.Revision, devices})
 }
 
 func (controller *Controller) handleDeviceBind(ctx context.Context, request api.Request) api.Response {
@@ -248,22 +266,102 @@ func (controller *Controller) handleDeviceBind(ctx context.Context, request api.
 	if current.Revision != *params.ExpectedRevision {
 		return controllerError(request.ID, ErrorCodeRevisionConflict)
 	}
-	device, exists := current.Devices[params.DeviceID]
-	if !exists {
+	if _, exists := current.Nodes[params.NodeID]; !exists {
 		return controllerError(request.ID, ErrorCodeNotFound)
 	}
-	if _, exists := current.Nodes[params.NodeID]; !exists {
+	device, configured := current.Devices[params.DeviceID]
+	if controller.deviceSource != nil {
+		discovered, err := controller.findDiscoveredDeviceLocked(ctx, params.DeviceID)
+		if err != nil {
+			return controllerModelError(request.ID, err)
+		}
+		if configured && device.MAC != discovered.MAC {
+			return controllerError(request.ID, ErrorCodeInvalidConfig)
+		}
+		if !configured {
+			device = model.Device{
+				ID: discovered.ID, MAC: discovered.MAC, Hostname: discovered.Hostname,
+				FixedIPv4: discovered.IPv4,
+			}
+		}
+	} else if !configured {
 		return controllerError(request.ID, ErrorCodeNotFound)
 	}
 	next := cloneControllerConfig(current)
 	device.NodeID = params.NodeID
 	device.Enabled = true
 	next.Devices[params.DeviceID] = device
+	if controller.leaseManager != nil {
+		if err := controller.leaseManager.Apply(ctx, device, current.Revision+1); err != nil {
+			return controllerError(request.ID, ErrorCodeInternal)
+		}
+	}
 	stored, err := controller.desiredStore.Replace(ctx, current.Revision, next)
 	if err != nil {
+		if controller.leaseManager != nil && !configured {
+			_ = controller.leaseManager.Remove(context.Background(), device, current.Revision+1)
+		}
 		return controllerModelError(request.ID, err)
 	}
 	return controller.finishMutationLocked(ctx, request, digest, stored, "device.bind", []string{params.NodeID})
+}
+
+type DeviceListEntry struct {
+	ID          string     `json:"id"`
+	MAC         string     `json:"mac"`
+	Hostname    string     `json:"hostname,omitempty"`
+	CurrentIPv4 string     `json:"current_ipv4,omitempty"`
+	FixedIPv4   string     `json:"fixed_ipv4,omitempty"`
+	NodeID      string     `json:"node_id,omitempty"`
+	Enabled     bool       `json:"enabled"`
+	Ingress     string     `json:"ingress,omitempty"`
+	LastSeen    *time.Time `json:"last_seen,omitempty"`
+	Confirmed   bool       `json:"confirmed"`
+	Configured  bool       `json:"configured"`
+}
+
+func mergeDeviceList(desired model.DesiredConfig, discovered []platform.DiscoveredDevice) []DeviceListEntry {
+	entries := make(map[string]DeviceListEntry, len(desired.Devices)+len(discovered))
+	for id, device := range desired.Devices {
+		entries[id] = DeviceListEntry{
+			ID: id, MAC: device.MAC, Hostname: device.Hostname, FixedIPv4: device.FixedIPv4.String(),
+			NodeID: device.NodeID, Enabled: device.Enabled, Configured: true,
+		}
+	}
+	for _, device := range discovered {
+		entry := entries[device.ID]
+		entry.ID, entry.MAC, entry.Hostname = device.ID, device.MAC, device.Hostname
+		entry.CurrentIPv4, entry.Ingress, entry.Confirmed = device.IPv4.String(), device.Ingress, device.Confirmed
+		lastSeen := device.LastSeen
+		entry.LastSeen = &lastSeen
+		entries[device.ID] = entry
+	}
+	ids := make([]string, 0, len(entries))
+	for id := range entries {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	result := make([]DeviceListEntry, 0, len(ids))
+	for _, id := range ids {
+		result = append(result, entries[id])
+	}
+	return result
+}
+
+func (controller *Controller) findDiscoveredDeviceLocked(ctx context.Context, id string) (platform.DiscoveredDevice, error) {
+	devices, err := controller.deviceSource.List(ctx)
+	if err != nil {
+		return platform.DiscoveredDevice{}, errors.New("device discovery failed")
+	}
+	for _, device := range devices {
+		if device.ID == id {
+			if !device.Confirmed || !device.IPv4.Is4() || device.MAC == "" {
+				return platform.DiscoveredDevice{}, codeError(ErrorCodeInvalidConfig, "discovered device is not confirmed")
+			}
+			return device, nil
+		}
+	}
+	return platform.DiscoveredDevice{}, codeError(ErrorCodeNotFound, "discovered device was not found")
 }
 
 func (controller *Controller) handleDeviceUnbind(ctx context.Context, request api.Request) api.Response {

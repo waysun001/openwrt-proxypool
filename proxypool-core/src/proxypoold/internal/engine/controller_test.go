@@ -16,6 +16,7 @@ import (
 	"proxypoold/internal/api"
 	"proxypoold/internal/config"
 	"proxypoold/internal/model"
+	"proxypoold/internal/platform"
 )
 
 func TestControllerBindPersistsConfigJobAndIdempotencyAcrossRestart(t *testing.T) {
@@ -246,6 +247,98 @@ func TestControllerCancelledRequestHasZeroMutation(t *testing.T) {
 	if !bytes.Equal(after, before) || len(jobs.List()) != 0 {
 		t.Fatal("cancelled request mutated controller state")
 	}
+}
+
+func TestControllerListsAndBindsDiscoveredDeviceWithoutCallerMAC(t *testing.T) {
+	cfg := controllerConfig()
+	cfg.Devices = map[string]model.Device{}
+	configPath := writeControllerConfig(t, cfg)
+	discovered := platform.DiscoveredDevice{
+		ID: "device_001122334455", MAC: "00:11:22:33:44:55", IPv4: netip.MustParseAddr("192.168.9.10"),
+		Hostname: "phone", Ingress: "wlan0", LastSeen: stateTestEpoch, Confirmed: true,
+	}
+	source := &controllerDeviceSource{devices: []platform.DiscoveredDevice{discovered}}
+	leases := &controllerLeaseManager{}
+	controller, err := NewController(
+		config.NewStore(configPath), NewRuntimeStore(filepath.Join(t.TempDir(), "runtime.json")), NewMachine(nil), NewJobStore(),
+		WithDeviceServices(source, leases), WithControllerJobIDSource(func() string { return "job-discovered-bind" }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := controller.Handle(context.Background(), controllerRequest("list-discovered", "device.list", `{}`))
+	assertControllerSuccess(t, listed)
+	if !bytes.Contains(listed.Result, []byte(`"id":"device_001122334455"`)) || !bytes.Contains(listed.Result, []byte(`"ingress":"wlan0"`)) {
+		t.Fatalf("device.list result = %s", listed.Result)
+	}
+	if bytes.Contains(listed.Result, []byte(`"confirmed":false`)) {
+		t.Fatalf("confirmed DHCP device was downgraded: %s", listed.Result)
+	}
+
+	bound := controller.Handle(context.Background(), controllerRequest("bind-discovered", "device.bind", `{"device_id":"device_001122334455","node_id":"node_b","expected_revision":3}`))
+	assertControllerSuccess(t, bound)
+	stored, err := config.NewStore(configPath).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	device, exists := stored.Devices[discovered.ID]
+	if !exists || device.MAC != discovered.MAC || device.FixedIPv4 != discovered.IPv4 || device.NodeID != "node_b" || !device.Enabled {
+		t.Fatalf("stored discovered binding = %#v exists=%t", device, exists)
+	}
+	if len(leases.applied) != 1 || leases.applied[0].MAC != discovered.MAC || leases.applied[0].NodeID != "node_b" {
+		t.Fatalf("lease Apply calls = %#v", leases.applied)
+	}
+
+	withMAC := controller.Handle(context.Background(), controllerRequest("caller-mac", "device.bind", `{"device_id":"device_001122334455","node_id":"node_a","expected_revision":4,"mac":"00:00:00:00:00:01"}`))
+	assertControllerError(t, withMAC, ErrorCodeInvalidRequest)
+}
+
+func TestControllerLeaseFailureDoesNotPublishDiscoveredBinding(t *testing.T) {
+	cfg := controllerConfig()
+	cfg.Devices = map[string]model.Device{}
+	configPath := writeControllerConfig(t, cfg)
+	discovered := platform.DiscoveredDevice{ID: "device_001122334455", MAC: "00:11:22:33:44:55", IPv4: netip.MustParseAddr("192.168.9.10"), Confirmed: true}
+	leases := &controllerLeaseManager{applyErr: errors.New("dnsmasq reload failed")}
+	jobs := NewJobStore()
+	controller, err := NewController(
+		config.NewStore(configPath), NewRuntimeStore(filepath.Join(t.TempDir(), "runtime.json")), NewMachine(nil), jobs,
+		WithDeviceServices(&controllerDeviceSource{devices: []platform.DiscoveredDevice{discovered}}, leases),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := controller.Handle(context.Background(), controllerRequest("lease-fails", "device.bind", `{"device_id":"device_001122334455","node_id":"node_b","expected_revision":3}`))
+	assertControllerError(t, response, ErrorCodeInternal)
+	stored, _ := config.NewStore(configPath).Load()
+	if stored.Revision != 3 || len(stored.Devices) != 0 || len(jobs.List()) != 0 {
+		t.Fatalf("failed lease published binding: revision=%d devices=%#v jobs=%#v", stored.Revision, stored.Devices, jobs.List())
+	}
+}
+
+type controllerDeviceSource struct {
+	devices []platform.DiscoveredDevice
+	err     error
+}
+
+func (source *controllerDeviceSource) List(context.Context) ([]platform.DiscoveredDevice, error) {
+	return append([]platform.DiscoveredDevice(nil), source.devices...), source.err
+}
+
+type controllerLeaseManager struct {
+	applied   []model.Device
+	removed   []model.Device
+	applyErr  error
+	removeErr error
+}
+
+func (manager *controllerLeaseManager) Apply(_ context.Context, device model.Device, _ uint64) error {
+	manager.applied = append(manager.applied, device)
+	return manager.applyErr
+}
+
+func (manager *controllerLeaseManager) Remove(_ context.Context, device model.Device, _ uint64) error {
+	manager.removed = append(manager.removed, device)
+	return manager.removeErr
 }
 
 type failingDesiredStore struct {
