@@ -5,14 +5,27 @@ ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 INIT="$ROOT/proxypool-core/files/proxypool.init"
 TEST_TMP=$(mktemp -d)
 trap 'rm -rf "$TEST_TMP"' EXIT HUP INT TERM
+
 TRACE_FILE="$TEST_TMP/trace"
 MARKER_FILE="$TEST_TMP/backend"
+QUARANTINE_FILE="$TEST_TMP/backend.cleanup-required"
+TRANSITION_FILE="$TEST_TMP/transition"
+ACTIVE_SNAPSHOT_FILE="$TEST_TMP/active-snapshot"
+SNAPSHOT_ROOT="$TEST_TMP/snapshots"
+LEGACY_CONFIG_FILE="$TEST_TMP/proxypool"
+V2_CONFIG_FILE="$TEST_TMP/proxypool_v2"
+SELECTOR_FILE="$TEST_TMP/proxypool_runtime"
 CRONTAB_FILE="$TEST_TMP/crontab"
 PID_FILE="$TEST_TMP/xl2tpd.pid"
 PROCD_RUNNING_FILE="$TEST_TMP/procd-running"
 PROCD_STAGED_FILE="$TEST_TMP/procd-staged"
 PROCD_TRANSACTION_FILE="$TEST_TMP/procd-transaction"
-export TRACE_FILE
+LEGACY_RUNNING_FILE="$TEST_TMP/legacy-running"
+QUERY_COUNT_FILE="$TEST_TMP/query-count"
+export TRACE_FILE MARKER_FILE QUARANTINE_FILE TRANSITION_FILE ACTIVE_SNAPSHOT_FILE
+export SNAPSHOT_ROOT LEGACY_CONFIG_FILE V2_CONFIG_FILE SELECTOR_FILE
+export PROCD_RUNNING_FILE PROCD_STAGED_FILE PROCD_TRANSACTION_FILE LEGACY_RUNNING_FILE
+export QUERY_COUNT_FILE
 
 make_fake() {
 	path=$1
@@ -24,64 +37,198 @@ EOF
 	chmod +x "$path"
 }
 
-make_fake "$TEST_TMP/legacy" 'printf "legacy:%s\n" "$*" >>"$TRACE_FILE"'
+make_fake "$TEST_TMP/legacy" '
+printf "legacy:%s\n" "$*" >>"$TRACE_FILE"
+case "${1-}" in
+	start)
+		case "${PROXYPOOL_TEST_LEGACY_FAIL-}" in start|start_and_stop) exit 1 ;; esac
+		: >"$LEGACY_RUNNING_FILE"
+		;;
+	stop)
+		case "${PROXYPOOL_TEST_LEGACY_FAIL-}" in stop|start_and_stop) exit 1 ;; esac
+		rm -f "$LEGACY_RUNNING_FILE"
+		;;
+esac'
 make_fake "$TEST_TMP/lease" 'printf "lease:%s\n" "$*" >>"$TRACE_FILE"'
 make_fake "$TEST_TMP/cron" 'printf "cron:%s\n" "$*" >>"$TRACE_FILE"'
 make_fake "$TEST_TMP/xl2tpd" '
 printf "xl2tpd:%s\n" "$*" >>"$TRACE_FILE"
 [ "${1-}" = enabled ] && exit 0
 exit 0'
+make_fake "$TEST_TMP/controller" '
+command_name=${1-}
+case "$command_name" in
+	select-backend)
+		[ "$#" -eq 3 ] && [ "$2" = --config ] || exit 2
+		printf "ctl:select:%s\n" "$3" >>"$TRACE_FILE"
+		case "${PROXYPOOL_TEST_SELECTOR_OUTPUT-}" in
+			bad) printf "v1 unexpected\n"; exit 0 ;;
+			no_newline) printf v1; exit 0 ;;
+			failure) exit 1 ;;
+		esac
+		[ -e "$3" ] || { printf "missing\n"; exit 0; }
+		[ -f "$3" ] || { printf "unknown\n"; exit 1; }
+		if grep -Fq "runtime_backend '\''v1'\''" "$3"; then
+			printf "v1\n"
+		elif grep -Fq "runtime_backend '\''v2_shadow'\''" "$3"; then
+			printf "v2_shadow\n"
+		else
+			printf "unknown\n"
+			exit 1
+		fi
+		;;
+	classify)
+		[ "$#" -eq 3 ] && [ "$2" = --config ] || exit 2
+		printf "ctl:classify:%s\n" "$3" >>"$TRACE_FILE"
+		if [ "${PROXYPOOL_TEST_MUTATE_SELECTOR_DURING_CLASSIFY-0}" = 1 ]; then
+			printf "config global '\''global'\''\n\toption runtime_backend '\''v1'\''\n" >"$SELECTOR_FILE"
+		fi
+		class=$(sed -n "s/^# test-class://p" "$3" | head -n1)
+		case "$class" in
+			v1|v2_shadow|v2_shadow_invalid) printf "%s\n" "$class" ;;
+			bad_output) printf "v1 unexpected\n" ;;
+			*) printf "unknown\n"; exit 1 ;;
+		esac
+		;;
+	config-enabled)
+		[ "$#" -eq 3 ] && [ "$2" = --config ] || exit 2
+		printf "ctl:enabled:%s\n" "$3" >>"$TRACE_FILE"
+		[ "${PROXYPOOL_TEST_ENABLED_FAILURE-0}" != 1 ] || exit 1
+		if grep -Fq "option enabled '\''0'\''" "$3"; then printf "0\n"; else printf "1\n"; fi
+		;;
+	procd-state)
+		[ "$#" -eq 3 ] || [ "$#" -eq 5 ] || exit 2
+		[ "$2" = --service ] && [ "$3" = proxypool ] || exit 2
+		instance=
+		if [ "$#" -eq 5 ]; then
+			[ "$4" = --instance ] || exit 2
+			instance=$5
+		fi
+		printf "ctl:procd:%s\n" "${instance:-any}" >>"$TRACE_FILE"
+		query_count=0
+		[ ! -f "$QUERY_COUNT_FILE" ] || query_count=$(cat "$QUERY_COUNT_FILE")
+		query_count=$((query_count + 1))
+		printf "%s\n" "$query_count" >"$QUERY_COUNT_FILE"
+		case "${PROXYPOOL_TEST_QUERY-}" in
+			unknown) printf "unknown\n"; exit 1 ;;
+			unknown_after_first) [ "$query_count" -le 1 ] || { printf "unknown\n"; exit 1; } ;;
+			bad_output) printf "present unexpected\n"; exit 0 ;;
+		esac
+		if [ -n "$instance" ]; then
+			if [ -f "$PROCD_RUNNING_FILE" ] && grep -Fqx "$instance" "$PROCD_RUNNING_FILE"; then
+				printf "present\n"
+			else
+				printf "absent\n"
+			fi
+		elif [ -s "$PROCD_RUNNING_FILE" ]; then
+			printf "present\n"
+		else
+			printf "absent\n"
+		fi
+		;;
+	*) exit 2 ;;
+esac'
+
+fail() {
+	printf '%s\n' "$*" >&2
+	printf '%s\n' '--- trace ---' >&2
+	cat "$TRACE_FILE" >&2
+	exit 1
+}
 
 assert_contains() {
-	needle=$1
-	if ! grep -Fqx "$needle" "$TRACE_FILE"; then
-		printf 'missing trace line: %s\n' "$needle" >&2
-		cat "$TRACE_FILE" >&2
-		exit 1
-	fi
+	grep -Fqx -- "$1" "$TRACE_FILE" || fail "missing trace line: $1"
 }
 
 assert_contains_fragment() {
-	needle=$1
-	if ! grep -Fq "$needle" "$TRACE_FILE"; then
-		printf 'missing trace fragment: %s\n' "$needle" >&2
-		cat "$TRACE_FILE" >&2
-		exit 1
-	fi
+	grep -Fq -- "$1" "$TRACE_FILE" || fail "missing trace fragment: $1"
 }
 
 assert_not_contains_fragment() {
-	needle=$1
-	if grep -Fq "$needle" "$TRACE_FILE"; then
-		printf 'unexpected trace fragment: %s\n' "$needle" >&2
-		cat "$TRACE_FILE" >&2
-		exit 1
-	fi
+	if grep -Fq -- "$1" "$TRACE_FILE"; then fail "unexpected trace fragment: $1"; fi
 }
 
 assert_before() {
 	first=$(grep -nF "$1" "$TRACE_FILE" | head -n1 | cut -d: -f1)
 	second=$(grep -nF "$2" "$TRACE_FILE" | head -n1 | cut -d: -f1)
-	if [ -z "$first" ] || [ -z "$second" ] || [ "$first" -ge "$second" ]; then
-		printf 'expected %s before %s\n' "$1" "$2" >&2
-		cat "$TRACE_FILE" >&2
-		exit 1
-	fi
+	[ -n "$first" ] && [ -n "$second" ] && [ "$first" -lt "$second" ] || fail "expected $1 before $2"
+}
+
+assert_file_line() {
+	[ -f "$1" ] && [ "$(cat "$1")" = "$2" ] || fail "unexpected file content: $1"
+}
+
+expect_success() {
+	if ! "$@"; then fail "expected success: $*"; fi
+}
+
+expect_failure() {
+	if "$@"; then fail "expected failure: $*"; fi
+}
+
+write_legacy_config() {
+	enabled=${1-1}
+	cat >"$LEGACY_CONFIG_FILE" <<EOF
+# test-class:v1
+config global 'global'
+	option enabled '$enabled'
+	option max_clients '60'
+config client 'old-client'
+	option password 'legacy-test-secret'
+EOF
+}
+
+write_v2_config() {
+	class=${1-v2_shadow}
+	enabled=${2-1}
+	cat >"$V2_CONFIG_FILE" <<EOF
+# test-class:$class
+config global 'global'
+	option schema_version '2'
+	option enabled '$enabled'
+	option runtime_backend 'v2_shadow'
+	option password 'v2-test-secret'
+EOF
+}
+
+set_selector() {
+	case "$1" in
+		missing) rm -rf "$SELECTOR_FILE" ;;
+		v1|v2_shadow)
+			cat >"$SELECTOR_FILE" <<EOF
+config global 'global'
+	option runtime_backend '$1'
+EOF
+			;;
+		unknown) printf "config global 'global'\n\toption runtime_backend 'future'\n" >"$SELECTOR_FILE" ;;
+		directory) rm -rf "$SELECTOR_FILE"; mkdir "$SELECTOR_FILE" ;;
+	esac
 }
 
 reset_case() {
 	: >"$TRACE_FILE"
 	: >"$CRONTAB_FILE"
-	rm -f "$MARKER_FILE" "$PID_FILE"
-	rm -f "$PROCD_RUNNING_FILE" "$PROCD_STAGED_FILE" "$PROCD_TRANSACTION_FILE"
-	rm -rf "$TEST_TMP/legacy-run"
+	rm -f "$MARKER_FILE" "$TRANSITION_FILE" "$ACTIVE_SNAPSHOT_FILE"
+	rm -rf "$QUARANTINE_FILE"
+	rm -f "$PID_FILE" "$PROCD_RUNNING_FILE" "$PROCD_STAGED_FILE" "$PROCD_TRANSACTION_FILE" "$LEGACY_RUNNING_FILE" "$QUERY_COUNT_FILE"
+	rm -rf "$SNAPSHOT_ROOT" "$TEST_TMP/legacy-run" "$SELECTOR_FILE"
+	write_legacy_config 1
+	write_v2_config v2_shadow 1
+	set_selector missing
 }
 
 run_action() (
-	TEST_ACTION=$1
-	TEST_BACKEND=$2
-	TEST_ENABLED=${3-1}
-	export PROXYPOOL_RUNTIME_MARKER="${PROXYPOOL_TEST_MARKER-$MARKER_FILE}"
+	set +e
+	action=$1
+	export PROXYPOOL_RUNTIME_MARKER="$MARKER_FILE"
+	export PROXYPOOL_QUARANTINE_MARKER="$QUARANTINE_FILE"
+	export PROXYPOOL_TRANSITION_MARKER="$TRANSITION_FILE"
+	export PROXYPOOL_ACTIVE_SNAPSHOT_MARKER="$ACTIVE_SNAPSHOT_FILE"
+	export PROXYPOOL_SNAPSHOT_ROOT="$SNAPSHOT_ROOT"
+	export PROXYPOOL_LEGACY_CONFIG_FILE="$LEGACY_CONFIG_FILE"
+	export PROXYPOOL_V2_CONFIG_FILE="$V2_CONFIG_FILE"
+	export PROXYPOOL_SELECTOR_FILE="$SELECTOR_FILE"
+	export PROXYPOOL_CLASSIFIER="$TEST_TMP/controller"
 	export PROXYPOOL_LEGACY_PROG="$TEST_TMP/legacy"
 	export PROXYPOOL_LEASE_PROG="$TEST_TMP/lease"
 	export PROXYPOOL_CRON_INIT="$TEST_TMP/cron"
@@ -90,17 +237,6 @@ run_action() (
 	export PROXYPOOL_XL2TPD_PID="$PID_FILE"
 	export PROXYPOOL_LEGACY_RUN_DIR="$TEST_TMP/legacy-run"
 
-	config_load() { printf 'config_load:%s\n' "$*" >>"$TRACE_FILE"; }
-	config_get() {
-		case "$3" in
-			enabled) value=$TEST_ENABLED ;;
-			runtime_backend)
-				if [ "$TEST_BACKEND" = __missing__ ]; then value=$4; else value=$TEST_BACKEND; fi
-				;;
-			*) value=$4 ;;
-		esac
-		eval "$1=\$value"
-	}
 	procd_open_service() {
 		printf 'procd:service-open:%s\n' "$*" >>"$TRACE_FILE"
 		: >"$PROCD_TRANSACTION_FILE"
@@ -108,8 +244,8 @@ run_action() (
 	}
 	procd_open_instance() {
 		printf 'procd:open:%s\n' "$*" >>"$TRACE_FILE"
-		: >"$PROCD_STAGED_FILE"
-		[ "${PROXYPOOL_TEST_FAIL_PROCD_STEP-}" != open_instance ]
+		[ "${PROXYPOOL_TEST_FAIL_PROCD_STEP-}" != open_instance ] || return 1
+		printf '%s\n' "$1" >"$PROCD_STAGED_FILE"
 	}
 	procd_set_param() {
 		printf 'procd:param:%s\n' "$*" >>"$TRACE_FILE"
@@ -121,288 +257,405 @@ run_action() (
 	}
 	procd_close_service() {
 		printf 'procd:service-close:%s\n' "$*" >>"$TRACE_FILE"
-		if [ -e "$PROCD_STAGED_FILE" ]; then
-			: >"$PROCD_RUNNING_FILE"
+		if [ "${PROXYPOOL_TEST_SERVICE_SET-}" = ignore ]; then
+			:
+		elif [ -s "$PROCD_STAGED_FILE" ]; then
+			if [ "${PROXYPOOL_TEST_SERVICE_SET-}" = wrong_instance ]; then
+				printf 'different-instance\n' >"$PROCD_RUNNING_FILE"
+			else
+				cp "$PROCD_STAGED_FILE" "$PROCD_RUNNING_FILE"
+			fi
 		else
 			rm -f "$PROCD_RUNNING_FILE"
 		fi
 		rm -f "$PROCD_STAGED_FILE" "$PROCD_TRANSACTION_FILE"
+		[ "${PROXYPOOL_TEST_SERVICE_SET-}" != return_failure ]
 	}
 	procd_kill() {
 		printf 'procd:kill:%s\n' "$*" >>"$TRACE_FILE"
 		if [ -e "$PROCD_TRANSACTION_FILE" ]; then
 			printf 'procd:transaction-corrupted\n' >>"$TRACE_FILE"
-			rm -f "$PROCD_STAGED_FILE" "$PROCD_TRANSACTION_FILE"
 		fi
-		rm -f "$PROCD_RUNNING_FILE"
+		[ "${PROXYPOOL_TEST_KILL-}" = noop ] || rm -f "$PROCD_RUNNING_FILE"
+		return 0
+	}
+	procd_add_reload_trigger() { printf 'procd:trigger:%s\n' "$*" >>"$TRACE_FILE"; }
+	mv() {
+		last=
+		for argument in "$@"; do last=$argument; done
+		if [ "${PROXYPOOL_TEST_FAIL_MARKER_WRITE-}" = runtime ] && [ "$last" = "$MARKER_FILE" ]; then return 1; fi
+		if [ "${PROXYPOOL_TEST_FAIL_MARKER_WRITE-}" = active ] && [ "$last" = "$ACTIVE_SNAPSHOT_FILE" ]; then return 1; fi
+		command mv "$@"
 	}
 	start() {
-		printf 'rc:start:%s\n' "$*" >>"$TRACE_FILE"
+		local start_result=0 service_result=0
+		printf 'rc:start\n' >>"$TRACE_FILE"
 		procd_open_service proxypool "$INIT"
-		start_service "$@" || true
-		procd_close_service set
-		service_started
+		start_service || start_result=$?
+		procd_close_service set || true
+		service_started || service_result=$?
+		[ "$service_result" -eq 0 ] || return "$service_result"
+		return "$start_result"
 	}
 	stop() {
-		printf 'rc:stop:%s\n' "$*" >>"$TRACE_FILE"
-		result=0
-		stop_service "$@" || result=$?
-		procd_kill proxypool
-		return "$result"
+		local stop_result=0
+		printf 'rc:stop\n' >>"$TRACE_FILE"
+		stop_service || stop_result=$?
+		procd_kill proxypool || true
+		service_stopped || true
+		return "$stop_result"
 	}
 	sleep() { printf 'sleep:%s\n' "$*" >>"$TRACE_FILE"; }
 
 	. "$INIT"
-	[ "$USE_PROCD" = 1 ]
-	"$TEST_ACTION"
+	case "$action" in
+		start) start ;;
+		stop) stop ;;
+		reload) reload_service ;;
+		triggers) service_triggers ;;
+	esac
 )
 
-run_start() { run_action start "$1" "${2-1}"; }
-run_stop() { run_action stop "$1" "${2-1}"; }
-run_reload() { run_action reload_service "$1" "${2-1}"; }
+run_start() { run_action start; }
+run_stop() { run_action stop; }
+run_reload() { run_action reload; }
 
-# Explicit V1 preserves the legacy start path, including its historical
-# xl2tpd and cron behavior.
+# Missing selector is compatibility-only: a genuine V1 file starts after an
+# explicit any-instance absence query.
 reset_case
-run_start v1
+expect_success run_start
+assert_contains_fragment 'ctl:select:'
+assert_contains_fragment 'ctl:classify:'
+assert_contains 'ctl:procd:any'
+assert_before 'ctl:procd:any' 'legacy:start'
 assert_contains 'legacy:start'
-assert_contains 'xl2tpd:enabled'
-assert_contains 'xl2tpd:stop'
-assert_contains 'xl2tpd:disable'
-assert_contains 'lease:boot'
-assert_contains 'cron:restart'
-[ "$(cat "$MARKER_FILE")" = v1 ]
+assert_file_line "$MARKER_FILE" v1
+assert_not_contains_fragment "$LEGACY_CONFIG_FILE"
 
-# A marker write is part of startup atomicity. If it cannot be committed, the
-# backend that was just started is rolled back instead of becoming orphaned.
+# A fresh image selects V2 from its separate selector/config snapshot. The
+# daemon never consumes either live source path.
 reset_case
-if PROXYPOOL_TEST_MARKER="$TEST_TMP/missing/backend" run_start v1; then
-	echo 'V1 unexpectedly survived a marker write failure' >&2
-	exit 1
-fi
-assert_contains 'legacy:start'
-assert_contains 'legacy:stop'
-assert_contains 'lease:flush'
+set_selector v2_shadow
+expect_success run_start
+assert_contains_fragment 'procd:open:shadow-'
+assert_contains_fragment 'procd:param:command /usr/sbin/proxypoold --config '
+assert_not_contains_fragment "--config $V2_CONFIG_FILE"
+instance=$(cat "$PROCD_RUNNING_FILE")
+assert_contains "ctl:procd:$instance"
+assert_file_line "$MARKER_FILE" v2_shadow
+[ -f "$ACTIVE_SNAPSHOT_FILE" ] || fail 'missing active snapshot marker'
+active_snapshot=$(cat "$ACTIVE_SNAPSHOT_FILE")
+[ -f "$active_snapshot/proxypool" ] || fail 'active V2 snapshot was not retained'
 
+# Selector and selected file are bound in one generation. A live selector
+# mutation during config classification cannot redirect the current start.
 reset_case
-if PROXYPOOL_TEST_MARKER="$TEST_TMP/missing/backend" run_start v2_shadow; then
-	echo 'shadow unexpectedly survived a marker write failure' >&2
-	exit 1
-fi
-assert_contains 'procd:open:'
-assert_contains 'procd:kill:proxypool'
-assert_before 'procd:service-close:set' 'procd:kill:proxypool'
-[ ! -e "$PROCD_RUNNING_FILE" ]
-assert_not_contains_fragment 'procd:transaction-corrupted'
+set_selector v2_shadow
+PROXYPOOL_TEST_MUTATE_SELECTOR_DURING_CLASSIFY=1 expect_success run_start
+assert_file_line "$MARKER_FILE" v2_shadow
+grep -Fq "runtime_backend 'v1'" "$SELECTOR_FILE" || fail 'fake did not mutate live selector'
 
-# A partially staged instance is still submitted by rc_procd even when a
-# start_shadow operation fails. The post-commit hook must remove it and leave
-# no marker. The builder must also stop issuing subsequent instance fields.
+# An unmarked legacy runtime directory means this is not a fresh V2 image.
+# First activation must not overlap an unexplained V1 runtime.
 reset_case
-if PROXYPOOL_TEST_FAIL_PROCD_STEP=param:respawn run_start v2_shadow; then
-	echo 'shadow unexpectedly survived a procd parameter failure' >&2
-	exit 1
-fi
-assert_contains 'procd:param:respawn 3600 5 5'
-assert_not_contains_fragment 'procd:param:stdout'
-assert_contains 'procd:service-close:set'
-assert_contains 'procd:kill:proxypool'
-assert_before 'procd:service-close:set' 'procd:kill:proxypool'
-assert_not_contains_fragment 'procd:transaction-corrupted'
-[ ! -e "$PROCD_RUNNING_FILE" ]
-[ ! -e "$MARKER_FILE" ]
-
-reset_case
-if PROXYPOOL_TEST_FAIL_PROCD_STEP=close_instance run_start v2_shadow; then
-	echo 'shadow unexpectedly survived a procd instance-close failure' >&2
-	exit 1
-fi
-assert_contains 'procd:close:'
-assert_contains 'procd:service-close:set'
-assert_contains 'procd:kill:proxypool'
-assert_before 'procd:service-close:set' 'procd:kill:proxypool'
-assert_not_contains_fragment 'procd:transaction-corrupted'
-[ ! -e "$PROCD_RUNNING_FILE" ]
-[ ! -e "$MARKER_FILE" ]
-
-# Disable cleans the recorded side and does not create a replacement marker.
-reset_case
-printf 'v1\n' >"$MARKER_FILE"
-run_start v2_shadow 0
-assert_contains 'legacy:stop'
-assert_contains 'lease:flush'
-assert_not_contains_fragment 'procd:open:'
-[ ! -e "$PROCD_RUNNING_FILE" ]
-[ ! -e "$MARKER_FILE" ]
-
-# Missing runtime_backend is an upgrade-safe V1 default.
-reset_case
-run_start __missing__
-assert_contains 'legacy:start'
-[ "$(cat "$MARKER_FILE")" = v1 ]
-
-# A clean shadow start is exactly one isolated procd instance and has no
-# legacy/network/process-manager side effects.
-reset_case
-before_crontab=$(cksum "$CRONTAB_FILE")
-run_start v2_shadow
-after_crontab=$(cksum "$CRONTAB_FILE")
-[ "$before_crontab" = "$after_crontab" ]
-assert_contains 'procd:open:'
-assert_contains 'procd:param:command /usr/sbin/proxypoold --config /etc/config/proxypool --socket /var/run/proxypoold.sock --shadow'
-assert_contains 'procd:param:respawn 3600 5 5'
-assert_contains 'procd:param:stdout 1'
-assert_contains 'procd:param:stderr 1'
-assert_contains 'procd:close:'
-assert_contains 'procd:service-close:set'
-[ "$(grep -Fc 'procd:open:' "$TRACE_FILE")" -eq 1 ]
-[ "$(cat "$MARKER_FILE")" = v2_shadow ]
-[ -e "$PROCD_RUNNING_FILE" ]
-case "$(uname -s)" in Linux*) [ "$(stat -c '%a' "$MARKER_FILE")" = 600 ] ;; esac
-assert_not_contains_fragment 'legacy:'
-assert_not_contains_fragment 'xl2tpd:'
-assert_not_contains_fragment 'lease:'
-assert_not_contains_fragment 'cron:'
-
-# Unknown backends fail closed and never fall back to legacy.
-reset_case
-if run_start surprise; then
-	echo 'unknown runtime_backend unexpectedly started' >&2
-	exit 1
-fi
+mkdir "$TEST_TMP/legacy-run"
+set_selector v2_shadow
+expect_failure run_start
 assert_not_contains_fragment 'legacy:'
 assert_not_contains_fragment 'procd:open:'
-[ ! -e "$PROCD_RUNNING_FILE" ]
-[ ! -e "$MARKER_FILE" ]
+assert_not_contains_fragment 'procd:service-close:'
 
-# A direct rc.common start while shadow is already running must replace the
-# service through the open JSON transaction. It must not call procd_kill,
-# which performs json_init/json_cleanup and corrupts that transaction.
+# Missing/unknown selector states and a missing-selector V2 file fail before
+# any legacy or procd backend mutation.
 reset_case
-printf 'v2_shadow\n' >"$MARKER_FILE"
-: >"$PROCD_RUNNING_FILE"
-run_start v2_shadow
-assert_contains_fragment 'procd:service-open:proxypool '
-assert_contains 'procd:service-close:set'
-assert_not_contains_fragment 'procd:kill:'
-assert_not_contains_fragment 'procd:transaction-corrupted'
-[ -e "$PROCD_RUNNING_FILE" ]
-[ "$(cat "$MARKER_FILE")" = v2_shadow ]
+set_selector unknown
+expect_failure run_start
+assert_not_contains_fragment 'legacy:'
+assert_not_contains_fragment 'procd:open:'
+[ ! -e "$MARKER_FILE" ] || fail 'invalid selector published a marker'
 
-# Direct backend switches use the marker to clean the old side before the new
-# side starts, independent of the newly edited UCI value.
+reset_case
+set_selector directory
+expect_failure run_start
+assert_not_contains_fragment 'legacy:'
+assert_not_contains_fragment 'procd:open:'
+
+reset_case
+cp "$V2_CONFIG_FILE" "$LEGACY_CONFIG_FILE"
+expect_failure run_start
+assert_not_contains_fragment 'legacy:'
+assert_not_contains_fragment 'procd:open:'
+
+# Exact stdout framing is part of all helper protocols.
+reset_case
+PROXYPOOL_TEST_SELECTOR_OUTPUT=bad expect_failure run_start
+assert_not_contains_fragment 'legacy:'
+assert_not_contains_fragment 'procd:open:'
+
+reset_case
+PROXYPOOL_TEST_SELECTOR_OUTPUT=no_newline expect_failure run_start
+assert_not_contains_fragment 'legacy:'
+assert_not_contains_fragment 'procd:open:'
+
+# Cross-backend changes are blocked until the persistent fail-closed baseline
+# exists. The open procd transaction is aborted before it can mutate either
+# side.
 reset_case
 printf 'v1\n' >"$MARKER_FILE"
-printf '%s\n' \
-	'* * * * * /usr/lib/proxypool/watchdog.sh run' \
-	'*/5 * * * * /usr/lib/proxypool/lease.sh accrue' \
-	'7 7 * * * keep-me' >"$CRONTAB_FILE"
-run_start v2_shadow
-assert_contains 'legacy:stop'
-assert_contains 'lease:flush'
-assert_contains 'cron:restart'
-assert_before 'legacy:stop' 'procd:open:'
-! grep -Fq '/usr/lib/proxypool/watchdog.sh' "$CRONTAB_FILE"
-! grep -Fq '/usr/lib/proxypool/lease.sh' "$CRONTAB_FILE"
-grep -Fq 'keep-me' "$CRONTAB_FILE"
-[ "$(cat "$MARKER_FILE")" = v2_shadow ]
+: >"$LEGACY_RUNNING_FILE"
+set_selector v2_shadow
+expect_failure run_start
+assert_not_contains_fragment 'legacy:'
+assert_not_contains_fragment 'procd:open:'
+assert_not_contains_fragment 'procd:service-close:'
+assert_file_line "$MARKER_FILE" v1
 
 reset_case
 printf 'v2_shadow\n' >"$MARKER_FILE"
-: >"$PROCD_RUNNING_FILE"
-run_start v1
-assert_contains 'legacy:start'
-assert_not_contains_fragment 'procd:kill:'
+printf 'old-shadow\n' >"$PROCD_RUNNING_FILE"
+old_snapshot="$SNAPSHOT_ROOT/generation.old"
+mkdir -p "$old_snapshot"
+cp "$V2_CONFIG_FILE" "$old_snapshot/proxypool"
+printf '%s\n' "$old_snapshot" >"$ACTIVE_SNAPSHOT_FILE"
+set_selector v1
+expect_failure run_start
+assert_not_contains_fragment 'legacy:'
+assert_not_contains_fragment 'procd:open:'
+assert_not_contains_fragment 'procd:service-close:'
+assert_file_line "$MARKER_FILE" v2_shadow
+
+reset_case
+printf 'v1\n' >"$MARKER_FILE"
+: >"$LEGACY_RUNNING_FILE"
+set_selector v2_shadow
+expect_failure run_reload
+assert_not_contains_fragment 'legacy:'
+assert_not_contains_fragment 'procd:'
+assert_file_line "$MARKER_FILE" v1
+
+# Same-backend V1 restart remains available and never overlaps a procd
+# instance. Failure retains the old evidence.
+reset_case
+printf 'v1\n' >"$MARKER_FILE"
+: >"$LEGACY_RUNNING_FILE"
+set_selector v1
+expect_success run_start
+assert_before 'ctl:procd:any' 'legacy:stop'
+assert_before 'legacy:stop' 'procd:service-close:set'
 assert_before 'procd:service-close:set' 'legacy:start'
-[ ! -e "$PROCD_RUNNING_FILE" ]
-[ "$(cat "$MARKER_FILE")" = v1 ]
+[ "$(grep -Fxc 'ctl:procd:any' "$TRACE_FILE")" -eq 2 ] || fail 'V1 restart did not query procd both before and after commit'
+assert_file_line "$MARKER_FILE" v1
 
-# Disabled and invalid direct starts submit an empty procd service-set. Neither
-# calls procd_kill inside the open JSON transaction; the invalid path performs
-# an additional safe post-commit kill before clearing the stale marker.
-reset_case
-printf 'v2_shadow\n' >"$MARKER_FILE"
-: >"$PROCD_RUNNING_FILE"
-run_start v2_shadow 0
-assert_contains 'procd:service-close:set'
-assert_not_contains_fragment 'procd:kill:'
-assert_not_contains_fragment 'procd:transaction-corrupted'
-[ ! -e "$PROCD_RUNNING_FILE" ]
-[ ! -e "$MARKER_FILE" ]
-
-reset_case
-printf 'v2_shadow\n' >"$MARKER_FILE"
-: >"$PROCD_RUNNING_FILE"
-if run_start surprise; then
-	echo 'invalid backend unexpectedly survived an rc.common start' >&2
-	exit 1
-fi
-assert_contains 'procd:service-close:set'
-assert_contains 'procd:kill:proxypool'
-assert_before 'procd:service-close:set' 'procd:kill:proxypool'
-assert_not_contains_fragment 'procd:transaction-corrupted'
-[ ! -e "$PROCD_RUNNING_FILE" ]
-[ ! -e "$MARKER_FILE" ]
-
-# stop_service follows the recorded old side. rc.common performs the final
-# unconditional procd_kill for a shadow instance after stop_service returns.
 reset_case
 printf 'v1\n' >"$MARKER_FILE"
-run_stop v2_shadow
+: >"$LEGACY_RUNNING_FILE"
+printf 'unexpected-shadow\n' >"$PROCD_RUNNING_FILE"
+set_selector v1
+PROXYPOOL_TEST_SERVICE_SET=ignore expect_failure run_start
+assert_not_contains_fragment 'legacy:'
+assert_not_contains_fragment 'legacy:start'
+assert_not_contains_fragment 'procd:service-close:'
+assert_file_line "$MARKER_FILE" v1
+
+# The V1 visible start failure is rolled back and no fresh marker is created.
+reset_case
+set_selector v1
+PROXYPOOL_TEST_LEGACY_FAIL=start expect_failure run_start
+assert_contains 'legacy:start'
 assert_contains 'legacy:stop'
-assert_contains 'lease:flush'
-assert_contains 'cron:restart'
-[ ! -e "$MARKER_FILE" ]
+[ ! -e "$MARKER_FILE" ] || fail 'failed fresh V1 start published a marker'
+
+reset_case
+set_selector v1
+PROXYPOOL_TEST_LEGACY_FAIL=start_and_stop expect_failure run_start
+assert_file_line "$QUARANTINE_FILE" v1
+
+reset_case
+set_selector v1
+PROXYPOOL_TEST_FAIL_MARKER_WRITE=runtime PROXYPOOL_TEST_LEGACY_FAIL=stop expect_failure run_start
+assert_file_line "$QUARANTINE_FILE" v1
+
+# Only an exact, query-confirmed procd instance commits V2. procd helper return
+# codes and procd_kill return codes are never treated as state evidence.
+reset_case
+set_selector v2_shadow
+PROXYPOOL_TEST_SERVICE_SET=ignore expect_failure run_start
+[ ! -e "$MARKER_FILE" ] || fail 'ignored service-set published V2 marker'
+
+reset_case
+set_selector v2_shadow
+PROXYPOOL_TEST_SERVICE_SET=wrong_instance expect_failure run_start
+[ ! -e "$MARKER_FILE" ] || fail 'wrong instance published V2 marker'
+
+reset_case
+set_selector v2_shadow
+PROXYPOOL_TEST_QUERY=unknown expect_failure run_start
+[ ! -e "$MARKER_FILE" ] || fail 'unknown procd state published V2 marker'
+assert_not_contains_fragment 'procd:open:'
+assert_not_contains_fragment 'procd:service-close:'
+
+reset_case
+set_selector v2_shadow
+PROXYPOOL_TEST_QUERY=unknown_after_first expect_failure run_start
+[ ! -e "$MARKER_FILE" ] || fail 'post-commit unknown procd state published V2 marker'
+assert_contains_fragment 'procd:open:shadow-'
+assert_contains 'procd:service-close:set'
+
+reset_case
+set_selector v2_shadow
+PROXYPOOL_TEST_QUERY=bad_output expect_failure run_start
+[ ! -e "$MARKER_FILE" ] || fail 'malformed procd state published V2 marker'
+
+reset_case
+set_selector v2_shadow
+PROXYPOOL_TEST_FAIL_PROCD_STEP='param:stdout' PROXYPOOL_TEST_KILL=noop expect_failure run_start
+assert_contains 'procd:kill:proxypool'
+assert_contains 'ctl:procd:any'
+[ ! -e "$MARKER_FILE" ] || fail 'partial procd transaction published V2 marker'
+
+reset_case
+set_selector v2_shadow
+PROXYPOOL_TEST_FAIL_MARKER_WRITE=runtime expect_failure run_start
+assert_contains 'procd:kill:proxypool'
+assert_contains 'ctl:procd:any'
+[ ! -e "$MARKER_FILE" ] || fail 'failed marker publication left runtime evidence'
+[ ! -e "$PROCD_RUNNING_FILE" ] || fail 'failed marker publication left shadow running'
+
+# Disabled same-backend starts clear evidence only after confirmed global
+# procd absence. Query uncertainty or a lingering instance retains evidence.
+reset_case
+printf 'v2_shadow\n' >"$MARKER_FILE"
+printf 'old-shadow\n' >"$PROCD_RUNNING_FILE"
+set_selector v2_shadow
+write_v2_config v2_shadow 0
+expect_success run_start
+[ ! -e "$MARKER_FILE" ] || fail 'confirmed disabled V2 retained marker'
 
 reset_case
 printf 'v2_shadow\n' >"$MARKER_FILE"
-: >"$PROCD_RUNNING_FILE"
-run_stop v1
-assert_not_contains_fragment 'legacy:'
-assert_not_contains_fragment 'xl2tpd:'
-assert_contains 'procd:kill:proxypool'
-[ ! -e "$PROCD_RUNNING_FILE" ]
-[ ! -e "$MARKER_FILE" ]
+printf 'old-shadow\n' >"$PROCD_RUNNING_FILE"
+set_selector v2_shadow
+write_v2_config v2_shadow 0
+PROXYPOOL_TEST_SERVICE_SET=ignore expect_failure run_start
+assert_file_line "$MARKER_FILE" v2_shadow
 
 reset_case
-printf 'corrupt-marker\n' >"$MARKER_FILE"
-if run_stop v1; then
-	echo 'unknown runtime marker unexpectedly selected a stop path' >&2
-	exit 1
-fi
-assert_not_contains_fragment 'legacy:'
+printf 'v2_shadow\n' >"$MARKER_FILE"
+printf 'old-shadow\n' >"$PROCD_RUNNING_FILE"
+set_selector v2_shadow
+write_v2_config v2_shadow 0
+PROXYPOOL_TEST_QUERY=unknown_after_first expect_failure run_start
+assert_file_line "$MARKER_FILE" v2_shadow
 
-# Same-backend V1 reload retains the historical lightweight reload. Shadow
-# reload is a bounded procd replacement because Phase 1 has no mutable reload.
+# Stop follows the same evidence rule: even a successful procd_kill call may
+# not clear the marker while the queried instance is present or unknown.
+reset_case
+printf 'v2_shadow\n' >"$MARKER_FILE"
+printf 'old-shadow\n' >"$PROCD_RUNNING_FILE"
+PROXYPOOL_TEST_KILL=noop expect_success run_stop
+assert_file_line "$MARKER_FILE" v2_shadow
+
+reset_case
+printf 'v2_shadow\n' >"$MARKER_FILE"
+printf 'old-shadow\n' >"$PROCD_RUNNING_FILE"
+PROXYPOOL_TEST_QUERY=unknown expect_success run_stop
+assert_file_line "$MARKER_FILE" v2_shadow
+
+reset_case
+printf 'v2_shadow\n' >"$MARKER_FILE"
+printf 'old-shadow\n' >"$PROCD_RUNNING_FILE"
+expect_success run_stop
+[ ! -e "$MARKER_FILE" ] || fail 'confirmed stop retained marker'
+
+# Any quarantine/transition artifact, including an unreadable path type, makes
+# runtime state uncertain. Dual evidence is preserved without V1 cleanup.
+reset_case
+printf 'v2_shadow\n' >"$MARKER_FILE"
+printf 'v1\n' >"$QUARANTINE_FILE"
+printf 'old-shadow\n' >"$PROCD_RUNNING_FILE"
+set_selector v2_shadow
+expect_failure run_start
+assert_not_contains_fragment 'legacy:'
+assert_file_line "$MARKER_FILE" v2_shadow
+assert_file_line "$QUARANTINE_FILE" v1
+
 reset_case
 printf 'v1\n' >"$MARKER_FILE"
-run_reload v1
+mkdir "$QUARANTINE_FILE"
+: >"$LEGACY_RUNNING_FILE"
+set_selector v1
+expect_failure run_start
+assert_not_contains_fragment 'legacy:'
+[ -d "$QUARANTINE_FILE" ] || fail 'unreadable quarantine evidence was removed'
+
+reset_case
+printf 'v1\n' >"$MARKER_FILE"
+printf 'pending\n' >"$TRANSITION_FILE"
+set_selector v1
+expect_failure run_reload
+assert_not_contains_fragment 'legacy:'
+assert_file_line "$TRANSITION_FILE" pending
+
+reset_case
+printf 'v1\n' >"$TEST_TMP/symlink-target"
+if ln -s "$TEST_TMP/symlink-target" "$MARKER_FILE" 2>/dev/null && [ -L "$MARKER_FILE" ]; then
+	set_selector v1
+	expect_failure run_start
+	assert_not_contains_fragment 'legacy:'
+else
+	echo 'SKIP: runtime marker symlink assertion requires symlink support'
+fi
+
+# Marker framing is strict: missing newline and extra data are corrupt.
+reset_case
+printf v1 >"$MARKER_FILE"
+set_selector v1
+expect_failure run_start
+assert_not_contains_fragment 'legacy:'
+
+reset_case
+printf 'v1\nextra\n' >"$MARKER_FILE"
+set_selector v1
+expect_failure run_start
+assert_not_contains_fragment 'legacy:'
+
+# Invalid declared V2 still runs the diagnostic shadow and ignores a partial
+# enabled value. Same-backend reloads stay on their side.
+reset_case
+set_selector v2_shadow
+write_v2_config v2_shadow_invalid 0
+expect_success run_start
+assert_file_line "$MARKER_FILE" v2_shadow
+
+reset_case
+printf 'v1\n' >"$MARKER_FILE"
+: >"$LEGACY_RUNNING_FILE"
+set_selector v1
+expect_success run_reload
 assert_contains 'legacy:reload'
 assert_not_contains_fragment 'legacy:stop'
-assert_not_contains_fragment 'legacy:start'
 
 reset_case
 printf 'v1\n' >"$MARKER_FILE"
-run_reload v1 0
-assert_contains 'legacy:stop'
-assert_contains 'lease:flush'
-assert_not_contains_fragment 'legacy:reload'
-assert_not_contains_fragment 'legacy:start'
-[ ! -e "$MARKER_FILE" ]
+: >"$LEGACY_RUNNING_FILE"
+set_selector v1
+PROXYPOOL_TEST_QUERY=unknown expect_failure run_reload
+assert_not_contains_fragment 'legacy:'
+assert_file_line "$MARKER_FILE" v1
 
 reset_case
-printf 'v2_shadow\n' >"$MARKER_FILE"
-mkdir "$TEST_TMP/legacy-run"
-run_reload v2_shadow
-assert_contains 'procd:kill:proxypool'
-assert_contains 'rc:start:'
-assert_contains 'procd:open:'
-assert_before 'procd:kill:proxypool' 'rc:start:'
-assert_before 'rc:start:' 'procd:open:'
-assert_not_contains_fragment 'legacy:'
-assert_not_contains_fragment 'lease:'
-assert_not_contains_fragment 'cron:'
-assert_not_contains_fragment 'xl2tpd:'
-[ "$(cat "$MARKER_FILE")" = v2_shadow ]
+set_selector v2_shadow
+expect_success run_start
+first_instance=$(cat "$PROCD_RUNNING_FILE")
+: >"$TRACE_FILE"
+expect_success run_reload
+second_instance=$(cat "$PROCD_RUNNING_FILE")
+[ "$first_instance" != "$second_instance" ] || fail 'V2 reload reused its procd instance token'
+assert_contains 'rc:start'
+assert_contains "ctl:procd:$second_instance"
 
-echo 'proxypool init behavior: PASS'
+reset_case
+expect_success run_action triggers
+assert_contains 'procd:trigger:proxypool proxypool_v2 proxypool_runtime'
+
+echo 'proxypool init backend transaction matrix: PASS'

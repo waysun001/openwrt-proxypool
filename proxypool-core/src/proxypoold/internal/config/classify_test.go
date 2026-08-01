@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -143,5 +144,37 @@ func TestInspectFileReadFailureIsSanitizedInvalidState(t *testing.T) {
 	}
 	if got := inspection.String(); got != "config.Inspection{State:\"invalid_config\" Desired:<unavailable>}" {
 		t.Fatalf("String() = %q", got)
+	}
+}
+
+func TestInspectEnabledFileUsesOnlyRecognizedConfigShapes(t *testing.T) {
+	dir := t.TempDir()
+	v2Contents, err := os.ReadFile(filepath.Join("testdata", "v2-valid.uci"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name     string
+		contents string
+		want     bool
+		wantOK   bool
+	}{
+		{name: "legacy default enabled", contents: "config global 'global'\n\toption max_clients '60'\n", want: true, wantOK: true},
+		{name: "legacy disabled", contents: "config global 'global'\n\toption enabled '0'\n\toption max_clients '60'\n", wantOK: true},
+		{name: "strict V2 disabled", contents: strings.Replace(string(v2Contents), "option enabled '1'", "option enabled '0'", 1), wantOK: true},
+		{name: "unknown shape", contents: "config mystery 'x'\n\toption enabled '1'\n"},
+		{name: "declared invalid V2", contents: "config global 'global'\n\toption schema_version '2'\n\toption enabled '0'\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(dir, strings.ReplaceAll(test.name, " ", "-"))
+			if err := os.WriteFile(path, []byte(test.contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got, ok := InspectEnabledFile(path)
+			if got != test.want || ok != test.wantOK {
+				t.Fatalf("enabled=%t,%t want %t,%t", got, ok, test.want, test.wantOK)
+			}
+		})
 	}
 }

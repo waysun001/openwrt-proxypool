@@ -9,6 +9,9 @@ HOST_RUNNER="$ROOT/scripts/test-host.sh"
 IPK_INSPECTOR="$ROOT/scripts/inspect-ipk.sh"
 PACKAGE_DEFAULT="$ROOT/proxypool-core/files/proxypool.config"
 IMAGE_OVERLAY_DEFAULT="$ROOT/files/etc/config/proxypool"
+IMAGE_OVERLAY_V2="$ROOT/files/etc/config/proxypool_v2"
+IMAGE_OVERLAY_SELECTOR="$ROOT/files/etc/config/proxypool_runtime"
+UPGRADE_KEEP="$ROOT/proxypool-core/files/proxypool.keep"
 
 require_fixed() {
 	file=$1
@@ -36,6 +39,15 @@ require_fixed "$MAKEFILE" '$(CP) ./src/proxypoold/. $(PKG_BUILD_DIR)/'
 require_fixed "$MAKEFILE" '$(GO_PKG_BUILD_BIN_DIR)/proxypoold $(1)/usr/sbin/proxypoold'
 require_fixed "$MAKEFILE" '$(GO_PKG_BUILD_BIN_DIR)/proxypoolctl $(1)/usr/bin/proxypoolctl'
 require_fixed "$MAKEFILE" '$(PKG_BUILD_DIR)/ip2region_searcher $(1)/usr/lib/proxypool/ip2region_searcher'
+require_fixed "$MAKEFILE" '$(INSTALL_DIR) $(1)/lib/upgrade/keep.d'
+require_fixed "$MAKEFILE" '$(INSTALL_DATA) ./files/proxypool.keep $(1)/lib/upgrade/keep.d/proxypool'
+if grep -Eq 'INSTALL_(CONF|DATA).*proxypool_(v2|runtime).*etc/config' "$MAKEFILE"; then
+	echo 'package payload must not own the ImageBuilder-only V2 configs' >&2
+	exit 1
+fi
+[ -f "$UPGRADE_KEEP" ] || { echo 'missing sysupgrade keep list for overlay-only configs' >&2; exit 1; }
+expected_keep=$(printf '/etc/config/proxypool_v2\n/etc/config/proxypool_runtime\n')
+[ "$(cat "$UPGRADE_KEEP")" = "$expected_keep" ] || { echo 'unexpected ProxyPool sysupgrade keep list' >&2; exit 1; }
 
 require_fixed "$HOST_RUNNER" 'go test -race -count=1 ./...'
 require_fixed "$HOST_RUNNER" 'go test -count=1 ./...'
@@ -44,6 +56,10 @@ require_fixed "$HOST_RUNNER" 'test-proxypool-init.sh'
 require_fixed "$HOST_RUNNER" 'test-release-contracts.sh'
 require_fixed "$HOST_RUNNER" 'test-whitespace-range.sh'
 require_fixed "$HOST_RUNNER" 'inspect-ipk.sh'
+require_fixed "$HOST_RUNNER" 'test-inspect-ipk.sh'
+require_fixed "$HOST_RUNNER" 'test-image-files.sh'
+require_fixed "$HOST_RUNNER" 'regenerate-sha256sums.sh'
+require_fixed "$HOST_RUNNER" 'test-artifact-sha256sums.sh'
 
 for asset in proxypool.sh l2tp-manager.sh socks5-manager.sh slp-manager.sh firewall.sh status.sh backup.sh watchdog.sh lease.sh iplocation.sh timeout-check.sh timeout-rotate.sh update-ipdb.sh install-global-menu.sh uninstall-global-menu.sh dns-manager.sh slp-client ip-up ip-down ppp-up.sh ppp-down.sh ip2region.xdb; do
 	[ -e "$ROOT/proxypool-core/files/$asset" ] || { echo "missing retained V1 asset: $asset" >&2; exit 1; }
@@ -72,7 +88,13 @@ require_fixed "$BUILD_WORKFLOW" 'feed_updated=0'
 require_fixed "$BUILD_WORKFLOW" 'for attempt in 1 2 3; do'
 require_fixed "$BUILD_WORKFLOW" 'feed_updated=1'
 require_fixed "$BUILD_WORKFLOW" '[ "$feed_updated" = "1" ] || {'
-require_fixed "$BUILD_WORKFLOW" 'FILES=../files'
+require_fixed "$BUILD_WORKFLOW" 'sh ./scripts/prepare-image-files.sh files image-files'
+require_fixed "$BUILD_WORKFLOW" 'FILES=../image-files'
+require_fixed "$BUILD_WORKFLOW" 'sh ./scripts/regenerate-sha256sums.sh output'
+if grep -Fq -- '-o -name sha256sums' "$BUILD_WORKFLOW"; then
+	echo 'artifact collection copies an upstream manifest that references omitted files' >&2
+	exit 1
+fi
 if grep -Fq 'repositories.conf' "$BUILD_WORKFLOW"; then
 	echo 'ImageBuilder workflow must use its built-in packages/ feed without rewriting repositories.conf' >&2
 	exit 1
@@ -81,14 +103,24 @@ if grep -Fq 'openwrt-sha256sums' "$BUILD_WORKFLOW"; then
 	echo 'ImageBuilder checksum must be pinned rather than trusted from a second dynamic download' >&2
 	exit 1
 fi
-if [ -e "$IMAGE_OVERLAY_DEFAULT" ]; then
-	echo 'ImageBuilder overlay would replace the package default and its INSTALL_CONF mode' >&2
+[ -f "$IMAGE_OVERLAY_DEFAULT" ] || { echo 'missing legacy rollback ImageBuilder default' >&2; exit 1; }
+[ -f "$IMAGE_OVERLAY_V2" ] || { echo 'missing strict V2 ImageBuilder default' >&2; exit 1; }
+[ -f "$IMAGE_OVERLAY_SELECTOR" ] || { echo 'missing ImageBuilder runtime selector' >&2; exit 1; }
+cmp -s "$PACKAGE_DEFAULT" "$IMAGE_OVERLAY_DEFAULT" || { echo 'ImageBuilder legacy rollback config differs from the package V1 baseline' >&2; exit 1; }
+require_fixed "$IMAGE_OVERLAY_V2" "option runtime_backend 'v2_shadow'"
+require_fixed "$IMAGE_OVERLAY_SELECTOR" "option runtime_backend 'v2_shadow'"
+if grep -Fq 'schema_version' "$IMAGE_OVERLAY_DEFAULT"; then
+	echo 'legacy rollback config was replaced by a V2 config' >&2
 	exit 1
 fi
-require_fixed "$PACKAGE_DEFAULT" "option runtime_backend 'v2_shadow'"
+if grep -Fq 'FILES=../files' "$BUILD_WORKFLOW"; then
+	echo 'ImageBuilder consumes unstaged overlay files without enforcing config mode 0600' >&2
+	exit 1
+fi
 require_fixed "$IPK_INSPECTOR" 'etc/config/proxypool'
 require_fixed "$IPK_INSPECTOR" 'etc/init.d/proxypool'
 require_fixed "$IPK_INSPECTOR" 'usr/bin/slp-client'
+require_fixed "$IPK_INSPECTOR" "printf '/etc/config/proxypool\\n'"
 job_block() {
 	awk -v job="$1" '
 		$0 == "  " job ":" { inside=1; next }

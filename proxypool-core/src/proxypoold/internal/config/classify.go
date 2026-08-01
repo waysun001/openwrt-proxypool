@@ -19,16 +19,42 @@ const (
 	ConfigInvalid           ConfigState = "invalid_config"
 )
 
+// StartupClass is the only secret-free init selection emitted by
+// proxypoolctl. Unknown is deliberately distinct from a declared but invalid
+// V2 file so init never falls back to the mutating legacy backend.
+type StartupClass string
+
+const (
+	StartupV1              StartupClass = "v1"
+	StartupV2Shadow        StartupClass = "v2_shadow"
+	StartupV2ShadowInvalid StartupClass = "v2_shadow_invalid"
+	StartupUnknown         StartupClass = "unknown"
+)
+
 // Inspection intentionally keeps the decoded model private. This prevents a
 // startup classification (which may contain credentials) from being embedded
 // directly in control responses or logs.
 type Inspection struct {
-	state   ConfigState
-	desired model.DesiredConfig
-	ready   bool
+	state      ConfigState
+	desired    model.DesiredConfig
+	ready      bool
+	declaredV2 bool
 }
 
 func (inspection Inspection) State() ConfigState { return inspection.state }
+
+func (inspection Inspection) StartupClass() StartupClass {
+	if inspection.ready {
+		return StartupV2Shadow
+	}
+	if inspection.state == ConfigMigrationRequired {
+		return StartupV1
+	}
+	if inspection.declaredV2 {
+		return StartupV2ShadowInvalid
+	}
+	return StartupUnknown
+}
 
 // Desired returns an isolated copy only for a strict, fully validated V2 file.
 func (inspection Inspection) Desired() (model.DesiredConfig, bool) {
@@ -61,6 +87,33 @@ func InspectFile(path string) Inspection {
 	return Classify(contents)
 }
 
+// InspectEnabledFile returns the effective global enabled flag only for a
+// structurally recognized V1 file or a fully validated V2 file. It never
+// exposes any other configuration value.
+func InspectEnabledFile(path string) (bool, bool) {
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return false, false
+	}
+	inspection := Classify(contents)
+	if inspection.ready {
+		return inspection.desired.Global.Enabled, true
+	}
+	if inspection.state != ConfigMigrationRequired {
+		return false, false
+	}
+	sections, err := parseUCI(bytes.NewReader(contents))
+	if err != nil {
+		return false, false
+	}
+	for _, section := range sections {
+		if section.kind == "global" && section.name == "global" {
+			return section.options["enabled"] != "0", true
+		}
+	}
+	return false, false
+}
+
 // Classify distinguishes strict V2 from the structurally known V1 UCI shape.
 // Anything else is invalid; in particular a V2 declaration never falls back
 // to a legacy interpretation after strict decoding fails.
@@ -72,27 +125,47 @@ func Classify(contents []byte) Inspection {
 		return Inspection{state: ConfigReady, desired: desired, ready: true}
 	}
 	sections, err := parseUCI(bytes.NewReader(contents))
-	if err != nil || len(sections) == 0 || declaresV2(sections) || !validLegacyV1(sections) {
+	if err != nil || len(sections) == 0 {
+		return Inspection{state: ConfigInvalid}
+	}
+	if declaresV2(sections) {
+		return Inspection{state: ConfigInvalid, declaredV2: true}
+	}
+	if !validLegacyV1(sections) {
 		return Inspection{state: ConfigInvalid}
 	}
 	return Inspection{state: ConfigMigrationRequired}
 }
 
 func declaresV2(sections []*uciSection) bool {
+	declared := false
 	for _, section := range sections {
-		if section.kind == "node" || section.kind == "device" {
-			return true
-		}
 		if section.kind == "global" {
-			if _, exists := section.options["schema_version"]; exists {
-				return true
+			if schema, exists := section.options["schema_version"]; exists {
+				if schema != "2" {
+					return false
+				}
+				declared = true
 			}
-			if backend, exists := section.options["runtime_backend"]; exists && backend != "v1" {
-				return true
+			if backend, exists := section.options["runtime_backend"]; exists {
+				switch backend {
+				case "v2_shadow":
+					declared = true
+				case "v1":
+					// A schema-2 file cannot activate V1, but the schema marker
+					// still makes it a safe diagnostic-shadow candidate.
+				default:
+					return false
+				}
 			}
 		}
 	}
-	return false
+	for _, section := range sections {
+		if section.kind == "node" || section.kind == "device" {
+			declared = true
+		}
+	}
+	return declared
 }
 
 var legacyGlobalOptions = []string{"enabled", "runtime_backend", "max_clients", "log_level", "lease_days", "lease_used"}

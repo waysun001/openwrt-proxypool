@@ -11,20 +11,37 @@ CRON_INIT="${PROXYPOOL_CRON_INIT:-/etc/init.d/cron}"
 XL2TPD_INIT="${PROXYPOOL_XL2TPD_INIT:-/etc/init.d/xl2tpd}"
 CRONTAB_ROOT="${PROXYPOOL_CRONTAB_ROOT:-/etc/crontabs/root}"
 XL2TPD_PID="${PROXYPOOL_XL2TPD_PID:-/var/run/xl2tpd.pid}"
-RUNTIME_MARKER="${PROXYPOOL_RUNTIME_MARKER:-/var/run/proxypool.backend}"
-LEGACY_RUN_DIR="${PROXYPOOL_LEGACY_RUN_DIR:-/var/run/proxypool}"
 
-# rc.common opens the procd service JSON transaction before start_service and
-# commits it afterwards. These globals carry the decision into
-# service_started, which runs only after that commit has completed.
-PROXYPOOL_PENDING_BACKEND=
+RUNTIME_MARKER="${PROXYPOOL_RUNTIME_MARKER:-/var/run/proxypool.backend}"
+QUARANTINE_MARKER="${PROXYPOOL_QUARANTINE_MARKER:-/var/run/proxypool.backend.cleanup-required}"
+TRANSITION_MARKER="${PROXYPOOL_TRANSITION_MARKER:-/var/run/proxypool.transition}"
+ACTIVE_SNAPSHOT_MARKER="${PROXYPOOL_ACTIVE_SNAPSHOT_MARKER:-/var/run/proxypool.config-snapshot}"
+LEGACY_RUN_DIR="${PROXYPOOL_LEGACY_RUN_DIR:-/var/run/proxypool}"
+SNAPSHOT_ROOT="${PROXYPOOL_SNAPSHOT_ROOT:-/var/run/proxypool-config}"
+
+LEGACY_CONFIG_FILE="${PROXYPOOL_LEGACY_CONFIG_FILE:-${PROXYPOOL_CONFIG_FILE:-/etc/config/proxypool}}"
+V2_CONFIG_FILE="${PROXYPOOL_V2_CONFIG_FILE:-/etc/config/proxypool_v2}"
+SELECTOR_FILE="${PROXYPOOL_SELECTOR_FILE:-/etc/config/proxypool_runtime}"
+CLASSIFIER="${PROXYPOOL_CLASSIFIER:-/usr/bin/proxypoolctl}"
+
+# Phase 1 deliberately blocks V1 <-> V2 transitions. V1 teardown currently
+# removes its fail-closed network rules, so a cross-backend switch is unsafe
+# until the backend-neutral baseline lands. Same-backend restart and fresh
+# first activation remain transactional.
+PROXYPOOL_PENDING_ACTION=
+PROXYPOOL_PENDING_INSTANCE=
+PROXYPOOL_PENDING_SNAPSHOT=
 PROXYPOOL_START_RESULT=0
+PROXYPOOL_STOP_CLEAN=0
+
+PROXYPOOL_DESIRED_BACKEND=
+PROXYPOOL_DESIRED_CLASS=
+PROXYPOOL_DESIRED_ENABLED=
+PROXYPOOL_DESIRED_SNAPSHOT=
 
 legacy_start() {
-	local sys_pid
+	local sys_pid result
 
-	# Preserve the V1 runtime exactly for rollback. The v2_shadow branch never
-	# enters this function.
 	if "$XL2TPD_INIT" enabled 2>/dev/null; then
 		"$XL2TPD_INIT" stop 2>/dev/null
 		"$XL2TPD_INIT" disable 2>/dev/null
@@ -37,6 +54,8 @@ legacy_start() {
 
 	echo "Starting ProxyPool V1..."
 	"$PROG" start
+	result=$?
+	[ "$result" -eq 0 ] || return "$result"
 	"$LEASE_PROG" boot 2>/dev/null
 
 	sed -i "\|$WATCHDOG_PROG|d" "$CRONTAB_ROOT" 2>/dev/null
@@ -44,15 +63,19 @@ legacy_start() {
 	echo "* * * * * $WATCHDOG_PROG run" >>"$CRONTAB_ROOT"
 	echo "*/5 * * * * $LEASE_PROG accrue" >>"$CRONTAB_ROOT"
 	"$CRON_INIT" restart 2>/dev/null
+	return 0
 }
 
 legacy_stop() {
+	local result
 	echo "Stopping ProxyPool V1..."
 	"$PROG" stop
+	result=$?
 	"$LEASE_PROG" flush 2>/dev/null
 	sed -i "\|$WATCHDOG_PROG|d" "$CRONTAB_ROOT" 2>/dev/null
 	sed -i "\|$LEASE_PROG|d" "$CRONTAB_ROOT" 2>/dev/null
 	"$CRON_INIT" restart 2>/dev/null
+	return "$result"
 }
 
 legacy_reload() {
@@ -60,225 +83,496 @@ legacy_reload() {
 	"$PROG" reload
 }
 
-read_runtime_backend() {
-	local recorded=""
-	if [ -r "$RUNTIME_MARKER" ]; then
-		IFS= read -r recorded <"$RUNTIME_MARKER"
+read_exact_backend_marker() {
+	local marker_path="$1" allow_shadow="$2" recorded="" byte_count read_result
+	if [ ! -e "$marker_path" ] && [ ! -L "$marker_path" ]; then
+		return 0
 	fi
-	printf '%s' "$recorded"
+	[ -f "$marker_path" ] && [ ! -L "$marker_path" ] && [ -r "$marker_path" ] || {
+		printf '%s' corrupt
+		return 0
+	}
+	byte_count=$(wc -c <"$marker_path" 2>/dev/null) || {
+		printf '%s' corrupt
+		return 0
+	}
+	if IFS= read -r recorded <"$marker_path"; then read_result=0; else read_result=$?; fi
+	[ "$read_result" -eq 0 ] || {
+		printf '%s' corrupt
+		return 0
+	}
+	case "$recorded" in
+		v1)
+			[ "$byte_count" -eq 3 ] && printf '%s' v1 || printf '%s' corrupt
+			;;
+		v2_shadow)
+			[ "$allow_shadow" = 1 ] && [ "$byte_count" -eq 10 ] && printf '%s' v2_shadow || printf '%s' corrupt
+			;;
+		*)
+			printf '%s' corrupt
+			;;
+	esac
+}
+
+read_primary_backend() {
+	read_exact_backend_marker "$RUNTIME_MARKER" 1
+}
+
+read_runtime_backend() {
+	local primary
+	primary=$(read_primary_backend)
+	if [ -e "$QUARANTINE_MARKER" ] || [ -L "$QUARANTINE_MARKER" ] ||
+		[ -e "$TRANSITION_MARKER" ] || [ -L "$TRANSITION_MARKER" ]; then
+		printf '%s' corrupt
+		return 0
+	fi
+	printf '%s' "$primary"
+}
+
+write_line_atomically() {
+	local destination="$1" value="$2" temporary
+	if [ -e "$destination" ] || [ -L "$destination" ]; then
+		[ -f "$destination" ] && [ ! -L "$destination" ] || return 1
+	fi
+	temporary="${destination}.$$"
+	(umask 077 && printf '%s\n' "$value" >"$temporary") || {
+		rm -f "$temporary"
+		return 1
+	}
+	mv -f "$temporary" "$destination" || {
+		rm -f "$temporary"
+		return 1
+	}
 }
 
 write_runtime_backend() {
-	local marker_tmp="${RUNTIME_MARKER}.$$"
-	(umask 077 && printf '%s\n' "$1" >"$marker_tmp") || {
-		rm -f "$marker_tmp"
-		return 1
-	}
-	mv -f "$marker_tmp" "$RUNTIME_MARKER" || {
-		rm -f "$marker_tmp"
-		return 1
-	}
+	write_line_atomically "$RUNTIME_MARKER" "$1"
 }
 
-cleanup_recorded_backend() {
-	local previous
-	previous=$(read_runtime_backend)
-	case "$previous" in
-		v1)
-			legacy_stop
+write_quarantine_backend() {
+	write_line_atomically "$QUARANTINE_MARKER" "$1"
+}
+
+record_v1_cleanup_required() {
+	write_quarantine_backend v1 || write_runtime_backend v1 || true
+}
+
+clear_backend_evidence() {
+	rm -f "$RUNTIME_MARKER" "$QUARANTINE_MARKER" "$TRANSITION_MARKER" "$ACTIVE_SNAPSHOT_MARKER"
+}
+
+capture_selector() {
+	local output result sentinel=':proxypool-selector-end'
+	output=$(
+		"$CLASSIFIER" select-backend --config "$1" 2>/dev/null
+		result=$?
+		[ "$result" -eq 0 ] || exit "$result"
+		printf '%s' "$sentinel"
+	)
+	result=$?
+	[ "$result" -eq 0 ] || return 1
+	case "$output" in
+		"missing
+$sentinel") printf '%s' missing ;;
+		"v1
+$sentinel") printf '%s' v1 ;;
+		"v2_shadow
+$sentinel") printf '%s' v2_shadow ;;
+		*) return 1 ;;
+	esac
+}
+
+capture_classification() {
+	local output result sentinel=':proxypool-classification-end'
+	output=$(
+		"$CLASSIFIER" classify --config "$1" 2>/dev/null
+		result=$?
+		[ "$result" -eq 0 ] || exit "$result"
+		printf '%s' "$sentinel"
+	)
+	result=$?
+	[ "$result" -eq 0 ] || return 1
+	case "$output" in
+		"v1
+$sentinel") printf '%s' v1 ;;
+		"v2_shadow
+$sentinel") printf '%s' v2_shadow ;;
+		"v2_shadow_invalid
+$sentinel") printf '%s' v2_shadow_invalid ;;
+		*) return 1 ;;
+	esac
+}
+
+capture_enabled() {
+	local output result sentinel=':proxypool-enabled-end'
+	output=$(
+		"$CLASSIFIER" config-enabled --config "$1" 2>/dev/null
+		result=$?
+		[ "$result" -eq 0 ] || exit "$result"
+		printf '%s' "$sentinel"
+	)
+	result=$?
+	[ "$result" -eq 0 ] || return 1
+	case "$output" in
+		"0
+$sentinel") printf '%s' 0 ;;
+		"1
+$sentinel") printf '%s' 1 ;;
+		*) return 1 ;;
+	esac
+}
+
+capture_procd_state() {
+	local instance="${1-}" output result sentinel=':proxypool-procd-state-end'
+	if [ -n "$instance" ]; then
+		output=$(
+			"$CLASSIFIER" procd-state --service proxypool --instance "$instance" 2>/dev/null
+			result=$?
+			[ "$result" -eq 0 ] || exit "$result"
+			printf '%s' "$sentinel"
+		)
+	else
+		output=$(
+			"$CLASSIFIER" procd-state --service proxypool 2>/dev/null
+			result=$?
+			[ "$result" -eq 0 ] || exit "$result"
+			printf '%s' "$sentinel"
+		)
+	fi
+	result=$?
+	[ "$result" -eq 0 ] || {
+		printf '%s' unknown
+		return 0
+	}
+	case "$output" in
+		"present
+$sentinel") printf '%s' present ;;
+		"absent
+$sentinel") printf '%s' absent ;;
+		*) printf '%s' unknown ;;
+	esac
+}
+
+new_snapshot_dir() {
+	if [ -e "$SNAPSHOT_ROOT" ] || [ -L "$SNAPSHOT_ROOT" ]; then
+		[ -d "$SNAPSHOT_ROOT" ] && [ ! -L "$SNAPSHOT_ROOT" ] || return 1
+	else
+		mkdir -p "$SNAPSHOT_ROOT" || return 1
+	fi
+	chmod 700 "$SNAPSHOT_ROOT" || return 1
+	mktemp -d "$SNAPSHOT_ROOT/generation.XXXXXX"
+}
+
+build_desired_snapshot() {
+	local snapshot selector_copy selection source classification enabled
+	snapshot=$(new_snapshot_dir) || return 1
+	chmod 700 "$snapshot" || return 1
+	selector_copy="$snapshot/proxypool_runtime"
+	if [ -e "$SELECTOR_FILE" ] || [ -L "$SELECTOR_FILE" ]; then
+		[ -f "$SELECTOR_FILE" ] && [ ! -L "$SELECTOR_FILE" ] || return 1
+		(umask 077 && cp "$SELECTOR_FILE" "$selector_copy") || return 1
+	fi
+	selection=$(capture_selector "$selector_copy") || return 1
+	case "$selection" in
+		missing|v1) source="$LEGACY_CONFIG_FILE" ;;
+		v2_shadow) source="$V2_CONFIG_FILE" ;;
+		*) return 1 ;;
+	esac
+	[ -f "$source" ] && [ ! -L "$source" ] || return 1
+	(umask 077 && cp "$source" "$snapshot/proxypool") || return 1
+	chmod 600 "$snapshot/proxypool" || return 1
+	classification=$(capture_classification "$snapshot/proxypool") || return 1
+	case "$selection:$classification" in
+		missing:v1|v1:v1)
+			PROXYPOOL_DESIRED_BACKEND=v1
 			;;
-		v2_shadow)
-			procd_kill proxypool
-			;;
-		"")
-			# Upgrade compatibility: old V1 packages predate the marker but leave
-			# their private runtime directory while active.
-			if [ -d "$LEGACY_RUN_DIR" ]; then
-				legacy_stop
-			fi
+		v2_shadow:v2_shadow|v2_shadow:v2_shadow_invalid)
+			PROXYPOOL_DESIRED_BACKEND=v2_shadow
 			;;
 		*)
-			# An untrusted marker must never select the mutating legacy path.
-			procd_kill proxypool
-			rm -f "$RUNTIME_MARKER"
 			return 1
 			;;
 	esac
-	rm -f "$RUNTIME_MARKER"
+	if [ "$classification" = v2_shadow_invalid ]; then
+		enabled=1
+	else
+		enabled=$(capture_enabled "$snapshot/proxypool") || return 1
+	fi
+	PROXYPOOL_DESIRED_CLASS="$classification"
+	PROXYPOOL_DESIRED_ENABLED="$enabled"
+	PROXYPOOL_DESIRED_SNAPSHOT="$snapshot"
+}
+
+shadow_instance_for_snapshot() {
+	local snapshot="$1" suffix
+	suffix=${snapshot##*.}
+	printf 'shadow-%s-%s' "$$" "$suffix"
 }
 
 start_shadow() {
-	procd_open_instance || return 1
-	procd_set_param command /usr/sbin/proxypoold --config /etc/config/proxypool --socket /var/run/proxypoold.sock --shadow || return 1
+	local snapshot="$1" instance="$2"
+	procd_open_instance "$instance" || return 1
+	procd_set_param command /usr/sbin/proxypoold --config "$snapshot/proxypool" --socket /var/run/proxypoold.sock --shadow || return 1
 	procd_set_param respawn 3600 5 5 || return 1
 	procd_set_param stdout 1 || return 1
 	procd_set_param stderr 1 || return 1
 	procd_close_instance || return 1
 }
 
-# Prepare the old side while rc.common has a procd JSON transaction open.
-# Calling procd_kill here would run json_init/json_cleanup and corrupt that
-# transaction. An old shadow instance is instead replaced (or stopped) by the
-# final procd service-set. The synchronous V1 side is safe to stop here.
-prepare_recorded_backend_for_start() {
-	local previous="$1"
-	case "$previous" in
-		v1)
-			legacy_stop
-			;;
-		v2_shadow)
-			:
-			;;
-		"")
-			if [ -d "$LEGACY_RUN_DIR" ]; then
-				legacy_stop
-			fi
-			;;
-		*)
-			# The empty service-set still stops any procd-managed process, but
-			# an untrusted marker must not select or start either backend.
-			return 1
-			;;
-	esac
+load_prepared_start() {
+	[ "${PROXYPOOL_START_PREPARED:-0}" = 1 ] || return 1
+	PROXYPOOL_DESIRED_BACKEND="$PROXYPOOL_START_BACKEND"
+	PROXYPOOL_DESIRED_CLASS="$PROXYPOOL_START_CLASS"
+	PROXYPOOL_DESIRED_ENABLED="$PROXYPOOL_START_ENABLED"
+	PROXYPOOL_DESIRED_SNAPSHOT="$PROXYPOOL_START_SNAPSHOT"
+	PROXYPOOL_START_PREPARED=0
+	return 0
 }
 
 start_service() {
-	local enabled runtime_backend previous result
-	local already_cleaned="${PROXYPOOL_START_ALREADY_CLEANED:-0}"
-	PROXYPOOL_PENDING_BACKEND=
+	local previous result instance preflight_state
+	PROXYPOOL_PENDING_ACTION=
+	PROXYPOOL_PENDING_INSTANCE=
+	PROXYPOOL_PENDING_SNAPSHOT=
 	PROXYPOOL_START_RESULT=0
-	PROXYPOOL_START_ALREADY_CLEANED=0
-	config_load proxypool
-	config_get enabled global enabled 1
-	config_get runtime_backend global runtime_backend v1
-	previous=$(read_runtime_backend)
 
-	if [ "$already_cleaned" != "1" ]; then
-		if ! prepare_recorded_backend_for_start "$previous"; then
-			PROXYPOOL_START_RESULT=1
-			return 1
-		fi
+	previous=$(read_runtime_backend)
+	if ! load_prepared_start && ! build_desired_snapshot; then
+		echo 'ProxyPool start blocked: selector/config snapshot is invalid' >&2
+		# rc.common always sends the open service-set even when this function
+		# returns nonzero. Exiting the one-shot init process is the only way to
+		# abort before that send and keep the existing procd state untouched.
+		exit 1
 	fi
 
-	case "$runtime_backend" in
-		v1|v2_shadow) ;;
+	case "$previous" in
+		corrupt)
+			echo 'ProxyPool start blocked: runtime evidence is incomplete' >&2
+			exit 1
+			;;
+		v1|v2_shadow)
+			if [ "$previous" != "$PROXYPOOL_DESIRED_BACKEND" ]; then
+				echo "ProxyPool cross-backend transition blocked: actual=$previous desired=$PROXYPOOL_DESIRED_BACKEND" >&2
+				exit 1
+			fi
+			;;
+		"") ;;
 		*)
-			echo "Invalid ProxyPool runtime_backend; refusing to start" >&2
-			PROXYPOOL_START_RESULT=1
-			return 1
+			exit 1
 			;;
 	esac
+	if [ -z "$previous" ] && [ "$PROXYPOOL_DESIRED_BACKEND" = v2_shadow ] && [ -d "$LEGACY_RUN_DIR" ]; then
+		echo 'ProxyPool fresh V2 start blocked: legacy runtime evidence exists' >&2
+		exit 1
+	fi
 
-	[ "$enabled" = "0" ] && return 0
-	case "$runtime_backend" in
+	# Direct ubus inspection is independent of procd.sh's open JSON document.
+	# Unknown state aborts the transaction before procd_close_service. V1 may
+	# start only after global absence; an unmarked fresh activation also
+	# requires absence so it never overwrites an unexplained service.
+	preflight_state=$(capture_procd_state)
+	[ "$preflight_state" != unknown ] || {
+		echo 'ProxyPool start blocked: procd state is unknown' >&2
+		exit 1
+	}
+	if [ "$PROXYPOOL_DESIRED_BACKEND" = v1 ] && [ "$preflight_state" != absent ]; then
+		echo 'ProxyPool V1 start blocked: a procd instance is still present' >&2
+		exit 1
+	fi
+	if [ -z "$previous" ] && [ "$preflight_state" != absent ]; then
+		echo 'ProxyPool fresh start blocked: an unrecorded procd instance is present' >&2
+		exit 1
+	fi
+
+	if [ "$PROXYPOOL_DESIRED_ENABLED" = 0 ]; then
+		if [ "$previous" = v1 ]; then
+			if ! legacy_stop; then
+				PROXYPOOL_PENDING_ACTION=preserve_v1
+				PROXYPOOL_START_RESULT=1
+				return 1
+			fi
+		fi
+		PROXYPOOL_PENDING_ACTION=disable
+		return 0
+	fi
+
+	case "$PROXYPOOL_DESIRED_BACKEND" in
 		v1)
-			# The empty procd service-set is committed before service_started
-			# launches V1, so a shadow -> V1 switch cannot overlap.
-			PROXYPOOL_PENDING_BACKEND=v1
+			if [ "$previous" = v1 ] || { [ -z "$previous" ] && [ -d "$LEGACY_RUN_DIR" ]; }; then
+				if ! legacy_stop; then
+					PROXYPOOL_PENDING_ACTION=preserve_v1
+					PROXYPOOL_START_RESULT=1
+					return 1
+				fi
+			fi
+			PROXYPOOL_PENDING_ACTION=start_v1
 			;;
 		v2_shadow)
-			start_shadow
+			instance=$(shadow_instance_for_snapshot "$PROXYPOOL_DESIRED_SNAPSHOT")
+			start_shadow "$PROXYPOOL_DESIRED_SNAPSHOT" "$instance"
 			result=$?
+			PROXYPOOL_PENDING_ACTION=start_v2
+			PROXYPOOL_PENDING_INSTANCE="$instance"
+			PROXYPOOL_PENDING_SNAPSHOT="$PROXYPOOL_DESIRED_SNAPSHOT"
 			if [ "$result" -ne 0 ]; then
-				PROXYPOOL_START_RESULT=$result
+				PROXYPOOL_START_RESULT="$result"
 				return "$result"
 			fi
-			PROXYPOOL_PENDING_BACKEND=v2_shadow
 			;;
 	esac
 }
 
 service_started() {
-	local pending="$PROXYPOOL_PENDING_BACKEND"
-	local result="$PROXYPOOL_START_RESULT"
-	PROXYPOOL_PENDING_BACKEND=
+	local pending="$PROXYPOOL_PENDING_ACTION"
+	local result="$PROXYPOOL_START_RESULT" state rollback_result
+	PROXYPOOL_PENDING_ACTION=
 	PROXYPOOL_START_RESULT=0
 
 	if [ "$result" -ne 0 ]; then
-		# rc_procd commits even if start_service returned an error. A
-		# partially staged instance must therefore be removed post-commit.
-		procd_kill proxypool
-		rm -f "$RUNTIME_MARKER"
+		procd_kill proxypool || true
+		# Never use the procd_kill return code as evidence. A failed or
+		# malformed status query leaves all existing markers untouched.
+		state=$(capture_procd_state)
+		[ "$state" = absent ] || return "$result"
 		return "$result"
 	fi
 
 	case "$pending" in
-		"")
-			# Disabled starts submit an empty service-set and leave no marker.
-			rm -f "$RUNTIME_MARKER"
-			;;
-		v1)
-			if ! legacy_start; then
-				rm -f "$RUNTIME_MARKER"
-				return 1
+		disable)
+		state=$(capture_procd_state)
+		[ "$state" = absent ] || return 1
+		clear_backend_evidence
+		;;
+		start_v1)
+		state=$(capture_procd_state)
+		[ "$state" = absent ] || return 1
+		if legacy_start; then result=0; else result=$?; fi
+		if [ "$result" -ne 0 ]; then
+			if legacy_stop; then rollback_result=0; else rollback_result=$?; fi
+			if [ "$rollback_result" -ne 0 ]; then
+				record_v1_cleanup_required
 			fi
-			if ! write_runtime_backend v1; then
-				legacy_stop || true
-				rm -f "$RUNTIME_MARKER"
-				return 1
+			return "$result"
+		fi
+		if ! write_runtime_backend v1; then
+			if ! legacy_stop; then
+				record_v1_cleanup_required
 			fi
-			;;
-		v2_shadow)
+			return 1
+		fi
+		rm -f "$QUARANTINE_MARKER" "$TRANSITION_MARKER" "$ACTIVE_SNAPSHOT_MARKER"
+		;;
+		start_v2)
+			state=$(capture_procd_state "$PROXYPOOL_PENDING_INSTANCE")
+			[ "$state" = present ] || return 1
 			if ! write_runtime_backend v2_shadow; then
-				# The procd set has committed, so procd_kill is safe here.
-				procd_kill proxypool
-				rm -f "$RUNTIME_MARKER"
+				procd_kill proxypool || true
+				state=$(capture_procd_state)
+				[ "$state" = absent ] || return 1
 				return 1
 			fi
-			;;
+			write_line_atomically "$ACTIVE_SNAPSHOT_MARKER" "$PROXYPOOL_PENDING_SNAPSHOT" || return 1
+		rm -f "$QUARANTINE_MARKER" "$TRANSITION_MARKER"
+		;;
 		*)
-			rm -f "$RUNTIME_MARKER"
 			return 1
 			;;
 	esac
+	return 0
 }
 
 stop_service() {
-	local previous runtime_backend
+	local previous
+	PROXYPOOL_STOP_CLEAN=0
 	previous=$(read_runtime_backend)
 	case "$previous" in
 		v1)
-			legacy_stop
+			legacy_stop || return 1
 			;;
-		v2_shadow)
-			# rc.common calls procd_kill after stop_service.
-			;;
-		"")
-			# A package upgrade can install this script before a marker exists.
-			config_load proxypool
-			config_get runtime_backend global runtime_backend v1
-			[ "$runtime_backend" = v1 ] && legacy_stop
+		v2_shadow|"")
+			# rc.common performs the procd teardown after this hook.
 			;;
 		*)
-			rm -f "$RUNTIME_MARKER"
+			echo 'ProxyPool stop cannot certify damaged runtime evidence' >&2
 			return 1
 			;;
 	esac
-	rm -f "$RUNTIME_MARKER"
+	PROXYPOOL_STOP_CLEAN=1
+}
+
+service_stopped() {
+	local state
+	if [ "$PROXYPOOL_STOP_CLEAN" = 1 ]; then
+		state=$(capture_procd_state)
+		[ "$state" = absent ] && clear_backend_evidence
+	fi
+	PROXYPOOL_STOP_CLEAN=0
+	return 0
 }
 
 reload_service() {
-	local current enabled previous result
-	config_load proxypool
-	config_get enabled global enabled 1
-	config_get current global runtime_backend v1
+	local previous state result
+	build_desired_snapshot || {
+		echo 'ProxyPool reload blocked: selector/config snapshot is invalid' >&2
+		return 1
+	}
 	previous=$(read_runtime_backend)
-	if [ "$enabled" != "0" ] && [ "$current" = v1 ] && { [ "$previous" = v1 ] || [ -z "$previous" ]; }; then
-		legacy_reload
-		return
-	fi
-	case "$current" in
-		v1|v2_shadow)
-			cleanup_recorded_backend || return 1
-			[ "$enabled" = "0" ] && return 0
-			PROXYPOOL_START_ALREADY_CLEANED=1
-			if start; then result=0; else result=$?; fi
-			PROXYPOOL_START_ALREADY_CLEANED=0
-			return "$result"
+	case "$previous" in
+		v1|v2_shadow) ;;
+		"")
+			PROXYPOOL_START_PREPARED=1
+			PROXYPOOL_START_BACKEND="$PROXYPOOL_DESIRED_BACKEND"
+			PROXYPOOL_START_CLASS="$PROXYPOOL_DESIRED_CLASS"
+			PROXYPOOL_START_ENABLED="$PROXYPOOL_DESIRED_ENABLED"
+			PROXYPOOL_START_SNAPSHOT="$PROXYPOOL_DESIRED_SNAPSHOT"
+			start
+			return
 			;;
 		*)
-			cleanup_recorded_backend || true
+			echo 'ProxyPool reload blocked: runtime evidence is incomplete' >&2
 			return 1
 			;;
 	esac
+	if [ "$previous" != "$PROXYPOOL_DESIRED_BACKEND" ]; then
+		echo "ProxyPool cross-backend transition blocked: actual=$previous desired=$PROXYPOOL_DESIRED_BACKEND" >&2
+		return 1
+	fi
+	state=$(capture_procd_state)
+	[ "$state" != unknown ] || {
+		echo 'ProxyPool reload blocked: procd state is unknown' >&2
+		return 1
+	}
+	if [ "$previous" = v1 ] && [ "$state" != absent ]; then
+		echo 'ProxyPool V1 reload blocked: a procd instance is still present' >&2
+		return 1
+	fi
+
+	if [ "$PROXYPOOL_DESIRED_ENABLED" = 0 ]; then
+		case "$previous" in
+			v1) legacy_stop || return 1 ;;
+			v2_shadow) procd_kill proxypool || true ;;
+		esac
+		state=$(capture_procd_state)
+		[ "$state" = absent ] || return 1
+		clear_backend_evidence
+		return 0
+	fi
+
+	if [ "$previous" = v1 ]; then
+		legacy_reload
+		return
+	fi
+
+	PROXYPOOL_START_PREPARED=1
+	PROXYPOOL_START_BACKEND="$PROXYPOOL_DESIRED_BACKEND"
+	PROXYPOOL_START_CLASS="$PROXYPOOL_DESIRED_CLASS"
+	PROXYPOOL_START_ENABLED="$PROXYPOOL_DESIRED_ENABLED"
+	PROXYPOOL_START_SNAPSHOT="$PROXYPOOL_DESIRED_SNAPSHOT"
+	if start; then result=0; else result=$?; fi
+	PROXYPOOL_START_PREPARED=0
+	return "$result"
+}
+
+service_triggers() {
+	procd_add_reload_trigger proxypool proxypool_v2 proxypool_runtime
 }

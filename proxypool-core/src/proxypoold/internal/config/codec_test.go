@@ -140,6 +140,16 @@ func TestCodecRejectsInvalidGlobalScalarValues(t *testing.T) {
 	assertCode(t, Encode(&encoded, invalid), "invalid_config")
 }
 
+func TestCodecRejectsLegacyRuntimeInOtherwiseValidV2Schema(t *testing.T) {
+	input, err := os.ReadFile("testdata/v2-valid.uci")
+	if err != nil {
+		t.Fatal(err)
+	}
+	input = bytes.Replace(input, []byte("option runtime_backend 'v2_shadow'"), []byte("option runtime_backend 'v1'"), 1)
+	_, err = Decode(bytes.NewReader(input))
+	assertCode(t, err, "invalid_config")
+}
+
 func TestEncodeDecodeRoundTripSpecialUCIValues(t *testing.T) {
 	for name, value := range map[string]string{
 		"apostrophe":         "apostrophe's value",

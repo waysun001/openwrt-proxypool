@@ -1,0 +1,18 @@
+# ProxyPool V2 new-image default. The package conffile remains the legacy V1
+# baseline so opkg upgrades do not silently activate a different backend.
+config global 'global'
+	option schema_version '2'
+	option revision '1'
+	option enabled '1'
+	option runtime_backend 'v2_shadow'
+	option max_nodes '60'
+	option lan_device 'br-lan'
+	list management_port '80'
+	list management_port '443'
+	option l2tp_concurrency '4'
+	option proxy_concurrency '8'
+	option connect_timeout '90s'
+	option stop_timeout '30s'
+	list doh_url 'https://cloudflare-dns.com/dns-query'
+	list doh_bootstrap_ip '1.1.1.1'
+	list doh_server_name 'cloudflare-dns.com'

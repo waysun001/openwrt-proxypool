@@ -440,7 +440,7 @@ func validateCodecConfig(cfg model.DesiredConfig) error {
 		return invalidConfig()
 	}
 	global := cfg.Global
-	if global.RuntimeBackend != "v1" && global.RuntimeBackend != "v2_shadow" {
+	if global.RuntimeBackend != "v2_shadow" {
 		return invalidConfig()
 	}
 	if global.MaxNodes < 1 || global.MaxNodes > 60 || len(cfg.Nodes) > global.MaxNodes || global.LANDevice == "" || global.L2TPConcurrency < 1 || global.ProxyConcurrency < 1 || global.ConnectTimeout <= 0 || global.StopTimeout <= 0 || len(global.ManagementPorts) == 0 || len(global.DoHEndpoints) == 0 {

@@ -20,11 +20,19 @@ for shell_file in \
 	proxypool-core/files/proxypool.init \
 	scripts/check-whitespace-range.sh \
 	scripts/inspect-ipk.sh \
+	scripts/prepare-image-files.sh \
+	scripts/regenerate-sha256sums.sh \
+	scripts/test-artifact-sha256sums.sh \
+	scripts/test-image-files.sh \
+	scripts/test-inspect-ipk.sh \
 	scripts/test-proxypool-init.sh \
 	scripts/test-release-contracts.sh \
 	scripts/test-whitespace-range.sh; do
 	sh -n "$shell_file"
 done
+sh scripts/test-artifact-sha256sums.sh
+sh scripts/test-image-files.sh
+sh scripts/test-inspect-ipk.sh
 sh scripts/test-proxypool-init.sh
 sh scripts/test-release-contracts.sh
 sh scripts/test-whitespace-range.sh
