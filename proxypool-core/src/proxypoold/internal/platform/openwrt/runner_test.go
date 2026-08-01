@@ -68,3 +68,24 @@ func TestRunnerAppliesDeadlineAndDoesNotExposeExecutorError(t *testing.T) {
 		t.Fatalf("Run() leaked executor error: %v", err)
 	}
 }
+
+func TestRunnerPassesBoundedInputWithoutShellInterpolation(t *testing.T) {
+	runner := newRunner(time.Second, 1024, func(context.Context, string, ...string) ([]byte, error) { return nil, nil })
+	var gotInput []byte
+	var gotName string
+	var gotArgs []string
+	runner.input = func(_ context.Context, input []byte, name string, args ...string) ([]byte, error) {
+		gotInput = append([]byte(nil), input...)
+		gotName = name
+		gotArgs = append([]string(nil), args...)
+		return []byte("checked"), nil
+	}
+	input := []byte("add element { aa:bb:cc:dd:ee:ff; $(reboot) }")
+	output, err := runner.RunInput(context.Background(), input, "/usr/sbin/nft", "-c", "-f", "-")
+	if err != nil || string(output) != "checked" {
+		t.Fatalf("RunInput() output/error = %q/%v", output, err)
+	}
+	if string(gotInput) != string(input) || gotName != "/usr/sbin/nft" || !reflect.DeepEqual(gotArgs, []string{"-c", "-f", "-"}) {
+		t.Fatalf("input executor received input/name/args = %q/%q/%q", gotInput, gotName, gotArgs)
+	}
+}

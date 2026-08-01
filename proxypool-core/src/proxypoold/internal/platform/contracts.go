@@ -22,6 +22,11 @@ type CommandRunner interface {
 	Run(context.Context, string, ...string) ([]byte, error)
 }
 
+type InputCommandRunner interface {
+	CommandRunner
+	RunInput(context.Context, []byte, string, ...string) ([]byte, error)
+}
+
 type DeviceSource interface {
 	List(context.Context) ([]DiscoveredDevice, error)
 }
@@ -65,4 +70,35 @@ type NodeAdapter interface {
 type SessionGate interface {
 	Open(context.Context, NodeRequest, Session) error
 	Close(context.Context, NodeRequest, Session) error
+}
+
+type AuthorizationLease struct {
+	NodeID       string
+	MAC          string
+	IPv4         netip.Addr
+	PolicyID     uint16
+	Generation   uint64
+	Protocol     model.Protocol
+	Interface    string
+	RedirectPort uint16
+	ExpiresAt    time.Time
+}
+
+type Authorizer interface {
+	Publish(context.Context, AuthorizationLease) error
+	RevokeNode(context.Context, string, uint64) error
+	RevokeAll(context.Context) error
+}
+
+type RouteLease struct {
+	NodeID     string
+	PolicyID   uint16
+	Generation uint64
+	Interface  string
+}
+
+type RouteManager interface {
+	Install(context.Context, RouteLease) error
+	Verify(context.Context, RouteLease) error
+	Remove(context.Context, RouteLease) error
 }

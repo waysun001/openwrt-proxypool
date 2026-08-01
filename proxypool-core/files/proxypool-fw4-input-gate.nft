@@ -1,1 +1,2 @@
 iifname "br-lan" meta nfproto ipv4 meta mark & 0x00ff0000 == 0x005a0000 meta l4proto tcp ct status dnat accept
+iifname "br-lan" meta nfproto ipv4 ip daddr 192.168.9.1 meta l4proto { tcp, udp } th dport 53 accept

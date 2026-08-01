@@ -1394,12 +1394,28 @@ RUNTIME_GUARD_PREFIX
 	}
 	set v2_l2tp_paths {
 		type ether_addr . ipv4_addr . ifname
+		flags timeout
+		timeout 20s
 	}
 	set v2_l2tp_return_paths {
 		type ipv4_addr . ifname
+		flags timeout
+		timeout 20s
 	}
 	set v2_tcp_redirects {
 		type ether_addr . ipv4_addr . inet_service
+		flags timeout
+		timeout 20s
+	}
+	set v2_dns_clients {
+		type ether_addr . ipv4_addr
+		flags timeout
+		timeout 20s
+	}
+	map v2_policy_marks {
+		type ether_addr . ipv4_addr : mark
+		flags timeout
+		timeout 20s
 	}
 	set blocked_v4_destinations {
 		type ipv4_addr
@@ -1422,12 +1438,14 @@ RUNTIME_GUARD_PREFIX
 	}
 	chain guard_prerouting {
 		type filter hook prerouting priority raw - 10; policy accept;
-		iifname "br-lan" meta mark set meta mark & 0xff00ffff
+		iifname "br-lan" meta mark set meta mark & 0xff000000
+		iifname "br-lan" meta nfproto ipv4 meta mark set ether saddr . ip saddr map @v2_policy_marks
 	}
 	chain guard_input {
 		type filter hook input priority filter + 10; policy drop;
 		iifname "br-lan" meta nfproto ipv4 udp sport 68 udp dport 67 accept
 		iifname "br-lan" meta nfproto ipv4 ip daddr 192.168.9.1 tcp dport { 80, 443 } accept
+		iifname "br-lan" meta nfproto ipv4 ip daddr 192.168.9.1 ether saddr . ip saddr @v2_dns_clients meta l4proto { tcp, udp } th dport 53 accept
 		iifname "br-lan" meta nfproto ipv4 ct original ip daddr @blocked_v4_destinations drop
 		iifname "br-lan" meta nfproto ipv4 meta mark & 0x00ff0000 == 0x005a0000 meta l4proto tcp ct status dnat ip saddr . tcp dport @v1_tcp_redirects accept
 		iifname "br-lan" meta nfproto ipv4 meta mark & 0x00ff0000 == 0x005a0000 meta l4proto tcp ct status dnat ether saddr . ip saddr . tcp dport @v2_tcp_redirects accept
@@ -1477,6 +1495,7 @@ table inet fw4 {
 	chain input {
 		type filter hook input priority filter; policy drop;
 		iifname "br-lan" meta nfproto ipv4 meta mark & 0x00ff0000 == 0x005a0000 meta l4proto tcp ct status dnat accept
+		iifname "br-lan" meta nfproto ipv4 ip daddr 192.168.9.1 meta l4proto { tcp, udp } th dport 53 accept
 		ct state vmap { established : accept, related : accept }
 	}
 	chain forward {
@@ -2062,7 +2081,7 @@ assert_success_state() {
 			[ "$(wc -l <"$activation_marker" | tr -d '[:space:]')" = 5 ] &&
 				grep -Fxq 'schema_version=2' "$activation_marker" &&
 				grep -Fxq 'projection_schema=2' "$activation_marker" &&
-				grep -Fxq 'contract_schema=3' "$activation_marker" ||
+				grep -Fxq 'contract_schema=4' "$activation_marker" ||
 				fail 'live activation marker has an invalid schema'
 			for digest_key in projection_digest contract_digest; do
 				digest=$(sed -n "s/^$digest_key=//p" "$activation_marker")
@@ -2619,7 +2638,7 @@ FOCUSED_NETWORK
 	[ "$(wc -l <"$activation_marker" | tr -d '[:space:]')" = 5 ] &&
 		grep -Fxq schema_version=2 "$activation_marker" &&
 		grep -Fxq projection_schema=2 "$activation_marker" &&
-		grep -Fxq contract_schema=3 "$activation_marker" ||
+		grep -Fxq contract_schema=4 "$activation_marker" ||
 		fail 'focused finalizer did not publish canonical schema-2 authority'
 	marker_backup="$TEST_TMP/activation-helper.marker"
 	cp "$activation_marker" "$marker_backup"

@@ -179,7 +179,7 @@ normalize "$INPUT_GATE" >"$INPUT_NORM"
 normalize "$FORWARD_GATE" >"$FORWARD_NORM"
 tr '\n' ' ' <"$GUARD_NORM" | sed 's/[[:space:]][[:space:]]*/ /g' >"$GUARD_FLAT"
 
-# Reload starts from five empty authorization tuple sets.  The leading empty
+# Reload starts from empty authorization sets/maps.  The leading empty
 # declaration makes delete/recreate idempotent even after a cold boot.
 assert_transaction_order "$GUARD_NORM" inet proxypool_guard
 assert_transaction_order "$GUARD_NORM" bridge proxypool_l2_guard
@@ -194,12 +194,20 @@ require_regex "$GUARD_FLAT" 'set v2_l2tp_return_paths \{[^}]*type ipv4_addr[[:sp
 	'V2 L2TP return authorization is not derived as exact IPv4 and input interface'
 require_regex "$GUARD_FLAT" 'set v2_tcp_redirects \{[^}]*type ether_addr[[:space:]]*\.[[:space:]]*ipv4_addr[[:space:]]*\.[[:space:]]*inet_service[[:space:]]*;' \
 	'V2 proxy authorization is not keyed by exact MAC, IPv4 and listener port'
+require_regex "$GUARD_FLAT" 'set v2_dns_clients \{[^}]*type ether_addr[[:space:]]*\.[[:space:]]*ipv4_addr[[:space:]]*;' \
+	'V2 router DNS admission is not keyed by exact MAC and IPv4'
+require_regex "$GUARD_FLAT" 'map v2_policy_marks \{[^}]*type ether_addr[[:space:]]*\.[[:space:]]*ipv4_addr[[:space:]]*:[[:space:]]*mark[[:space:]]*;' \
+	'V2 policy mark map is not keyed by exact MAC and IPv4'
 
-tuple_count=$(grep -Eo 'set (v1_l2tp_paths|v1_tcp_redirects|v2_l2tp_paths|v2_l2tp_return_paths|v2_tcp_redirects)[[:space:]]*\{' "$GUARD_FLAT" | wc -l | tr -d ' ')
-[ "$tuple_count" -eq 5 ] || fail "expected exactly five named authorization tuple sets, found $tuple_count"
-for tuple_set in v1_l2tp_paths v1_tcp_redirects v2_l2tp_paths v2_l2tp_return_paths v2_tcp_redirects; do
+tuple_count=$(grep -Eo '(set|map) (v1_l2tp_paths|v1_tcp_redirects|v2_l2tp_paths|v2_l2tp_return_paths|v2_tcp_redirects|v2_dns_clients|v2_policy_marks)[[:space:]]*\{' "$GUARD_FLAT" | wc -l | tr -d ' ')
+[ "$tuple_count" -eq 7 ] || fail "expected exactly seven named authorization sets/maps, found $tuple_count"
+for tuple_set in v1_l2tp_paths v1_tcp_redirects v2_l2tp_paths v2_l2tp_return_paths v2_tcp_redirects v2_dns_clients v2_policy_marks; do
 	reject_regex "$GUARD_FLAT" "set $tuple_set \\{[^}]*elements[[:space:]]*=" \
 		"$tuple_set is pre-authorized instead of empty after reload"
+done
+for expiring_set in v2_l2tp_paths v2_l2tp_return_paths v2_tcp_redirects v2_dns_clients v2_policy_marks; do
+	require_regex "$GUARD_FLAT" "(set|map) $expiring_set \\{[^}]*flags timeout[[:space:]]*;[^}]*timeout 20s[[:space:]]*;" \
+		"$expiring_set is not a 20-second crash-expiring lease"
 done
 
 # Guardian is a later, independent base-chain verdict and never joins the V1
@@ -218,26 +226,25 @@ extract_chain "$GUARD_NORM" guard_prerouting "$TEST_TMP/guard-prerouting.block"
 extract_chain "$GUARD_NORM" guard_input "$TEST_TMP/guard-input.block"
 extract_chain "$GUARD_NORM" guard_forward "$TEST_TMP/guard-forward.block"
 extract_chain "$GUARD_NORM" guard_l2_forward "$TEST_TMP/guard-l2-forward.block"
-assert_chain_shape "$TEST_TMP/guard-prerouting.block" 1 0 guard_prerouting
-assert_chain_shape "$TEST_TMP/guard-input.block" 9 7 guard_input
+assert_chain_shape "$TEST_TMP/guard-prerouting.block" 2 0 guard_prerouting
+assert_chain_shape "$TEST_TMP/guard-input.block" 10 8 guard_input
 assert_chain_shape "$TEST_TMP/guard-forward.block" 12 4 guard_forward
 assert_chain_shape "$TEST_TMP/guard-l2-forward.block" 1 0 guard_l2_forward
 require_fixed "$TEST_TMP/guard-prerouting.block" \
 	'type filter hook prerouting priority -310; policy accept;' \
 	'guard_prerouting is not the unique priority -310 mark scrub chain'
 
-# Router input whitelist: DHCP and LuCI HTTP/HTTPS only.  Phase 1 deliberately
-# has no publishable DNS data plane, so TCP/UDP 53 must remain closed even if a
-# legacy dnsmasq instance still has a WAN resolver.  SSH is intentionally
-# absent.  Transparent proxy input remains a separate exact tuple path
+# Router input whitelist: DHCP, LuCI HTTP/HTTPS, and DNS only for a current
+# daemon-owned MAC+IPv4 lease. SSH is intentionally absent. Transparent proxy input remains a separate exact tuple path
 # requiring mark provenance and DNAT provenance together.
 require_rule "$TEST_TMP/guard-input.block" 'missing exact DHCP input allowance' \
 	'iifname "br-lan"' 'meta nfproto ipv4' 'udp sport 68' 'udp dport 67' 'accept'
 require_rule "$TEST_TMP/guard-input.block" 'management input is not limited to TCP 80/443' \
 	'iifname "br-lan"' 'meta nfproto ipv4' 'ip daddr 192.168.9.1' 'tcp dport' '80' '443' 'accept'
 reject_regex "$TEST_TMP/guard-input.block" '(^|[^0-9])22([^0-9]|$)' 'SSH port 22 is present in the LAN input whitelist'
-reject_regex "$TEST_TMP/guard-input.block" 'dport 53([^0-9]|$).*accept' \
-	'Phase-1 guardian exposes router DNS without an owned DNS data plane'
+require_rule "$TEST_TMP/guard-input.block" 'router DNS is not limited to an admitted MAC+IPv4 tuple' \
+	'iifname "br-lan"' 'meta nfproto ipv4' 'ip daddr 192.168.9.1' \
+	'ether saddr . ip saddr @v2_dns_clients' 'tcp, udp' 'th dport 53' 'accept'
 
 while IFS= read -r input_accept; do
 	case "$input_accept" in
@@ -248,6 +255,7 @@ while IFS= read -r input_accept; do
 				*) fail "router service allowance is not bound to the phase-1 management IP: $input_accept" ;;
 			esac
 			;;
+		*'ether saddr . ip saddr @v2_dns_clients'*'th dport 53'*'accept'*) : ;;
 	esac
 done <"$TEST_TMP/guard-input.block"
 
@@ -255,18 +263,22 @@ dhcp_input_line=$(rule_line "$TEST_TMP/guard-input.block" 'missing exact DHCP in
 	'iifname "br-lan"' 'meta nfproto ipv4' 'udp sport 68' 'udp dport 67' 'accept')
 management_input_line=$(rule_line "$TEST_TMP/guard-input.block" 'management input is not limited to TCP 80/443' \
 	'iifname "br-lan"' 'meta nfproto ipv4' 'ip daddr 192.168.9.1' 'tcp dport' '80' '443' 'accept')
+dns_input_line=$(rule_line "$TEST_TMP/guard-input.block" 'router DNS is not limited to an admitted MAC+IPv4 tuple' \
+	'iifname "br-lan"' 'ip daddr 192.168.9.1' 'ether saddr . ip saddr @v2_dns_clients' 'th dport 53' 'accept')
 blocked_input_line=$(rule_line "$TEST_TMP/guard-input.block" \
 	'original special-use destinations can be hidden by transparent DNAT' \
 	'iifname "br-lan"' 'meta nfproto ipv4' 'ct original ip daddr @blocked_v4_destinations' 'drop')
-for whitelist_line in "$dhcp_input_line" "$management_input_line"; do
+for whitelist_line in "$dhcp_input_line" "$management_input_line" "$dns_input_line"; do
 	[ "$whitelist_line" -lt "$blocked_input_line" ] ||
 		fail 'the explicit router whitelist must precede the original-destination safety drop'
 done
 
 MARK_MASK='0x00ff0000'
 MAGIC="meta mark & $MARK_MASK == 0x005a0000"
-require_rule "$TEST_TMP/guard-prerouting.block" 'br-lan prerouting does not clear only the reserved ProxyPool mark bits' \
-	'iifname "br-lan"' 'meta mark set meta mark & 0xff00ffff'
+require_rule "$TEST_TMP/guard-prerouting.block" 'br-lan prerouting does not clear the complete ProxyPool policy mark' \
+	'iifname "br-lan"' 'meta mark set meta mark & 0xff000000'
+require_rule "$TEST_TMP/guard-prerouting.block" 'br-lan prerouting does not derive its mark from the admitted MAC+IPv4 map' \
+	'iifname "br-lan"' 'meta nfproto ipv4' 'meta mark set ether saddr . ip saddr map @v2_policy_marks'
 reject_regex "$TEST_TMP/guard-prerouting.block" 'meta mark set (0x)?0([^0-9a-fA-F]|$)' \
 	'br-lan prerouting clears unrelated mark bits instead of preserving them'
 require_rule "$TEST_TMP/guard-input.block" 'V1 transparent input lacks magic, DNAT or exact IPv4/listener tuple' \
@@ -392,8 +404,11 @@ for gate in "$INPUT_NORM" "$FORWARD_NORM"; do
 done
 require_rule "$INPUT_NORM" 'fw4 input gate is not a single marked IPv4 TCP DNAT candidate accept' \
 	'iifname "br-lan"' 'meta nfproto ipv4' "$MAGIC" 'meta l4proto tcp' 'ct status dnat' 'accept'
-[ "$(grep -c 'accept' "$INPUT_NORM")" -eq 1 ] || fail 'fw4 input gate must contain exactly one candidate accept'
-reject_regex "$INPUT_NORM" '(tcp|th)[[:space:]]+dport|redirect|@v[12]_tcp_redirects' \
+require_rule "$INPUT_NORM" 'fw4 input gate does not pass router DNS candidates to the terminal guardian' \
+	'iifname "br-lan"' 'ip daddr 192.168.9.1' \
+	'meta l4proto' 'tcp, udp' 'th dport 53' 'accept'
+[ "$(grep -c 'accept' "$INPUT_NORM")" -eq 2 ] || fail 'fw4 input gate must contain exactly two candidate accepts'
+reject_regex "$INPUT_NORM" 'redirect|@v[12]_(tcp_redirects|dns_clients)' \
 	'fw4 input gate directly opens a listener instead of deferring exact judgment to guardian'
 require_rule "$FORWARD_NORM" 'fw4 forward gate is not a single marked IPv4 TCP candidate accept' \
 	'iifname "br-lan"' 'meta nfproto ipv4' "$MAGIC" 'meta l4proto tcp' 'accept'

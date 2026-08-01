@@ -83,10 +83,10 @@ fi
 # an older permissive chain even when the installed source file is correct.
 for verifier_contract in \
 	'expected["guard_input",1]="type filter hook input priority filter + 10; policy drop;"' \
-	'expected["guard_input",8]="iifname \"lo\" accept"' \
-	'expected["guard_input",9]="ct state established,related accept"' \
-	'expected["guard_input",10]="iifname \"eth1\" meta nfproto ipv4 udp sport 67 udp dport 68 accept"' \
-	'maximum["guard_input"]=10' \
+	'expected["guard_input",9]="iifname \"lo\" accept"' \
+	'expected["guard_input",10]="ct state established,related accept"' \
+	'expected["guard_input",11]="iifname \"eth1\" meta nfproto ipv4 udp sport 67 udp dport 68 accept"' \
+	'maximum["guard_input"]=11' \
 	'expected["guard_forward",1]="type filter hook forward priority filter + 10; policy drop;"' \
 	'expected="type filter hook forward priority 10; policy drop;"'; do
 	grep -Fq "$verifier_contract" "$TRANSACTION" ||
