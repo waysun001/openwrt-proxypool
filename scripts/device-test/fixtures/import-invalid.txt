@@ -1,0 +1,5 @@
+missing-fields
+vpn.invalid|70000|user|password
+vpn.invalid|1701|user|password|2030-99-99
+vpn.invalid|1701|user|password
+vpn.invalid|1701|user|password

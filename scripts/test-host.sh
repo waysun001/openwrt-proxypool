@@ -71,10 +71,12 @@ for shell_file in \
 	scripts/test-proxypool-guard.sh \
 	scripts/test-proxypool-init.sh \
 	scripts/test-release-contracts.sh \
+	scripts/test-round3-hardware-contract.sh \
 	scripts/test-status-readonly.sh \
 	scripts/test-v2-l2tp-adapter.sh \
 	scripts/test-v2-live-integration.sh \
 	scripts/test-v2-migration.sh \
+	scripts/test-v2-phase5-gates.sh \
 	scripts/test-whitespace-range.sh; do
 	sh -n "$shell_file"
 done
@@ -96,10 +98,12 @@ sh scripts/test-proxypool-dns-admission.sh
 sh scripts/test-proxypool-guard.sh
 sh scripts/test-proxypool-init.sh
 sh scripts/test-release-contracts.sh
+sh scripts/test-round3-hardware-contract.sh
 sh scripts/test-status-readonly.sh
 sh scripts/test-v2-l2tp-adapter.sh
 sh scripts/test-v2-live-integration.sh
 sh scripts/test-v2-migration.sh
+sh scripts/test-v2-phase5-gates.sh
 sh scripts/test-whitespace-range.sh
 git diff --check
 

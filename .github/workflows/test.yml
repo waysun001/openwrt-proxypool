@@ -37,6 +37,12 @@ jobs:
       - name: Race tests, vet, shell contracts
         run: ./scripts/test-host.sh
 
+      - name: Phase 5 static and 40-60-node hardware-test gates
+        run: sh ./scripts/test-v2-phase5-gates.sh
+
+      - name: Integrated fail-closed contracts
+        run: sh ./tests/integration/fail_closed_test.sh
+
       - name: Check event commit range whitespace
         env:
           EVENT_NAME: ${{ github.event_name }}

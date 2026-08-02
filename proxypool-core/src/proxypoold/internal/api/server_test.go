@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -130,9 +132,18 @@ func shortTempDir(t *testing.T) string {
 
 func exchange(t *testing.T, path string, payload []byte) api.Response {
 	t.Helper()
-	c, err := net.Dial("unix", path)
-	if err != nil {
-		t.Fatalf("Dial() error = %v", err)
+	var c net.Conn
+	var err error
+	deadline := time.Now().Add(time.Second)
+	for {
+		c, err = net.Dial("unix", path)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, syscall.ECONNREFUSED) || time.Now().After(deadline) {
+			t.Fatalf("Dial() error = %v", err)
+		}
+		time.Sleep(time.Millisecond)
 	}
 	defer c.Close()
 	if _, err := c.Write(payload); err != nil {
