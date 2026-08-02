@@ -50,6 +50,7 @@ fi
 cat >"$inspect_tmp/expected-payload" <<'EOF'
 etc/uci-defaults/luci-proxypool
 usr/lib/lua/luci/controller/proxypool.lua
+usr/lib/lua/luci/model/proxypool_rpc.lua
 usr/lib/lua/luci/view/proxypool/lease.htm
 usr/lib/lua/luci/view/proxypool/locked.htm
 usr/lib/lua/luci/view/proxypool/main.htm
@@ -80,6 +81,7 @@ require_mode() {
 require_mode etc/uci-defaults/luci-proxypool 755
 for relative in \
 	usr/lib/lua/luci/controller/proxypool.lua \
+	usr/lib/lua/luci/model/proxypool_rpc.lua \
 	usr/lib/lua/luci/view/proxypool/lease.htm \
 	usr/lib/lua/luci/view/proxypool/locked.htm \
 	usr/lib/lua/luci/view/proxypool/main.htm \

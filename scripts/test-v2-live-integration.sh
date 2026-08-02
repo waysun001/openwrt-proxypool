@@ -8,6 +8,7 @@ SCHEDULER="$ROOT/proxypool-core/src/proxypoold/internal/engine/scheduler.go"
 GATES="$ROOT/proxypool-core/src/proxypoold/internal/live/gates.go"
 INIT="$ROOT/proxypool-core/files/proxypool.init"
 LUCI="$ROOT/luci-app-proxypool/luasrc/controller/proxypool.lua"
+LUCI_RPC="$ROOT/luci-app-proxypool/luasrc/model/proxypool_rpc.lua"
 VIEW="$ROOT/luci-app-proxypool/luasrc/view/proxypool/main.htm"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -34,11 +35,12 @@ case "$live_line" in *--shadow*) fail 'OpenWrt init still launches shadow mode' 
 for forbidden in proxypool.sh l2tp-manager.sh socks5-manager.sh slp-manager.sh 'luci.model.uci' 'os.execute'; do
 	if grep -Fq "$forbidden" "$LUCI"; then fail "LuCI directly invokes forbidden path: $forbidden"; fi
 done
-for contract in 'nixio.socket("unix", "stream")' 'device.bind' 'device.unbind' 'node.action' 'import.preview' 'import.commit' 'job.get' 'job.list'; do
+for contract in 'device.bind' 'device.unbind' 'node.action' 'node.save' 'node.delete' 'import.preview' 'import.commit' 'job.get' 'job.list' 'post("api_write")'; do
 	require "$LUCI" "$contract" "LuCI is missing control contract: $contract"
 done
-require "$LUCI" 'socket:setopt("socket", "sndtimeo", 12, 0)' 'LuCI control writes can hang without a deadline'
-require "$LUCI" 'socket:setopt("socket", "rcvtimeo", 12, 0)' 'LuCI control reads can hang without a deadline'
+require "$LUCI_RPC" 'nixio.socket("unix", "stream")' 'LuCI RPC bridge does not use a Unix socket'
+require "$LUCI_RPC" 'socket:setopt("socket", "sndtimeo", TIMEOUT_SECONDS, 0)' 'LuCI control writes can hang without a deadline'
+require "$LUCI_RPC" 'socket:setopt("socket", "rcvtimeo", TIMEOUT_SECONDS, 0)' 'LuCI control reads can hang without a deadline'
 require "$VIEW" '页面只使用一个轮询器' 'LuCI does not expose bounded job polling'
 require "$VIEW" 'MAC 自动识别，无需手工输入' 'LuCI does not expose automatic device discovery'
 

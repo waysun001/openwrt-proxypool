@@ -124,13 +124,15 @@ run_denied watchdog_run "$STAGE/watchdog.sh" run
 # LuCI no longer exposes any retained V1 mutation entry. All V2 reads and
 # writes cross the bounded local daemon protocol.
 CONTROLLER="$ROOT/luci-app-proxypool/luasrc/controller/proxypool.lua"
+RPC="$ROOT/luci-app-proxypool/luasrc/model/proxypool_rpc.lua"
 for forbidden in proxypool.sh l2tp-manager.sh socks5-manager.sh slp-manager.sh 'luci.model.uci' 'os.execute' 'luci.sys'; do
 	if grep -Fq "$forbidden" "$CONTROLLER"; then
 		fail "LuCI controller still reaches legacy or direct mutation path: $forbidden"
 	fi
 done
-for required in 'nixio.socket("unix", "stream")' 'status.get' 'device.bind' 'device.unbind' 'node.action' 'job.get' 'job.list' 'dispatcher.test_post_security()'; do
+for required in 'status.get' 'device.bind' 'device.unbind' 'node.action' 'job.get' 'job.list' 'post("api_write")'; do
 	grep -Fq "$required" "$CONTROLLER" || fail "LuCI controller is missing V2 control contract: $required"
 done
+grep -Fq 'nixio.socket("unix", "stream")' "$RPC" || fail 'LuCI RPC bridge does not use the fixed Unix socket protocol'
 
 echo 'PASS: legacy scripts remain quarantined and LuCI uses only the V2 daemon API'

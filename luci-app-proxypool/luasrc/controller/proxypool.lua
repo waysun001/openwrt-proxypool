@@ -1,24 +1,31 @@
 module("luci.controller.proxypool", package.seeall)
 
-local SOCKET = "/var/run/proxypoold.sock"
-local MAX_RESPONSE = 1024 * 1024
+local MAX_IMPORT_SIZE = 1024 * 1024
 
-local ACTIONS = {
-    status = { method = "status.get", mutation = false },
-    devices = { method = "device.list", mutation = false },
-    jobs = { method = "job.list", mutation = false },
-    job = { method = "job.get", mutation = false },
-    events = { method = "system.events", mutation = false },
-    bind = { method = "device.bind", mutation = true },
-    unbind = { method = "device.unbind", mutation = true },
-    node_action = { method = "node.action", mutation = true },
-    import_preview = { method = "import.preview", mutation = true },
-    import_commit = { method = "import.commit", mutation = true }
+local READ_ACTIONS = {
+    status = "status.get",
+    devices = "device.list",
+    jobs = "job.list",
+    job = "job.get",
+    events = "system.events"
+}
+
+local WRITE_ACTIONS = {
+    bind = "device.bind",
+    unbind = "device.unbind",
+    node_save = "node.save",
+    node_delete = "node.delete",
+    node_action = "node.action",
+    import_preview = "import.preview",
+    import_commit = "import.commit"
 }
 
 function index()
     entry({"admin", "services", "proxypool"}, call("main_page"), _("ProxyPool"), 1).dependent = false
-    entry({"admin", "services", "proxypool", "api"}, call("api_handler")).leaf = true
+    entry({"admin", "services", "proxypool", "locked"}, call("locked_page")).leaf = true
+    entry({"admin", "services", "proxypool", "lease"}, call("lease_page")).leaf = true
+    entry({"admin", "services", "proxypool", "api", "read"}, call("api_read")).leaf = true
+    entry({"admin", "services", "proxypool", "api", "write"}, post("api_write")).leaf = true
     entry({"admin"}, alias("admin", "services", "proxypool"), _("Administration"), 10).index = true
 end
 
@@ -26,20 +33,17 @@ function main_page()
     require("luci.template").render("proxypool/main", {})
 end
 
-local function request_id()
-    local file = io.open("/proc/sys/kernel/random/uuid", "r")
-    local value
-    if file then
-        value = file:read("*l")
-        file:close()
-    end
-    value = tostring(value or (tostring(os.time()) .. "-" .. tostring(math.random(100000, 999999))))
-    value = value:gsub("[^A-Za-z0-9_-]", "")
-    return "luci-" .. value:sub(1, 64)
+function locked_page()
+    require("luci.template").render("proxypool/locked", {})
 end
 
-local function exact_id(value)
+function lease_page()
+    require("luci.template").render("proxypool/lease", {})
+end
+
+local function exact_id(value, optional)
     value = tostring(value or "")
+    if optional and value == "" then return "" end
     if #value < 1 or #value > 64 or not value:match("^[A-Za-z0-9_-]+$") then return nil end
     return value
 end
@@ -50,13 +54,32 @@ local function exact_revision(value)
     return number
 end
 
+local function exact_integer(value, minimum, maximum)
+    local number = tonumber(value)
+    if not number or number < minimum or number > maximum or number ~= math.floor(number) then return nil end
+    return number
+end
+
+local function exact_boolean(value)
+    value = tostring(value or "")
+    if value == "1" or value == "true" then return true end
+    if value == "0" or value == "false" then return false end
+    return nil
+end
+
 local function exact_hash(value)
     value = tostring(value or "")
     if #value ~= 64 or not value:match("^[a-f0-9]+$") then return nil end
     return value
 end
 
-local function params_for(action, http)
+local function bounded(value, maximum, required)
+    value = tostring(value or "")
+    if (required and #value == 0) or #value > maximum then return nil end
+    return value
+end
+
+local function read_params(action, http)
     if action == "status" or action == "devices" or action == "jobs" then return {} end
     if action == "job" then
         local job = exact_id(http.formvalue("job_id"))
@@ -64,27 +87,61 @@ local function params_for(action, http)
         return { job_id = job }
     end
     if action == "events" then
-        local after = tonumber(http.formvalue("after_sequence") or "0")
-        local limit = tonumber(http.formvalue("limit") or "100")
-        if not after or after < 0 or after ~= math.floor(after) or not limit or limit < 1 or limit > 200 or limit ~= math.floor(limit) then return nil end
+        local after = exact_integer(http.formvalue("after_sequence") or "0", 0, 9007199254740991)
+        local limit = exact_integer(http.formvalue("limit") or "100", 1, 200)
+        if not after or not limit then return nil end
         return { after_sequence = after, limit = limit }
     end
+    return nil
+end
+
+local function node_save_params(http)
+    local node = exact_id(http.formvalue("node_id"), true)
+    local name = bounded(http.formvalue("name"), 128, true)
+    local protocol = tostring(http.formvalue("protocol") or "")
+    local enabled = exact_boolean(http.formvalue("enabled"))
+    local server = bounded(http.formvalue("server"), 253, true)
+    local port = exact_integer(http.formvalue("port"), 1, 65535)
+    local username = bounded(http.formvalue("username"), 1024, false)
+    local password = bounded(http.formvalue("password"), 4096, false)
+    local expires = bounded(http.formvalue("expires_at"), 32, false)
+    local revision = exact_revision(http.formvalue("expected_revision"))
+    if node == nil or not name or (protocol ~= "l2tp" and protocol ~= "socks5" and protocol ~= "slp") or
+        enabled == nil or not server or not port or username == nil or password == nil or expires == nil or not revision then
+        return nil
+    end
+    return {
+        node_id = node,
+        name = name,
+        protocol = protocol,
+        enabled = enabled,
+        server = server,
+        port = port,
+        username = username,
+        password = password,
+        expires_at = expires,
+        expected_revision = revision
+    }
+end
+
+local function write_params(action, http)
+    if action == "node_save" then return node_save_params(http) end
+
+    local revision = exact_revision(http.formvalue("expected_revision"))
     if action == "import_preview" then
         local protocol = tostring(http.formvalue("protocol") or "")
         local raw = tostring(http.formvalue("raw") or "")
-        local revision = exact_revision(http.formvalue("expected_revision"))
         if (protocol ~= "l2tp" and protocol ~= "socks5" and protocol ~= "slp") or
-            #raw < 1 or #raw > MAX_RESPONSE or not revision then return nil end
+            #raw < 1 or #raw > MAX_IMPORT_SIZE or not revision then return nil end
         return { protocol = protocol, raw = raw, expected_revision = revision }
     end
     if action == "import_commit" then
         local preview = exact_id(http.formvalue("preview_id"))
         local hash = exact_hash(http.formvalue("preview_hash"))
-        local revision = exact_revision(http.formvalue("expected_revision"))
         if not preview or not hash or not revision then return nil end
         return { preview_id = preview, preview_hash = hash, expected_revision = revision }
     end
-    local revision = exact_revision(http.formvalue("expected_revision"))
+
     local device = exact_id(http.formvalue("device_id"))
     if action == "bind" then
         local node = exact_id(http.formvalue("node_id"))
@@ -95,98 +152,71 @@ local function params_for(action, http)
         if not revision or not device then return nil end
         return { device_id = device, expected_revision = revision }
     end
+    if action == "node_delete" then
+        local node = exact_id(http.formvalue("node_id"))
+        if not revision or not node then return nil end
+        return { node_id = node, expected_revision = revision }
+    end
     if action == "node_action" then
         local node = exact_id(http.formvalue("node_id"))
         local operation = tostring(http.formvalue("operation") or "")
-        if not revision or not node or (operation ~= "connect" and operation ~= "reconnect" and operation ~= "stop") then return nil end
+        if not revision or not node or
+            (operation ~= "connect" and operation ~= "reconnect" and operation ~= "stop") then return nil end
         return { node_id = node, action = operation, expected_revision = revision }
     end
     return nil
 end
 
-local function daemon_call(method, params)
-    local json = require "luci.jsonc"
-    local nixio = require "nixio"
-    local id = request_id()
-    local payload = json.stringify({ version = 1, id = id, method = method, params = params })
-    if type(payload) ~= "string" or #payload > MAX_RESPONSE then
-        return nil, { code = "invalid_request", message = "request encoding failed" }
-    end
-    local socket = nixio.socket("unix", "stream")
-    if not socket or not socket:setopt("socket", "sndtimeo", 12, 0) or
-        not socket:setopt("socket", "rcvtimeo", 12, 0) or not socket:connect(SOCKET) then
-        if socket then socket:close() end
-        return nil, { code = "service_unavailable", message = "proxypoold is unavailable" }
-    end
-    if not socket:sendall(payload .. "\n") then
-        socket:close()
-        return nil, { code = "service_unavailable", message = "control request failed" }
-    end
-    local chunks, size, complete = {}, 0, false
-    while size <= MAX_RESPONSE do
-        local chunk = socket:recv(4096)
-        if not chunk or #chunk == 0 then break end
-        local newline = chunk:find("\n", 1, true)
-        if newline then
-            chunk = chunk:sub(1, newline - 1)
-            complete = true
-        end
-        size = size + #chunk
-        chunks[#chunks + 1] = chunk
-        if complete then break end
-    end
-    socket:close()
-    if not complete or size > MAX_RESPONSE then
-        return nil, { code = "service_unavailable", message = "control response failed" }
-    end
-    local response = json.parse(table.concat(chunks))
-    if type(response) ~= "table" or response.version ~= 1 or response.id ~= id or (response.result == nil) == (response.error == nil) then
-        return nil, { code = "service_unavailable", message = "control response is invalid" }
-    end
-    if response.error then return nil, response.error end
-    return response.result, nil
+local function write_json(http, json, value)
+    http.prepare_content("application/json")
+    http.write(json.stringify(value))
 end
 
 local function write_error(http, json, err)
-    local code = tostring((err or {}).code or "service_unavailable")
-    local status = 503
-    if code == "revision_conflict" or code == "duplicate" then status = 409
-    elseif code == "invalid_request" or code == "invalid_config" or code == "unsupported" then status = 422
-    elseif code == "not_found" then status = 404 end
+    err = err or {}
+    local code = tostring(err.code or "bad_gateway")
+    local status = tonumber(err.http_status) or 502
     http.status(status, "ProxyPool API Error")
-    http.prepare_content("application/json")
-    http.write(json.stringify({ success = false, error = { code = code, message = tostring((err or {}).message or "request failed") } }))
+    write_json(http, json, {
+        success = false,
+        error = {
+            code = code,
+            message = tostring(err.message or "request failed")
+        }
+    })
 end
 
-function api_handler()
+local function dispatch_action(actions, parameter_builder)
     local http = require "luci.http"
     local json = require "luci.jsonc"
-    local dispatcher = require "luci.dispatcher"
+    local rpc = require "luci.model.proxypool_rpc"
     local action = tostring(http.formvalue("action") or "")
-    local definition = ACTIONS[action]
-    if not definition then
-        return write_error(http, json, { code = "not_found", message = "unknown action" })
+    local method = actions[action]
+    if not method then
+        return write_error(http, json, { code = "not_found", message = "unknown action", http_status = 404 })
     end
-    if definition.mutation then
-        if http.getenv("REQUEST_METHOD") ~= "POST" then
-            http.status(405, "Method Not Allowed")
-            http.prepare_content("application/json")
-            http.write(json.stringify({ success = false, error = { code = "invalid_request", message = "POST is required" } }))
-            return
-        end
-        if not dispatcher.test_post_security() then
-            http.status(403, "Forbidden")
-            http.prepare_content("application/json")
-            http.write(json.stringify({ success = false, error = { code = "invalid_request", message = "security token failed" } }))
-            return
-        end
-    end
-    local params = params_for(action, http)
+    local params = parameter_builder(action, http)
     if not params then
-        return write_error(http, json, { code = "invalid_request", message = "request parameters are invalid" })
+        return write_error(http, json, { code = "invalid_request", message = "request parameters are invalid", http_status = 400 })
     end
-    local result, err = daemon_call(definition.method, params)
+    local result, err = rpc.call(method, params)
     if err then return write_error(http, json, err) end
-    http.prepare_content("application/json")
-    http.write(json.stringify({ success = true, result = result }))
+    write_json(http, json, { success = true, result = result })
+end
+
+function api_read()
+    local http = require "luci.http"
+    if http.getenv("REQUEST_METHOD") ~= "GET" then
+        http.header("Allow", "GET")
+        return write_error(http, require("luci.jsonc"), {
+            code = "invalid_request",
+            message = "GET is required",
+            http_status = 405
+        })
+    end
+    return dispatch_action(READ_ACTIONS, read_params)
+end
+
+function api_write()
+    return dispatch_action(WRITE_ACTIONS, write_params)
 end

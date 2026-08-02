@@ -375,132 +375,11 @@ test_internal_enforcement_reports_safe_convergence() {
 }
 
 test_luci_actions_stop_on_dns_rejection() {
-	node - "$MAIN_VIEW" <<'NODE'
-const fs = require('fs');
-const vm = require('vm');
-
-const source = fs.readFileSync(process.argv[2], 'utf8');
-
-function extractFunction(name) {
-    const marker = 'function ' + name + '(';
-    const start = source.indexOf(marker);
-    if (start < 0) throw new Error('missing function: ' + name);
-    const body = source.indexOf('{', start);
-    let depth = 0;
-    let quote = null;
-    let escaped = false;
-    let lineComment = false;
-    let blockComment = false;
-    for (let i = body; i < source.length; i++) {
-        const ch = source[i];
-        const next = source[i + 1];
-        if (lineComment) {
-            if (ch === '\n') lineComment = false;
-            continue;
-        }
-        if (blockComment) {
-            if (ch === '*' && next === '/') { blockComment = false; i++; }
-            continue;
-        }
-        if (quote) {
-            if (escaped) { escaped = false; continue; }
-            if (ch === '\\') { escaped = true; continue; }
-            if (ch === quote) quote = null;
-            continue;
-        }
-        if (ch === '/' && next === '/') { lineComment = true; i++; continue; }
-        if (ch === '/' && next === '*') { blockComment = true; i++; continue; }
-        if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
-        if (ch === '{') depth++;
-        if (ch === '}' && --depth === 0) return source.slice(start, i + 1);
-    }
-    throw new Error('unterminated function: ' + name);
-}
-
-function makeContext() {
-    const state = { calls: 0, probes: 0, pending: {}, alerts: [] };
-    const context = {
-        Promise,
-        Error,
-        console: { error: function() {}, log: function() {} },
-        apiUrl: '/api',
-        pendingActions: state.pending,
-        _seqConnecting: false,
-        _seqConnectAbort: false,
-        fetch: function() {
-            state.calls++;
-            return Promise.resolve({
-                ok: true,
-                text: function() {
-                    return Promise.resolve(JSON.stringify({
-                        success: false,
-                        error: 'dns_path_unavailable',
-                        dns_path_status: 'dns_path_unavailable',
-                        internet_ready: false
-                    }));
-                }
-            });
-        },
-        setPendingState: function(id) { state.pending[id] = true; },
-        clearPendingState: function(id) { delete state.pending[id]; },
-        updateClientLocalState: function() {},
-        renderClients: function() {},
-        refreshStatusFull: function() {},
-        schedulePostOpProbe: function() { state.probes++; },
-        alert: function(message) { state.alerts.push(String(message)); }
-    };
-    vm.createContext(context);
-    vm.runInContext([
-        extractFunction('safeJson'),
-        extractFunction('requireActionSuccess'),
-        extractFunction('isDnsPathUnavailableError'),
-        extractFunction('showActionFailure'),
-        extractFunction('toggleClient'),
-        extractFunction('startClient'),
-        extractFunction('sequentialConnect'),
-        extractFunction('reloadConfig')
-    ].join('\n'), context);
-    return { context, state };
-}
-
-function settle() {
-    return new Promise(function(resolve) { setImmediate(resolve); })
-        .then(function() { return new Promise(function(resolve) { setImmediate(resolve); }); });
-}
-
-(async function() {
-    let fixture = makeContext();
-    fixture.context.toggleClient('toggle-a', true);
-    await settle();
-    if (fixture.state.probes !== 0) throw new Error('toggle scheduled a probe after DNS rejection');
-    if (Object.keys(fixture.state.pending).length !== 0) throw new Error('toggle left pending state after DNS rejection');
-
-    fixture = makeContext();
-    fixture.context.startClient('start-a');
-    await settle();
-    if (fixture.state.probes !== 0) throw new Error('start scheduled a probe after DNS rejection');
-    if (Object.keys(fixture.state.pending).length !== 0) throw new Error('start left pending state after DNS rejection');
-
-    fixture = makeContext();
-    fixture.context.sequentialConnect(['seq-a', 'seq-b', 'seq-c']);
-    await settle();
-    if (fixture.state.calls !== 1) throw new Error('sequential queue continued after DNS rejection');
-    if (fixture.context._seqConnecting !== false || fixture.context._seqConnectAbort !== true) {
-        throw new Error('sequential queue did not enter an aborted terminal state');
-    }
-    if (Object.keys(fixture.state.pending).length !== 0) throw new Error('sequential queue left pending state after DNS rejection');
-
-    fixture = makeContext();
-    fixture.context.reloadConfig();
-    await settle();
-    if (!fixture.state.alerts.some(function(message) { return message.indexOf('DNS') >= 0; })) {
-        throw new Error('reload rejection did not show an explicit DNS reason');
-    }
-})().catch(function(error) {
-    console.error(error && error.stack ? error.stack : error);
-    process.exit(1);
-});
-NODE
+	grep -Fq 'apiRead=' "$MAIN_VIEW" || fail 'LuCI page does not use the read-only daemon route' || return 1
+	grep -Fq 'apiWrite=' "$MAIN_VIEW" || fail 'LuCI page does not use the CSRF-protected write route' || return 1
+	if grep -Fq 'sequentialConnect' "$MAIN_VIEW"; then
+		fail 'LuCI still drives sequential node connection from the browser' || return 1
+	fi
 }
 
 test_shell_status_reports_dns_and_endpoint_limits() {
@@ -527,39 +406,17 @@ test_shell_status_reports_dns_and_endpoint_limits() {
 }
 
 test_luci_status_contract_exposes_dns_failure() {
-	grep -Fq 'dns_path_status = DNS_PATH_UNAVAILABLE' "$LUCI_CONTROLLER" ||
-		fail 'LuCI generated status omits the DNS path status' || return 1
-	grep -Fq 'internet_ready = false' "$LUCI_CONTROLLER" ||
-		fail 'LuCI generated status does not deny internet readiness' || return 1
-	grep -Fq 'endpoint_resolution = _endpoint_resolution_status(server)' "$LUCI_CONTROLLER" ||
-		fail 'LuCI client status omits endpoint resolution safety' || return 1
-	grep -Fq '"dns_path_status":"dns_path_unavailable"' "$LUCI_CONTROLLER" ||
-		fail 'LuCI fallback/locked status omits dns_path_unavailable' || return 1
-	if grep -Fq '/etc/init.d/dnsmasq restart' "$LUCI_CONTROLLER"; then
-		fail 'LuCI bypasses the fail-closed DNS manager when changing DHCP lease time' || return 1
-	fi
-	grep -Fq 'data.internet_ready === false' "$GLOBAL_JS" ||
-		fail 'global menu does not consume internet_ready=false' || return 1
-	grep -Fq 'dns_path_unavailable' "$GLOBAL_JS" ||
-		fail 'global menu does not render the unavailable DNS reason' || return 1
-	grep -Fq 'currentInternetReady = data.internet_ready !== false' "$MAIN_VIEW" ||
-		fail 'main page does not consume internet_ready=false' || return 1
-	grep -Fq 'DNS路径不可用' "$MAIN_VIEW" ||
-		fail 'client rows do not expose the unavailable DNS path' || return 1
-	blocked_actions=$(grep -Fc 'reject_dns_unavailable(); return' "$LUCI_CONTROLLER" 2>/dev/null || true)
-	[ "$blocked_actions" -ge 7 ] ||
-		fail 'LuCI start/enable/restart/import/reload paths are not synchronously DNS-blocked' || return 1
-	grep -Fq 'local function _find_unique_lan_dhcp_section(uci_c)' "$LUCI_CONTROLLER" ||
-		fail 'LuCI DHCP lease operations do not resolve the LAN DHCP section safely' || return 1
-	grep -Fq 'uci_c:foreach("dhcp", "dhcp", function(section)' "$LUCI_CONTROLLER" ||
-		fail 'LuCI DHCP lease lookup does not enumerate typed DHCP sections' || return 1
-	grep -Fq 'if match_count ~= 1 then return nil end' "$LUCI_CONTROLLER" ||
-		fail 'LuCI DHCP lease lookup does not reject missing or duplicate LAN sections' || return 1
-	if grep -Eq 'uci:(get|set)\("dhcp", "lan", "leasetime"' "$LUCI_CONTROLLER"; then
-		fail 'LuCI DHCP lease operations still hard-code the dhcp.lan section' || return 1
-	fi
-	grep -Fq 'if not uci:set("dhcp", dhcp_section, "leasetime", leasetime) then' "$LUCI_CONTROLLER" ||
-		fail 'LuCI DHCP lease setter does not check the UCI set result'
+	grep -Fq 'status = "status.get"' "$LUCI_CONTROLLER" ||
+		fail 'LuCI status no longer comes from the fail-closed daemon' || return 1
+	grep -Fq 'post("api_write")' "$LUCI_CONTROLLER" ||
+		fail 'LuCI mutations bypass dispatcher POST security' || return 1
+	for forbidden in dnsmasq dns-manager.sh 'luci.model.uci' 'uci:set' 'uci:commit' 'os.execute'; do
+		if grep -Fq "$forbidden" "$LUCI_CONTROLLER"; then
+			fail "LuCI directly mutates DNS or UCI state: $forbidden" || return 1
+		fi
+	done
+	grep -Fq '/api/read?action=status' "$GLOBAL_JS" ||
+		fail 'global menu does not use the read-only V2 status route'
 }
 
 failures=0

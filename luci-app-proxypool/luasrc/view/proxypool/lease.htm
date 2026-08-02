@@ -6,54 +6,17 @@
     background: #fff; border: 1px solid #e8eaed; border-radius: 8px;
     box-shadow: 0 1px 3px rgba(0,0,0,0.08); padding: 24px;
 }
-.pp-lease-card h2 { margin: 0 0 4px; font-size: 18px; color: #1a1a2e; }
-.pp-lease-sub { color: #80868b; font-size: 13px; margin-bottom: 18px; }
-.pp-lease-row {
-    display: flex; justify-content: space-between; padding: 9px 0;
-    border-bottom: 1px solid #f0f0f0; font-size: 14px;
-}
-.pp-lease-row .k { color: #5f6368; }
-.pp-lease-row .v { color: #1a1a2e; font-weight: 500; }
-.pp-lease-row .v.expired { color: #d93025; }
-.pp-lease-form { margin-top: 20px; display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
-.pp-lease-form label { display: block; font-size: 13px; color: #5f6368; margin-bottom: 6px; }
-.pp-lease-form input[type=number] {
-    padding: 8px 10px; border: 1px solid #dadce0; border-radius: 6px; font-size: 14px; width: 160px;
-}
-.pp-lease-btn {
-    padding: 9px 20px; border: none; border-radius: 6px; cursor: pointer;
-    font-size: 14px; font-weight: 500; background: #1a73e8; color: #fff;
-}
-.pp-lease-btn:hover { background: #1557b0; }
-.pp-lease-hint { margin-top: 12px; font-size: 12px; color: #80868b; }
-.pp-lease-msg { padding: 10px 14px; border-radius: 6px; font-size: 14px; margin-bottom: 16px; }
-.pp-lease-msg.ok { background: #e6f4ea; color: #137333; }
-.pp-lease-msg.error { background: #fce8e6; color: #c5221f; }
+.pp-lease-card h2 { margin: 0 0 12px; font-size: 18px; color: #1a1a2e; }
+.pp-lease-card p { color: #5f6368; line-height: 1.7; }
+.pp-lease-link { display: inline-block; margin-top: 12px; }
 </style>
 
 <div class="pp-lease-wrap">
     <div class="pp-lease-card">
-        <h2>使用期限设置</h2>
-        <div class="pp-lease-sub">按"累计开机运行时长"计时（抗系统时间篡改）。到期后管理面板将一直停留在"正在加载中"，无法进入。</div>
-
-        <% if msg_text then %>
-        <div class="pp-lease-msg <%=msg_type%>"><%=msg_text%></div>
-        <% end %>
-
-        <div class="pp-lease-row"><span class="k">总天数</span><span class="v"><%= (days <= 0) and "永久（不锁定）" or (days .. " 天") %></span></div>
-        <div class="pp-lease-row"><span class="k">已用（累计开机）</span><span class="v"><%=used_str%></span></div>
-        <div class="pp-lease-row"><span class="k">剩余</span><span class="v<%= expired and " expired" or "" %>"><%=remaining_str%></span></div>
-        <div class="pp-lease-row"><span class="k">预计到期</span><span class="v"><%=expiry_str%></span></div>
-
-        <form class="pp-lease-form" method="post" action="<%=luci.dispatcher.build_url("admin", "services", "proxypool", "sz")%>">
-            <input type="hidden" name="save" value="1" />
-            <div>
-                <label>使用天数（保存后清零累计、从现在重新计时）</label>
-                <input type="number" name="days" min="0" step="1" value="<%=days%>" required />
-            </div>
-            <button type="submit" class="pp-lease-btn">保存</button>
-        </form>
-        <div class="pp-lease-hint">填 0 表示永久解锁（不再到期）。默认 360 天。"剩余/预计到期"按持续开机估算，实际以累计开机时长为准。</div>
+        <h2>使用期限</h2>
+        <p>ProxyPool V2 不再允许 LuCI 页面直接修改 UCI 或运行脚本。当前测试固件不会主动启用期限锁定。</p>
+        <p>如后续需要正式的授权期限功能，将通过 proxypoold 的事务接口实现，并保留完整审计与恢复能力。</p>
+        <a class="cbi-button cbi-button-action pp-lease-link" href="<%=luci.dispatcher.build_url("admin", "services", "proxypool")%>">返回 ProxyPool</a>
     </div>
 </div>
 

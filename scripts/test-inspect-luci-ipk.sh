@@ -61,6 +61,7 @@ make_ipk() {
 	mkdir -p "$outer" "$control" \
 		"$data/etc/uci-defaults" \
 		"$data/usr/lib/lua/luci/controller" \
+		"$data/usr/lib/lua/luci/model" \
 		"$data/usr/lib/lua/luci/view/proxypool" \
 		"$data/www/luci-static/resources"
 
@@ -78,6 +79,7 @@ make_ipk() {
 
 	write_safe_default "$data/etc/uci-defaults/luci-proxypool"
 	printf '%s\n' 'return true' >"$data/usr/lib/lua/luci/controller/proxypool.lua"
+	printf '%s\n' 'return { call = function() return {} end }' >"$data/usr/lib/lua/luci/model/proxypool_rpc.lua"
 	write_main_view "$data/usr/lib/lua/luci/view/proxypool/main.htm"
 	printf '<div>locked</div>\n' >"$data/usr/lib/lua/luci/view/proxypool/locked.htm"
 	printf '<div>lease</div>\n' >"$data/usr/lib/lua/luci/view/proxypool/lease.htm"
@@ -100,6 +102,7 @@ make_ipk() {
 	esac
 
 	chmod 644 "$data/usr/lib/lua/luci/controller/proxypool.lua" \
+		"$data/usr/lib/lua/luci/model/proxypool_rpc.lua" \
 		"$data/usr/lib/lua/luci/view/proxypool/main.htm" \
 		"$data/usr/lib/lua/luci/view/proxypool/locked.htm" \
 		"$data/usr/lib/lua/luci/view/proxypool/lease.htm" \

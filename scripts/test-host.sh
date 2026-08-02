@@ -16,6 +16,18 @@ esac
 go vet ./...
 
 cd "$ROOT"
+node --test luci-app-proxypool/tests/test_controller.mjs
+if command -v lua5.1 >/dev/null 2>&1; then
+	lua5.1 luci-app-proxypool/tests/test_rpc.lua
+elif command -v lua >/dev/null 2>&1; then
+	lua luci-app-proxypool/tests/test_rpc.lua
+elif command -v npx >/dev/null 2>&1; then
+	npx --yes --package fengari-node-cli@0.1.0 fengari luci-app-proxypool/tests/test_rpc.lua
+else
+	echo "FAIL: Lua 5.1-compatible test runner is unavailable" >&2
+	exit 1
+fi
+
 for shell_file in \
 	luci-app-proxypool/root/etc/uci-defaults/luci-proxypool \
 	proxypool-core/files/dns-manager.sh \
@@ -90,5 +102,4 @@ sh scripts/test-v2-migration.sh
 sh scripts/test-whitespace-range.sh
 git diff --check
 
-echo "SKIP: Lua test suite does not exist yet"
 echo "PASS: Node-backed LuCI behavior contracts ran in test-dns-fail-closed.sh"

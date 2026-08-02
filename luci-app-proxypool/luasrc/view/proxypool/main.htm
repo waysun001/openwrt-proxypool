@@ -29,13 +29,13 @@
 <script type="text/javascript">
 (function(){
   'use strict';
-  var api='<%=url([[admin]], [[services]], [[proxypool]], [[api]])%>', token='<%=token%>', revision=0, timer=null, busy=false, pendingPreview=null;
+  var apiRead='<%=url([[admin]], [[services]], [[proxypool]], [[api]], [[read]])%>', apiWrite='<%=url([[admin]], [[services]], [[proxypool]], [[api]], [[write]])%>', token='<%=token%>', revision=0, timer=null, busy=false, pendingPreview=null;
   function call(action, params, mutation){
     params=params||{}; params.action=action;
     var options={method:mutation?'POST':'GET',credentials:'same-origin',headers:{'Accept':'application/json'}};
-    var target=api;
+    var target=mutation?apiWrite:apiRead;
     if(mutation){params.token=token;options.headers['Content-Type']='application/x-www-form-urlencoded;charset=UTF-8';options.body=new URLSearchParams(params).toString();}
-    else{target=api+'?'+new URLSearchParams(params).toString();}
+    else{target=apiRead+'?'+new URLSearchParams(params).toString();}
     return fetch(target,options).then(function(response){return response.text().then(function(text){var data;try{data=JSON.parse(text);}catch(e){throw new Error('响应不是有效 JSON');}if(!response.ok||!data.success){var detail=data&&data.error?data.error.code+': '+data.error.message:'HTTP '+response.status;throw new Error(detail);}return data.result;});});
   }
   function cell(row,text,cls){var td=document.createElement('td');td.textContent=text==null?'':String(text);if(cls)td.className=cls;row.appendChild(td);return td;}
