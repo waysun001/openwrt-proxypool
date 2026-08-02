@@ -14,6 +14,10 @@ const leaseView = await readFile(
   new URL('../luasrc/view/proxypool/lease.htm', import.meta.url),
   'utf8',
 );
+const v2Script = await readFile(
+  new URL('../htdocs/luci-static/resources/proxypool-v2.js', import.meta.url),
+  'utf8',
+);
 
 test('controller contains no direct system mutation or socket implementation', () => {
   for (const forbidden of [
@@ -43,9 +47,20 @@ test('read and write handlers have disjoint action maps', () => {
 });
 
 test('main page sends reads and writes to their defined endpoints', () => {
-  assert.doesNotMatch(mainView, /target=api\+/);
-  assert.match(mainView, /target=apiRead\+'/);
-  assert.match(mainView, /target=mutation\?apiWrite:apiRead/);
+  assert.match(mainView, /data-api-read=/);
+  assert.match(mainView, /data-api-write=/);
+  assert.doesNotMatch(v2Script, /target=api\+/);
+  assert.match(v2Script, /target\s*=\s*mutation\s*\?\s*apiWrite\s*:\s*apiRead/);
+});
+
+test('device unbind option has an explicit empty value', () => {
+  assert.match(v2Script, /unboundOption\.value\s*=\s*''/);
+});
+
+test('polling degrades without AbortController and resumes after bfcache restore', () => {
+  assert.match(v2Script, /typeof environment\.AbortController === 'function'/);
+  assert.match(v2Script, /addEventListener\('pageshow'/);
+  assert.match(v2Script, /event\.persisted/);
 });
 
 test('legacy auxiliary pages remain reachable without a dead mutation form', () => {

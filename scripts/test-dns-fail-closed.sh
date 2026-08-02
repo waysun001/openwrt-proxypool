@@ -375,8 +375,8 @@ test_internal_enforcement_reports_safe_convergence() {
 }
 
 test_luci_actions_stop_on_dns_rejection() {
-	grep -Fq 'apiRead=' "$MAIN_VIEW" || fail 'LuCI page does not use the read-only daemon route' || return 1
-	grep -Fq 'apiWrite=' "$MAIN_VIEW" || fail 'LuCI page does not use the CSRF-protected write route' || return 1
+	grep -Fq 'data-api-read=' "$MAIN_VIEW" || fail 'LuCI page does not use the read-only daemon route' || return 1
+	grep -Fq 'data-api-write=' "$MAIN_VIEW" || fail 'LuCI page does not use the CSRF-protected write route' || return 1
 	if grep -Fq 'sequentialConnect' "$MAIN_VIEW"; then
 		fail 'LuCI still drives sequential node connection from the browser' || return 1
 	fi

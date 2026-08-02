@@ -26,9 +26,9 @@ if grep -Eiq 'xl2tpd|(^|[^[:alnum:]_])(network|firewall|wireless)\.|wifi([[:spac
 	fail 'uci-default contains router provisioning or global LuCI mutation'
 fi
 
-[ "$(grep -Fc '<link rel="stylesheet" href="<%=resource%>/proxypool-global.css" />' "$MAIN_VIEW")" -eq 1 ] ||
+[ "$(grep -Fc '<link rel="stylesheet" href="<%=resource%>/proxypool-v2.css" />' "$MAIN_VIEW")" -eq 1 ] ||
 	fail 'main view must load the packaged ProxyPool stylesheet exactly once'
-[ "$(grep -Fc '<script type="text/javascript" src="<%=resource%>/proxypool-global.js"></script>' "$MAIN_VIEW")" -eq 1 ] ||
+[ "$(grep -Fc '<script type="text/javascript" src="<%=resource%>/proxypool-v2.js"></script>' "$MAIN_VIEW")" -eq 1 ] ||
 	fail 'main view must load the packaged ProxyPool script exactly once'
 
 if grep -Fq 'luci-proxypool-menu' "$MAKEFILE"; then

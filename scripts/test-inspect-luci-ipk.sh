@@ -44,8 +44,8 @@ write_main_view() {
 	destination=$1
 	cat >"$destination" <<'EOF'
 <%+header%>
-<link rel="stylesheet" href="<%=resource%>/proxypool-global.css" />
-<script type="text/javascript" src="<%=resource%>/proxypool-global.js"></script>
+<link rel="stylesheet" href="<%=resource%>/proxypool-v2.css" />
+<script type="text/javascript" src="<%=resource%>/proxypool-v2.js"></script>
 <div id="proxypool"></div>
 <%+footer%>
 EOF
@@ -85,6 +85,8 @@ make_ipk() {
 	printf '<div>lease</div>\n' >"$data/usr/lib/lua/luci/view/proxypool/lease.htm"
 	printf 'body{}\n' >"$data/www/luci-static/resources/proxypool-global.css"
 	printf 'window.ProxyPool=true;\n' >"$data/www/luci-static/resources/proxypool-global.js"
+	printf 'body{}\n' >"$data/www/luci-static/resources/proxypool-v2.css"
+	printf 'window.ProxyPoolV2=true;\n' >"$data/www/luci-static/resources/proxypool-v2.js"
 
 	case "$kind" in
 		missing_css) rm -f "$data/www/luci-static/resources/proxypool-global.css" ;;
@@ -95,8 +97,8 @@ make_ipk() {
 		versioned_resource_load)
 			printf '%s\n' \
 				'<%+header%>' \
-				'<link rel="stylesheet" href="<%=resource%>/proxypool-global.css?v=1.0.0" />' \
-				'<script type="text/javascript" src="<%=resource%>/proxypool-global.js?v=1.0.0"></script>' \
+				'<link rel="stylesheet" href="<%=resource%>/proxypool-v2.css?v=1.0.0" />' \
+				'<script type="text/javascript" src="<%=resource%>/proxypool-v2.js?v=1.0.0"></script>' \
 				'<%+footer%>' >"$data/usr/lib/lua/luci/view/proxypool/main.htm"
 			;;
 	esac
@@ -107,6 +109,8 @@ make_ipk() {
 		"$data/usr/lib/lua/luci/view/proxypool/locked.htm" \
 		"$data/usr/lib/lua/luci/view/proxypool/lease.htm" \
 		"$data/www/luci-static/resources/proxypool-global.js"
+	chmod 644 "$data/www/luci-static/resources/proxypool-v2.js" \
+		"$data/www/luci-static/resources/proxypool-v2.css"
 	[ ! -e "$data/www/luci-static/resources/proxypool-global.css" ] ||
 		chmod 644 "$data/www/luci-static/resources/proxypool-global.css"
 
@@ -156,7 +160,7 @@ grep -Fq 'unexpected LuCI package payload' "$TEST_TMP/missing_css.log"
 grep -Fq 'unexpected LuCI package payload' "$TEST_TMP/extra_global_luci.log"
 grep -Fq 'unexpected LuCI package payload' "$TEST_TMP/extra_uci_default.log"
 grep -Fq 'uci-default contains router provisioning or global LuCI mutation' "$TEST_TMP/unsafe_default.log"
-grep -Fq 'main view does not load packaged global assets' "$TEST_TMP/missing_resource_load.log"
+grep -Fq 'main view does not load packaged V2 assets' "$TEST_TMP/missing_resource_load.log"
 grep -Fq 'unexpected mode for /etc/uci-defaults/luci-proxypool' "$TEST_TMP/wrong_mode.log"
 
 echo 'LuCI IPK fixture inspection: PASS'

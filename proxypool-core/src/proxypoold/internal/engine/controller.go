@@ -561,7 +561,14 @@ func (controller *Controller) handleStatus(request api.Request) api.Response {
 	desired, runtimeSummary := summarizeDesired(controller.desired)
 	for index := range runtimeSummary.Nodes {
 		if status, exists := controller.statuses[runtimeSummary.Nodes[index].NodeID]; exists {
+			runtimeSummary.Nodes[index].JobID = status.JobID
 			runtimeSummary.Nodes[index].State = status.State
+			runtimeSummary.Nodes[index].Attempts = status.Attempts
+			runtimeSummary.Nodes[index].LastError = clonePublicError(status.LastError)
+			if !status.RetryAt.IsZero() {
+				retryAt := status.RetryAt
+				runtimeSummary.Nodes[index].RetryAt = &retryAt
+			}
 		}
 	}
 	status := ShadowStatus{

@@ -1,63 +1,87 @@
 <%+header%>
-<link rel="stylesheet" href="<%=resource%>/proxypool-global.css" />
-<script type="text/javascript" src="<%=resource%>/proxypool-global.js"></script>
+<link rel="stylesheet" href="<%=resource%>/proxypool-v2.css" />
 
-<style>
-.pp-panel{background:#fff;border:1px solid #dfe5ec;border-radius:8px;padding:16px;margin:14px 0}.pp-head{display:flex;justify-content:space-between;align-items:center;gap:12px}.pp-grid{display:grid;grid-template-columns:repeat(3,minmax(120px,1fr));gap:12px;margin:12px 0}.pp-card{background:#f5f8fb;border-radius:7px;padding:12px}.pp-card strong{display:block;font-size:24px}.pp-table{width:100%;border-collapse:collapse}.pp-table th,.pp-table td{padding:9px;border-bottom:1px solid #e8edf2;text-align:left}.pp-actions{display:flex;gap:6px;flex-wrap:wrap}.pp-state-online{color:#16843d}.pp-state-failed,.pp-state-backoff{color:#b42318}.pp-error{color:#b42318;white-space:pre-wrap}.pp-muted{color:#687386}.pp-job{font-family:monospace;font-size:12px}.pp-busy{opacity:.55;pointer-events:none}.pp-import{width:100%;min-height:130px;box-sizing:border-box;font-family:monospace}.pp-preview{max-height:260px;overflow:auto;margin-top:10px;white-space:pre-wrap}@media(max-width:760px){.pp-grid{grid-template-columns:1fr}.pp-table{font-size:12px}.pp-panel{overflow-x:auto}}
-</style>
+<div id="pp-v2-app" class="pp-v2-app"
+     data-api-read="<%=url([[admin]], [[services]], [[proxypool]], [[api]], [[read]])%>"
+     data-api-write="<%=url([[admin]], [[services]], [[proxypool]], [[api]], [[write]])%>"
+     data-token="<%=token%>">
+    <div class="pp-v2-header">
+        <div>
+            <h2>ProxyPool V2</h2>
+            <p>设备只能通过已绑定节点上网；局域网互访、IPv6 和本地 WAN 回退保持禁止。</p>
+        </div>
+        <div id="pp-v2-revision" class="pp-v2-revision"></div>
+    </div>
 
-<div class="cbi-map" id="pp-app">
-  <div class="pp-head"><h2>ProxyPool V2 测试控制台</h2><button class="cbi-button" id="pp-refresh">立即刷新</button></div>
-  <div id="pp-error" class="pp-error"></div>
-  <div class="pp-grid">
-    <div class="pp-card">节点总数<strong id="pp-total">-</strong></div>
-    <div class="pp-card">在线节点<strong id="pp-online">-</strong></div>
-    <div class="pp-card">已绑定设备<strong id="pp-bound">-</strong></div>
-  </div>
-  <div class="pp-panel">
-    <div class="pp-head"><h3>批量导入</h3><span class="pp-muted">一次提交，后台最多 4 路 L2TP 并发</span></div>
-    <p><select id="pp-import-protocol"><option value="l2tp">L2TP</option><option value="socks5">SOCKS5（仅保存）</option><option value="slp">SLP（仅保存）</option></select></p>
-    <textarea id="pp-import-raw" class="pp-import" placeholder="L2TP: server|username|password（每行一个）"></textarea>
-    <div class="pp-actions"><button class="cbi-button cbi-button-apply" id="pp-import-preview">安全预览</button><button class="cbi-button cbi-button-save" id="pp-import-commit" disabled="disabled">确认导入</button></div>
-    <div id="pp-import-result" class="pp-preview pp-muted"></div>
-  </div>
-  <div class="pp-panel"><div class="pp-head"><h3>节点</h3><span class="pp-muted">L2TP 实时链路</span></div><table class="pp-table"><thead><tr><th>名称</th><th>协议</th><th>策略</th><th>状态</th><th>操作</th></tr></thead><tbody id="pp-nodes"></tbody></table></div>
-  <div class="pp-panel"><div class="pp-head"><h3>设备发现与绑定</h3><span class="pp-muted">MAC 自动识别，无需手工输入</span></div><table class="pp-table"><thead><tr><th>设备</th><th>IP / 接口</th><th>当前节点</th><th>操作</th></tr></thead><tbody id="pp-devices"></tbody></table></div>
-  <div class="pp-panel"><div class="pp-head"><h3>最近任务</h3><span class="pp-muted">页面只使用一个轮询器</span></div><div id="pp-jobs"></div></div>
+    <div id="pp-v2-error" class="pp-v2-error" role="alert"></div>
+
+    <div class="pp-v2-summary">
+        <div><span>节点</span><strong id="pp-v2-total">-</strong></div>
+        <div><span>在线</span><strong id="pp-v2-online">-</strong></div>
+        <div><span>已绑定设备</span><strong id="pp-v2-bound">-</strong></div>
+    </div>
+
+    <div class="pp-v2-tabs" role="tablist">
+        <button type="button" class="active" data-pp-tab="nodes">节点</button>
+        <button type="button" data-pp-tab="devices">设备</button>
+        <button type="button" data-pp-tab="jobs">任务</button>
+    </div>
+
+    <section data-pp-panel="nodes">
+        <div class="pp-v2-toolbar">
+            <div><h3>节点管理</h3><p>当前可拨号协议为 L2TP；账号和密码不会回显。</p></div>
+            <button id="pp-v2-add-node" type="button" class="cbi-button cbi-button-add">新增节点</button>
+        </div>
+        <div class="pp-v2-table-wrap">
+            <table class="table pp-v2-table">
+                <thead><tr><th>名称</th><th>服务器</th><th>协议</th><th>状态</th><th>错误</th><th>重试</th><th>绑定数</th><th>策略</th><th>操作</th></tr></thead>
+                <tbody id="pp-v2-node-list"></tbody>
+            </table>
+        </div>
+    </section>
+
+    <section data-pp-panel="devices" hidden>
+        <div class="pp-v2-toolbar">
+            <div><h3>设备发现与绑定</h3><p>LAN 口和 WiFi 终端按 DHCP/邻居信息自动识别 MAC，无需手工输入。</p></div>
+        </div>
+        <div class="pp-v2-table-wrap">
+            <table class="table pp-v2-table">
+                <thead><tr><th>设备 / MAC</th><th>当前 IP</th><th>固定 IP</th><th>入口</th><th>绑定节点</th><th>操作</th></tr></thead>
+                <tbody id="pp-v2-device-list"></tbody>
+            </table>
+        </div>
+    </section>
+
+    <section data-pp-panel="jobs" hidden>
+        <div class="pp-v2-toolbar">
+            <div><h3>后台任务</h3><p>任务由路由器后台执行，刷新或关闭页面不会取消拨号与清理。</p></div>
+        </div>
+        <div id="pp-v2-job-list" class="pp-v2-jobs"></div>
+    </section>
+
+    <div id="pp-v2-node-modal" class="pp-v2-modal" hidden>
+        <div class="pp-v2-dialog" role="dialog" aria-modal="true" aria-labelledby="pp-v2-node-modal-title">
+            <h3 id="pp-v2-node-modal-title">新增 L2TP 节点</h3>
+            <form id="pp-v2-node-form">
+                <input type="hidden" name="node_id" />
+                <div class="pp-v2-form-grid">
+                    <label>名称<input name="name" maxlength="128" required /></label>
+                    <label>协议<select name="protocol" disabled><option value="l2tp">L2TP</option></select></label>
+                    <label>服务器<input name="server" maxlength="253" required /></label>
+                    <label>端口<input name="port" type="number" min="1" max="65535" value="1701" required /></label>
+                    <label>用户名<input name="username" maxlength="1024" autocomplete="off" placeholder="编辑时留空表示保留" /></label>
+                    <label>密码<input name="password" type="password" maxlength="4096" autocomplete="new-password" placeholder="编辑时留空表示保留" /></label>
+                    <label>到期日期<input name="expires_at" type="date" /></label>
+                    <label class="pp-v2-checkbox"><input name="enabled" type="checkbox" checked /> 保存后启用</label>
+                </div>
+                <div class="pp-v2-dialog-actions">
+                    <button id="pp-v2-node-cancel" type="button" class="cbi-button">取消</button>
+                    <button type="submit" class="cbi-button cbi-button-save">保存</button>
+                </div>
+            </form>
+        </div>
+    </div>
 </div>
 
-<script type="text/javascript">
-(function(){
-  'use strict';
-  var apiRead='<%=url([[admin]], [[services]], [[proxypool]], [[api]], [[read]])%>', apiWrite='<%=url([[admin]], [[services]], [[proxypool]], [[api]], [[write]])%>', token='<%=token%>', revision=0, timer=null, busy=false, pendingPreview=null;
-  function call(action, params, mutation){
-    params=params||{}; params.action=action;
-    var options={method:mutation?'POST':'GET',credentials:'same-origin',headers:{'Accept':'application/json'}};
-    var target=mutation?apiWrite:apiRead;
-    if(mutation){params.token=token;options.headers['Content-Type']='application/x-www-form-urlencoded;charset=UTF-8';options.body=new URLSearchParams(params).toString();}
-    else{target=apiRead+'?'+new URLSearchParams(params).toString();}
-    return fetch(target,options).then(function(response){return response.text().then(function(text){var data;try{data=JSON.parse(text);}catch(e){throw new Error('响应不是有效 JSON');}if(!response.ok||!data.success){var detail=data&&data.error?data.error.code+': '+data.error.message:'HTTP '+response.status;throw new Error(detail);}return data.result;});});
-  }
-  function cell(row,text,cls){var td=document.createElement('td');td.textContent=text==null?'':String(text);if(cls)td.className=cls;row.appendChild(td);return td;}
-  function button(label,handler){var b=document.createElement('button');b.className='cbi-button';b.textContent=label;b.onclick=handler;return b;}
-  function setBusy(value){busy=value;document.getElementById('pp-app').classList.toggle('pp-busy',value);}
-  function mutate(action,params){if(busy)return;setBusy(true);call(action,params,true).catch(showError).then(function(){setBusy(false);refresh();});}
-  function renderImportPreview(preview){var target=document.getElementById('pp-import-result'),lines=[];lines.push('新增 '+preview.added+'，跳过 '+preview.skipped+(preview.blocked?'，存在阻断错误':'，可以提交'));(preview.rows||[]).forEach(function(row){lines.push('第 '+row.line+' 行  '+row.action+'  '+row.protocol+' '+row.server+':'+row.port+'  凭据：'+(row.secret_set?'已填写':'无'));});(preview.errors||[]).forEach(function(issue){lines.push((issue.line?'第 '+issue.line+' 行  ':'')+issue.code+'：'+issue.message);});target.textContent=lines.join('\n');document.getElementById('pp-import-commit').disabled=!!preview.blocked;}
-  function previewImport(){if(busy)return;var box=document.getElementById('pp-import-raw'),raw=box.value,protocol=document.getElementById('pp-import-protocol').value;if(!raw){showError(new Error('请输入节点列表'));return;}box.value='';pendingPreview=null;document.getElementById('pp-import-commit').disabled=true;setBusy(true);call('import_preview',{protocol:protocol,raw:raw,expected_revision:revision},true).then(function(result){pendingPreview=result;renderImportPreview(result);}).catch(showError).then(function(){setBusy(false);});}
-  function commitImport(){if(busy||!pendingPreview||pendingPreview.blocked)return;var preview=pendingPreview;pendingPreview=null;document.getElementById('pp-import-commit').disabled=true;setBusy(true);call('import_commit',{preview_id:preview.preview_id,preview_hash:preview.preview_hash,expected_revision:preview.base_revision},true).then(function(result){document.getElementById('pp-import-result').textContent='导入已保存，后台任务：'+result.job_id;}).catch(showError).then(function(){setBusy(false);refresh();});}
-  function showError(error){document.getElementById('pp-error').textContent=error&&error.message?error.message:String(error||'未知错误');}
-  function render(status,devices,jobs){
-    revision=status.config.revision;var nodes=status.desired.nodes||[], runtime=status.runtime.nodes||[], states={};runtime.forEach(function(item){states[item.node_id]=item.state;});
-    document.getElementById('pp-total').textContent=nodes.length;document.getElementById('pp-online').textContent=runtime.filter(function(n){return n.state==='online';}).length;document.getElementById('pp-bound').textContent=(status.desired.devices||[]).filter(function(d){return d.enabled&&d.node_id;}).length;
-    var nt=document.getElementById('pp-nodes');nt.textContent='';nodes.forEach(function(node){var row=document.createElement('tr'),state=states[node.id]||'disabled';cell(row,node.name);cell(row,node.protocol);cell(row,node.policy_id);cell(row,state,'pp-state-'+state);var actions=cell(row,'','pp-actions');actions.appendChild(button('连接',function(){mutate('node_action',{node_id:node.id,operation:'connect',expected_revision:revision});}));actions.appendChild(button('重连',function(){mutate('node_action',{node_id:node.id,operation:'reconnect',expected_revision:revision});}));actions.appendChild(button('停止',function(){mutate('node_action',{node_id:node.id,operation:'stop',expected_revision:revision});}));nt.appendChild(row);});
-    if(!nodes.length){var empty=document.createElement('tr');cell(empty,'尚未导入节点');nt.appendChild(empty);}
-    var dt=document.getElementById('pp-devices');dt.textContent='';(devices.devices||[]).forEach(function(device){var row=document.createElement('tr');cell(row,(device.hostname||'未命名')+'\n'+device.mac);cell(row,(device.current_ipv4||device.fixed_ipv4||'-')+' / '+(device.ingress||'-'));cell(row,device.node_id||'未绑定');var actions=cell(row,'','pp-actions'),select=document.createElement('select');nodes.forEach(function(node){var option=document.createElement('option');option.value=node.id;option.textContent=node.name;if(node.id===device.node_id)option.selected=true;select.appendChild(option);});actions.appendChild(select);actions.appendChild(button('绑定',function(){if(select.value)mutate('bind',{device_id:device.id,node_id:select.value,expected_revision:revision});}));if(device.configured)actions.appendChild(button('解绑',function(){mutate('unbind',{device_id:device.id,expected_revision:revision});}));dt.appendChild(row);});
-    if(!(devices.devices||[]).length){var none=document.createElement('tr');cell(none,'暂未发现 DHCP 设备');dt.appendChild(none);}
-    var jt=document.getElementById('pp-jobs');jt.textContent='';(jobs.jobs||[]).slice(-8).reverse().forEach(function(job){var line=document.createElement('div');line.className='pp-job';line.textContent=job.id+' · '+job.kind+' · '+job.state+' · '+job.succeeded+'/'+job.total;jt.appendChild(line);});
-    if(!(jobs.jobs||[]).length)jt.textContent='暂无任务';
-  }
-  function refresh(){if(busy)return;if(timer)clearTimeout(timer);Promise.all([call('status',{},false),call('devices',{},false),call('jobs',{},false)]).then(function(values){document.getElementById('pp-error').textContent='';render(values[0],values[1],values[2]);}).catch(showError).then(function(){timer=setTimeout(refresh,3000);});}
-  document.getElementById('pp-refresh').onclick=refresh;document.getElementById('pp-import-preview').onclick=previewImport;document.getElementById('pp-import-commit').onclick=commitImport;refresh();
-})();
-</script>
+<script type="text/javascript" src="<%=resource%>/proxypool-v2.js"></script>
 <%+footer%>

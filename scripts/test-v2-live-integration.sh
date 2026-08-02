@@ -10,6 +10,7 @@ INIT="$ROOT/proxypool-core/files/proxypool.init"
 LUCI="$ROOT/luci-app-proxypool/luasrc/controller/proxypool.lua"
 LUCI_RPC="$ROOT/luci-app-proxypool/luasrc/model/proxypool_rpc.lua"
 VIEW="$ROOT/luci-app-proxypool/luasrc/view/proxypool/main.htm"
+V2_JS="$ROOT/luci-app-proxypool/htdocs/luci-static/resources/proxypool-v2.js"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 require() { grep -Fq "$2" "$1" || fail "$3"; }
@@ -41,11 +42,9 @@ done
 require "$LUCI_RPC" 'nixio.socket("unix", "stream")' 'LuCI RPC bridge does not use a Unix socket'
 require "$LUCI_RPC" 'socket:setopt("socket", "sndtimeo", TIMEOUT_SECONDS, 0)' 'LuCI control writes can hang without a deadline'
 require "$LUCI_RPC" 'socket:setopt("socket", "rcvtimeo", TIMEOUT_SECONDS, 0)' 'LuCI control reads can hang without a deadline'
-require "$VIEW" '页面只使用一个轮询器' 'LuCI does not expose bounded job polling'
-require "$VIEW" 'MAC 自动识别，无需手工输入' 'LuCI does not expose automatic device discovery'
+require "$V2_JS" 'environment.setTimeout(poll, 3000)' 'LuCI does not use one bounded status poller'
+require "$VIEW" '无需手工输入' 'LuCI does not expose automatic device discovery'
 
-require "$VIEW" "call('import_preview'" 'LuCI does not submit raw import text for server preview'
-require "$VIEW" "call('import_commit'" 'LuCI does not commit one server-side import transaction'
-if grep -Fq 'function pollJob' "$VIEW"; then fail 'LuCI still blocks mutation UI while polling a whole job'; fi
+if grep -Fq 'function pollJob' "$V2_JS"; then fail 'LuCI still blocks mutation UI while polling a whole job'; fi
 
 echo 'PASS: V2 live L2TP assembly and LuCI control contract'

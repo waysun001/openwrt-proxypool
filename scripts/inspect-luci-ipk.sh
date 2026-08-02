@@ -56,6 +56,8 @@ usr/lib/lua/luci/view/proxypool/locked.htm
 usr/lib/lua/luci/view/proxypool/main.htm
 www/luci-static/resources/proxypool-global.css
 www/luci-static/resources/proxypool-global.js
+www/luci-static/resources/proxypool-v2.css
+www/luci-static/resources/proxypool-v2.js
 EOF
 find "$inspect_tmp/data" -type f -printf '%P\n' | LC_ALL=C sort >"$inspect_tmp/actual-payload"
 if ! cmp -s "$inspect_tmp/expected-payload" "$inspect_tmp/actual-payload"; then
@@ -86,7 +88,9 @@ for relative in \
 	usr/lib/lua/luci/view/proxypool/locked.htm \
 	usr/lib/lua/luci/view/proxypool/main.htm \
 	www/luci-static/resources/proxypool-global.css \
-	www/luci-static/resources/proxypool-global.js; do
+	www/luci-static/resources/proxypool-global.js \
+	www/luci-static/resources/proxypool-v2.css \
+	www/luci-static/resources/proxypool-v2.js; do
 	require_mode "$relative" 644
 done
 
@@ -107,15 +111,17 @@ for ucitrack_contract in \
 done
 
 main_view="$inspect_tmp/data/usr/lib/lua/luci/view/proxypool/main.htm"
-[ "$(grep -Ec '<link rel="stylesheet" href="<%=resource%>/proxypool-global\.css(\?v=[A-Za-z0-9._+-]+)?" />' "$main_view")" -eq 1 ] &&
-	[ "$(grep -Ec '<script type="text/javascript" src="<%=resource%>/proxypool-global\.js(\?v=[A-Za-z0-9._+-]+)?"></script>' "$main_view")" -eq 1 ] || {
-	echo 'main view does not load packaged global assets' >&2
+[ "$(grep -Ec '<link rel="stylesheet" href="<%=resource%>/proxypool-v2\.css(\?v=[A-Za-z0-9._+-]+)?" />' "$main_view")" -eq 1 ] &&
+	[ "$(grep -Ec '<script type="text/javascript" src="<%=resource%>/proxypool-v2\.js(\?v=[A-Za-z0-9._+-]+)?"></script>' "$main_view")" -eq 1 ] || {
+	echo 'main view does not load packaged V2 assets' >&2
 	exit 1
 }
 
 for asset in \
 	"$inspect_tmp/data/www/luci-static/resources/proxypool-global.css" \
-	"$inspect_tmp/data/www/luci-static/resources/proxypool-global.js"; do
+	"$inspect_tmp/data/www/luci-static/resources/proxypool-global.js" \
+	"$inspect_tmp/data/www/luci-static/resources/proxypool-v2.css" \
+	"$inspect_tmp/data/www/luci-static/resources/proxypool-v2.js"; do
 	[ -s "$asset" ] || { echo "packaged asset is empty: ${asset##*/}" >&2; exit 1; }
 done
 

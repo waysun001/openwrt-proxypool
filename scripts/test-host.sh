@@ -17,6 +17,7 @@ go vet ./...
 
 cd "$ROOT"
 node --test luci-app-proxypool/tests/test_controller.mjs
+node --test luci-app-proxypool/tests/ui/proxypool-v2.test.mjs
 if command -v lua5.1 >/dev/null 2>&1; then
 	lua5.1 luci-app-proxypool/tests/test_rpc.lua
 elif command -v lua >/dev/null 2>&1; then

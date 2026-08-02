@@ -716,6 +716,33 @@ func TestControllerStatusReturnsEditableNonSecretNodeFields(t *testing.T) {
 	}
 }
 
+func TestControllerStatusReturnsPublicRuntimeFailureAndRetryMetadata(t *testing.T) {
+	cfg := controllerConfig()
+	controller, err := NewController(&memoryDesiredStore{cfg: cfg}, &memoryRuntimePersistence{}, NewMachine(nil), NewJobStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.statuses["node_a"] = NodeStatus{
+		NodeID: "node_a", State: model.StateBackoff, Attempts: 3,
+		LastError: &PublicError{Code: "probe_failed", Message: "credential=DO-NOT-RETURN"},
+		RetryAt:   stateTestEpoch.Add(15 * time.Second),
+	}
+	response := controller.Handle(context.Background(), controllerRequest("runtime-status", "status.get", `{}`))
+	assertControllerSuccess(t, response)
+	encoded := string(response.Result)
+	for _, required := range []string{`"state":"backoff"`, `"attempts":3`, `"last_error":{"code":"probe_failed"`, `"retry_at":"`} {
+		if !strings.Contains(encoded, required) {
+			t.Fatalf("status omitted runtime field %s: %s", required, response.Result)
+		}
+	}
+	if strings.Contains(encoded, "DO-NOT-RETURN") {
+		t.Fatalf("status exposed private runtime error: %s", response.Result)
+	}
+	if strings.Contains(encoded, `"retry_at":"0001-01-01T00:00:00Z"`) {
+		t.Fatalf("status exposed a false retry deadline for ordinary nodes: %s", response.Result)
+	}
+}
+
 func TestControllerNetifdHintQueuesOwnedNodeRecoveryAndRejectsSpoofing(t *testing.T) {
 	controller, err := NewController(
 		&memoryDesiredStore{cfg: controllerConfig()}, &memoryRuntimePersistence{}, NewMachine(nil), NewJobStore(),

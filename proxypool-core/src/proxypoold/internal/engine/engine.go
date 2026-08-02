@@ -89,8 +89,12 @@ type RuntimeSummary struct {
 }
 
 type RuntimeNodeSummary struct {
-	NodeID string             `json:"node_id"`
-	State  model.RuntimeState `json:"state"`
+	NodeID    string             `json:"node_id"`
+	JobID     string             `json:"job_id,omitempty"`
+	State     model.RuntimeState `json:"state"`
+	Attempts  uint64             `json:"attempts"`
+	LastError *PublicError       `json:"last_error,omitempty"`
+	RetryAt   *time.Time         `json:"retry_at,omitempty"`
 }
 
 type ReconciliationSummary struct {
@@ -324,6 +328,13 @@ func cloneShadowStatus(status ShadowStatus) ShadowStatus {
 	}
 	status.Desired.Devices = append([]DesiredDeviceStatus(nil), status.Desired.Devices...)
 	status.Runtime.Nodes = append([]RuntimeNodeSummary(nil), status.Runtime.Nodes...)
+	for index := range status.Runtime.Nodes {
+		status.Runtime.Nodes[index].LastError = clonePublicError(status.Runtime.Nodes[index].LastError)
+		if status.Runtime.Nodes[index].RetryAt != nil {
+			retryAt := *status.Runtime.Nodes[index].RetryAt
+			status.Runtime.Nodes[index].RetryAt = &retryAt
+		}
+	}
 	if status.Config.Error != nil {
 		copy := *status.Config.Error
 		status.Config.Error = &copy
