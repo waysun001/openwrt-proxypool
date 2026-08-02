@@ -58,6 +58,296 @@ func TestSchedulerPersistsBeforeStartAndRequiresProbeAndEveryGate(t *testing.T) 
 	}
 }
 
+func TestSchedulerNodeSaveReconnectsChangedOnlineNodeAndStopsDisabledNode(t *testing.T) {
+	jobIDs := []string{"job-connect-before-save", "job-save-reconnect", "job-save-disable"}
+	controller, err := NewController(
+		&memoryDesiredStore{cfg: controllerConfig()}, &memoryRuntimePersistence{}, NewMachine(nil), NewJobStore(),
+		WithControllerJobIDSource(func() string {
+			id := jobIDs[0]
+			jobIDs = jobIDs[1:]
+			return id
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := &schedulerAdapter{}
+	scheduler := NewScheduler(controller, adapter, SchedulerConfig{})
+	controller.AttachScheduler(scheduler)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go scheduler.Run(ctx)
+
+	assertControllerSuccess(t, controller.Handle(context.Background(), controllerRequest("connect-before-save", "node.action", `{"node_id":"node_a","action":"connect","expected_revision":3}`)))
+	waitForJobState(t, controller.jobs, "job-connect-before-save", JobSucceeded)
+	assertControllerSuccess(t, controller.Handle(context.Background(), controllerRequest(
+		"save-online", "node.save", `{"node_id":"node_a","name":"Node A","protocol":"l2tp","enabled":true,"server":"a-new.example","port":1701,"username":"user-a","password":"","expected_revision":3}`,
+	)))
+	waitForJobState(t, controller.jobs, "job-save-reconnect", JobSucceeded)
+	adapter.mu.Lock()
+	startsAfterReconnect, stopsAfterReconnect := adapter.startCalls, adapter.stopCalls
+	adapter.mu.Unlock()
+	if startsAfterReconnect != 2 || stopsAfterReconnect != 1 {
+		t.Fatalf("online save start/stop calls = %d/%d, want 2/1", startsAfterReconnect, stopsAfterReconnect)
+	}
+
+	assertControllerSuccess(t, controller.Handle(context.Background(), controllerRequest(
+		"save-disabled", "node.save", `{"node_id":"node_a","name":"Node A","protocol":"l2tp","enabled":false,"server":"a-new.example","port":1701,"username":"user-a","password":"","expected_revision":4}`,
+	)))
+	waitForJobState(t, controller.jobs, "job-save-disable", JobSucceeded)
+	adapter.mu.Lock()
+	startsAfterDisable, stopsAfterDisable := adapter.startCalls, adapter.stopCalls
+	adapter.mu.Unlock()
+	if startsAfterDisable != 2 || stopsAfterDisable != 2 {
+		t.Fatalf("disabled save start/stop calls = %d/%d, want 2/2", startsAfterDisable, stopsAfterDisable)
+	}
+	waitForNodeState(t, controller, "node_a", model.StateDisabled)
+}
+
+func TestSchedulerNodeDeleteCleansOwnedSessionBeforeRemovingTombstone(t *testing.T) {
+	jobIDs := []string{"job-connect-before-delete", "job-delete-finalize"}
+	desiredStore := &memoryDesiredStore{cfg: controllerConfig()}
+	controller, err := NewController(
+		desiredStore, &memoryRuntimePersistence{}, NewMachine(nil), NewJobStore(),
+		WithControllerJobIDSource(func() string {
+			id := jobIDs[0]
+			jobIDs = jobIDs[1:]
+			return id
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := &schedulerAdapter{}
+	scheduler := NewScheduler(controller, adapter, SchedulerConfig{})
+	controller.AttachScheduler(scheduler)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go scheduler.Run(ctx)
+
+	assertControllerSuccess(t, controller.Handle(context.Background(), controllerRequest("connect-before-delete", "node.action", `{"node_id":"node_a","action":"connect","expected_revision":3}`)))
+	waitForJobState(t, controller.jobs, "job-connect-before-delete", JobSucceeded)
+	assertControllerSuccess(t, controller.Handle(context.Background(), controllerRequest("delete-online", "node.delete", `{"node_id":"node_a","expected_revision":3}`)))
+	waitForJobState(t, controller.jobs, "job-delete-finalize", JobSucceeded)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		stored, _ := desiredStore.Load()
+		if _, exists := stored.Nodes["node_a"]; !exists {
+			if stored.Revision != 5 || stored.Devices["device_a"].NodeID != "" || stored.Devices["device_a"].Enabled {
+				t.Fatalf("final delete config = revision %d device %#v", stored.Revision, stored.Devices["device_a"])
+			}
+			adapter.mu.Lock()
+			starts, stops := adapter.startCalls, adapter.stopCalls
+			adapter.mu.Unlock()
+			if starts != 1 || stops != 1 {
+				t.Fatalf("delete start/stop calls = %d/%d, want 1/1", starts, stops)
+			}
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("delete job succeeded without removing the tombstone")
+}
+
+func TestSchedulerDeleteKeepsTombstoneWhenGateRevocationFails(t *testing.T) {
+	jobIDs := []string{"job-connect-gate-delete", "job-delete-gate-failure"}
+	desiredStore := &memoryDesiredStore{cfg: controllerConfig()}
+	controller, err := NewController(
+		desiredStore, &memoryRuntimePersistence{}, NewMachine(nil), NewJobStore(),
+		WithControllerJobIDSource(func() string {
+			id := jobIDs[0]
+			jobIDs = jobIDs[1:]
+			return id
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := &schedulerAdapter{}
+	gate := &schedulerGate{}
+	scheduler := NewScheduler(controller, adapter, SchedulerConfig{}, gate)
+	controller.AttachScheduler(scheduler)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go scheduler.Run(ctx)
+	assertControllerSuccess(t, controller.Handle(context.Background(), controllerRequest("connect-gate-delete", "node.action", `{"node_id":"node_a","action":"connect","expected_revision":3}`)))
+	waitForJobState(t, controller.jobs, "job-connect-gate-delete", JobSucceeded)
+	gate.closeErr = errors.New("authorization revoke failed")
+	assertControllerSuccess(t, controller.Handle(context.Background(), controllerRequest("delete-gate-failure", "node.delete", `{"node_id":"node_a","expected_revision":3}`)))
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		job, _ := controller.jobs.Get("job-delete-gate-failure")
+		if len(job.Nodes) == 1 && job.Nodes[0].Step == "cleanup_failed" {
+			stored, _ := desiredStore.Load()
+			if node, exists := stored.Nodes["node_a"]; !exists || !node.DeletePending {
+				t.Fatalf("failed gate revocation removed tombstone: %#v exists=%t", node, exists)
+			}
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("gate revocation failure was not retained as cleanup_failed")
+}
+
+func TestSchedulerDeleteDoesNotSucceedWhenTombstoneFinalizationFails(t *testing.T) {
+	desiredStore := &memoryDesiredStore{cfg: controllerConfig(), failReplaceAt: 2}
+	controller, err := NewController(
+		desiredStore, &memoryRuntimePersistence{}, NewMachine(nil), NewJobStore(),
+		WithControllerJobIDSource(func() string { return "job-delete-finalize-failure" }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertControllerSuccess(t, controller.Handle(context.Background(), controllerRequest("delete-finalize-failure", "node.delete", `{"node_id":"node_a","expected_revision":3}`)))
+	scheduler := NewScheduler(controller, &schedulerAdapter{}, SchedulerConfig{})
+	scheduler.runNode(context.Background(), scheduledNode{jobID: "job-delete-finalize-failure", nodeID: "node_a"})
+	job, exists := controller.jobs.Get("job-delete-finalize-failure")
+	if !exists || job.State == JobSucceeded {
+		t.Fatalf("failed finalization reported success: %#v exists=%t", job, exists)
+	}
+	stored, _ := desiredStore.Load()
+	if node, exists := stored.Nodes["node_a"]; !exists || !node.DeletePending {
+		t.Fatalf("failed finalization lost tombstone: %#v exists=%t", node, exists)
+	}
+}
+
+func TestSchedulerDeleteRetriesTerminalPersistenceAfterTombstoneRemoval(t *testing.T) {
+	desiredStore := &memoryDesiredStore{cfg: controllerConfig()}
+	runtime := &memoryRuntimePersistence{}
+	jobIDs := []string{"job-connect-terminal-retry", "job-delete-terminal-retry"}
+	controller, err := NewController(
+		desiredStore, runtime, NewMachine(nil), NewJobStore(),
+		WithControllerJobIDSource(func() string {
+			id := jobIDs[0]
+			jobIDs = jobIDs[1:]
+			return id
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := &schedulerAdapter{}
+	scheduler := NewScheduler(controller, adapter, SchedulerConfig{})
+	// Drive the first connect directly so the runtime save sequence is stable.
+	assertControllerSuccess(t, controller.Handle(context.Background(), controllerRequest("connect-terminal-retry", "node.action", `{"node_id":"node_a","action":"connect","expected_revision":3}`)))
+	scheduler.runNode(context.Background(), scheduledNode{jobID: "job-connect-terminal-retry", nodeID: "node_a"})
+	assertControllerSuccess(t, controller.Handle(context.Background(), controllerRequest("delete-terminal-retry", "node.delete", `{"node_id":"node_a","expected_revision":3}`)))
+	// EventStop succeeds, then three consecutive terminal snapshot writes fail.
+	// The worker must stay alive and finish once persistence recovers.
+	runtime.mu.Lock()
+	runtime.failSaveFrom = runtime.saveCount + 2
+	runtime.failSaveThrough = runtime.saveCount + 4
+	runtime.mu.Unlock()
+	scheduler.runNode(context.Background(), scheduledNode{jobID: "job-delete-terminal-retry", nodeID: "node_a"})
+	job, exists := controller.jobs.Get("job-delete-terminal-retry")
+	if !exists || job.State != JobSucceeded {
+		t.Fatalf("transient terminal persistence orphaned delete job: %#v exists=%t", job, exists)
+	}
+	stored, _ := desiredStore.Load()
+	if _, exists := stored.Nodes["node_a"]; exists {
+		t.Fatal("terminal persistence retry restored deleted tombstone")
+	}
+}
+
+func TestSchedulerRestartRetainsDeletionOwnershipAndFinishesPendingDelete(t *testing.T) {
+	desired := controllerConfig()
+	desired.Revision = 4
+	node := desired.Nodes["node_a"]
+	node.Enabled = false
+	node.DeletePending = true
+	node.Revision = 4
+	desired.Nodes[node.ID] = node
+	device := desired.Devices["device_a"]
+	device.Enabled = false
+	device.NodeID = ""
+	desired.Devices[device.ID] = device
+	desiredStore := &memoryDesiredStore{cfg: desired}
+	runtime := &memoryRuntimePersistence{exists: true, snapshot: RuntimeSnapshot{
+		SchemaVersion: RuntimeSnapshotSchemaVersion, ConfigRevision: 3,
+		NodeStatuses: []NodeStatus{{NodeID: "node_a", JobID: "old-online", Generation: 7, State: model.StateOnline, UpdatedAt: stateTestEpoch}},
+	}}
+	controller, err := NewController(
+		desiredStore, runtime, NewMachine(nil), NewJobStore(),
+		WithControllerJobIDSource(func() string { return "job-recover-delete" }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, exists := controller.schedulerStatus("node_a")
+	if !exists || status.Generation != 7 {
+		t.Fatalf("restart discarded delete ownership: %#v exists=%t", status, exists)
+	}
+	adapter := &schedulerAdapter{}
+	scheduler := NewScheduler(controller, adapter, SchedulerConfig{})
+	controller.AttachScheduler(scheduler)
+	if err := controller.ReconcileStartup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go scheduler.Run(ctx)
+	waitForJobState(t, controller.jobs, "job-recover-delete", JobSucceeded)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		stored, _ := desiredStore.Load()
+		if _, exists := stored.Nodes["node_a"]; !exists {
+			adapter.mu.Lock()
+			stops := adapter.stopCalls
+			mismatch := adapter.stopGenerationMismatch
+			adapter.mu.Unlock()
+			if stops != 1 || mismatch {
+				t.Fatalf("recovered delete stop calls=%d generation mismatch=%t", stops, mismatch)
+			}
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	stored, _ := desiredStore.Load()
+	job, _ := controller.jobs.Get("job-recover-delete")
+	status, statusExists := controller.schedulerStatus("node_a")
+	t.Fatalf("restart did not finish pending delete: config=%#v job=%#v status=%#v exists=%t", stored.Nodes["node_a"], job, status, statusExists)
+}
+
+func TestSchedulerDeleteFinalizationDoesNotOrphanOlderNodeWork(t *testing.T) {
+	jobIDs := []string{"job-save-before-delete", "job-delete-after-save"}
+	desiredStore := &memoryDesiredStore{cfg: controllerConfig()}
+	controller, err := NewController(
+		desiredStore, &memoryRuntimePersistence{}, NewMachine(nil), NewJobStore(),
+		WithControllerJobIDSource(func() string {
+			id := jobIDs[0]
+			jobIDs = jobIDs[1:]
+			return id
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertControllerSuccess(t, controller.Handle(context.Background(), controllerRequest(
+		"save-before-delete", "node.save", `{"node_id":"node_a","name":"Node A","protocol":"l2tp","enabled":true,"server":"a-new.example","port":1701,"username":"","password":"","expected_revision":3}`,
+	)))
+	assertControllerSuccess(t, controller.Handle(context.Background(), controllerRequest("delete-after-save", "node.delete", `{"node_id":"node_a","expected_revision":4}`)))
+	scheduler := NewScheduler(controller, &schedulerAdapter{}, SchedulerConfig{})
+
+	// Exercise the adverse queue order: deletion reaches cleanup before the
+	// older save job has observed the node.
+	scheduler.runNode(context.Background(), scheduledNode{jobID: "job-delete-after-save", nodeID: "node_a"})
+	stored, _ := desiredStore.Load()
+	if _, exists := stored.Nodes["node_a"]; exists {
+		t.Fatal("delete did not finalize its tombstone")
+	}
+	scheduler.runNode(context.Background(), scheduledNode{jobID: "job-save-before-delete", nodeID: "node_a"})
+	stored, _ = desiredStore.Load()
+	if _, exists := stored.Nodes["node_a"]; exists {
+		t.Fatal("last node job did not finalize the tombstone")
+	}
+	for _, jobID := range []string{"job-save-before-delete", "job-delete-after-save"} {
+		job, exists := controller.jobs.Get(jobID)
+		if !exists || !isTerminalJob(job.State) {
+			t.Fatalf("job %s was orphaned: %#v exists=%t", jobID, job, exists)
+		}
+	}
+}
+
 func TestSchedulerLimitsL2TPConcurrencyToFourAndIsolatesNodeFailure(t *testing.T) {
 	desired := controllerConfig()
 	desired.Nodes = make(map[string]model.Node)
@@ -576,9 +866,10 @@ func TestSchedulerReconnectEnablesPersistedDisabledNode(t *testing.T) {
 }
 
 type memoryDesiredStore struct {
-	mu           sync.Mutex
-	cfg          model.DesiredConfig
-	replaceCount int
+	mu            sync.Mutex
+	cfg           model.DesiredConfig
+	replaceCount  int
+	failReplaceAt int
 }
 
 func (store *memoryDesiredStore) Load() (model.DesiredConfig, error) {
@@ -591,6 +882,9 @@ func (store *memoryDesiredStore) Replace(_ context.Context, expected uint64, nex
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	store.replaceCount++
+	if store.failReplaceAt > 0 && store.replaceCount == store.failReplaceAt {
+		return model.DesiredConfig{}, errors.New("desired persistence failed")
+	}
 	if store.cfg.Revision != expected {
 		return model.DesiredConfig{}, codeError(ErrorCodeRevisionConflict, "revision conflict")
 	}
@@ -606,11 +900,13 @@ func (store *memoryDesiredStore) Replace(_ context.Context, expected uint64, nex
 func (store *memoryDesiredStore) EnsureDurable(context.Context) error { return nil }
 
 type memoryRuntimePersistence struct {
-	mu         sync.Mutex
-	snapshot   RuntimeSnapshot
-	exists     bool
-	saveCount  int
-	failSaveAt int
+	mu              sync.Mutex
+	snapshot        RuntimeSnapshot
+	exists          bool
+	saveCount       int
+	failSaveAt      int
+	failSaveFrom    int
+	failSaveThrough int
 }
 
 func (store *memoryRuntimePersistence) Load() (RuntimeSnapshot, error) {
@@ -631,6 +927,9 @@ func (store *memoryRuntimePersistence) Save(_ context.Context, snapshot RuntimeS
 	defer store.mu.Unlock()
 	store.saveCount++
 	if store.failSaveAt > 0 && store.saveCount == store.failSaveAt {
+		return errors.New("runtime persistence failed")
+	}
+	if store.failSaveFrom > 0 && store.saveCount >= store.failSaveFrom && store.saveCount <= store.failSaveThrough {
 		return errors.New("runtime persistence failed")
 	}
 	store.snapshot, store.exists = normalized, true
@@ -706,6 +1005,7 @@ type schedulerGate struct {
 	name        string
 	openRelease <-chan struct{}
 	openErr     error
+	closeErr    error
 	order       *[]string
 	orderMu     *sync.Mutex
 	openCalls   int
@@ -757,7 +1057,7 @@ func (gate *schedulerGate) Open(ctx context.Context, _ platform.NodeRequest, _ p
 func (gate *schedulerGate) Close(_ context.Context, _ platform.NodeRequest, _ platform.Session) error {
 	gate.closeCalls++
 	gate.record("close:" + gate.name)
-	return nil
+	return gate.closeErr
 }
 
 func (gate *schedulerGate) record(value string) {

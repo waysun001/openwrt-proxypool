@@ -114,12 +114,17 @@ func runLive(ctx context.Context, options daemonOptions, endpointLease *api.Endp
 	controller.AttachScheduler(scheduler)
 	server := &api.Server{
 		Path: options.socketPath, Handler: controller, Lease: endpointLease,
-		Methods: map[string]struct{}{
-			"status.get": {}, "device.list": {}, "device.bind": {}, "device.unbind": {},
-			"node.action": {}, "import.preview": {}, "import.commit": {}, "job.get": {}, "job.list": {}, "system.events": {}, "system.interface_event": {},
-		},
+		Methods: liveControlMethods(),
 	}
 	return serveLive(ctx, controller, scheduler, dnsServer, authorizationGate, authorizer, server, desired.Global.StopTimeout)
+}
+
+func liveControlMethods() map[string]struct{} {
+	return map[string]struct{}{
+		"status.get": {}, "device.list": {}, "device.bind": {}, "device.unbind": {},
+		"node.save": {}, "node.delete": {}, "node.action": {}, "import.preview": {}, "import.commit": {},
+		"job.get": {}, "job.list": {}, "system.events": {}, "system.interface_event": {},
+	}
 }
 
 func bootstrapResolver(endpoints []model.DoHEndpoint) (*dnsproxy.HostResolver, error) {

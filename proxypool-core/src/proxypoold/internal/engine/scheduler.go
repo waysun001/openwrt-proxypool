@@ -181,10 +181,18 @@ func (scheduler *Scheduler) runNode(ctx context.Context, work scheduledNode) {
 	defer lock.Unlock()
 
 	job, node, exists := scheduler.controller.schedulerWork(work.jobID, work.nodeID)
-	if !exists || isTerminalJob(job.State) {
+	if job.ID == "" || isTerminalJob(job.State) {
 		return
 	}
-	if job.Kind == "node.stop" {
+	if !exists {
+		scheduler.completeNodeDurably(ctx, work, "desired_removed")
+		return
+	}
+	if node.DeletePending {
+		scheduler.deleteNode(ctx, work, node)
+		return
+	}
+	if job.Kind == "node.stop" || (job.Kind == "node.save" && !node.Enabled) {
 		status, exists := scheduler.controller.schedulerStatus(work.nodeID)
 		scheduler.stopNode(ctx, work, node, status, exists, false)
 		return
@@ -194,7 +202,7 @@ func (scheduler *Scheduler) runNode(ctx context.Context, work scheduledNode) {
 	if err != nil {
 		return
 	}
-	if exists && status.State == model.StateOnline && job.Kind != "node.reconnect" {
+	if exists && status.State == model.StateOnline && job.Kind != "node.reconnect" && job.Kind != "node.save" {
 		if job.Kind == "device.bind" {
 			status = scheduler.prepareReconnect(ctx, work, node, status)
 			if status.State == model.StateQueued {
@@ -229,6 +237,62 @@ func (scheduler *Scheduler) runNode(ctx context.Context, work scheduledNode) {
 		}
 	}
 	scheduler.startNode(ctx, work, node, status)
+}
+
+func (scheduler *Scheduler) deleteNode(ctx context.Context, work scheduledNode, node model.Node) {
+	status, exists := scheduler.controller.schedulerStatus(work.nodeID)
+	if !exists || status.State == model.StateDisabled {
+		finalized, err := scheduler.controller.schedulerFinalizeNodeDelete(ctx, work.nodeID)
+		if err != nil {
+			_ = scheduler.controller.schedulerFailNode(ctx, work.jobID, work.nodeID, "delete_finalize_failed")
+			return
+		}
+		if completed := scheduler.completeNodeDurably(ctx, work, "deleted"); completed && finalized {
+			_ = scheduler.controller.schedulerForgetDeletedNode(ctx, work.nodeID)
+		}
+		return
+	}
+	updated, err := scheduler.controller.schedulerApply(ctx, work.jobID, work.nodeID, status.Generation, EventStop, nil, "stopping")
+	if err != nil {
+		return
+	}
+	if !scheduler.closeOwnedSession(work, node, status.Generation) {
+		_, _ = scheduler.controller.schedulerApply(ctx, work.jobID, work.nodeID, updated.Generation, EventFailure, &model.CodeError{Code: ErrorCodeStopTimeout}, "cleanup_failed")
+		return
+	}
+	finalized, err := scheduler.controller.schedulerFinalizeNodeDelete(ctx, work.nodeID)
+	if err != nil {
+		_ = scheduler.controller.schedulerFailNode(ctx, work.jobID, work.nodeID, "delete_finalize_failed")
+		return
+	}
+	if _, err := scheduler.controller.schedulerApply(ctx, work.jobID, work.nodeID, updated.Generation, EventStopped, nil, "deleted"); err != nil {
+		if completed := scheduler.completeNodeDurably(ctx, work, "desired_removed"); completed && finalized {
+			_ = scheduler.controller.schedulerForgetDeletedNode(ctx, work.nodeID)
+		}
+		return
+	}
+	if finalized {
+		_ = scheduler.controller.schedulerForgetDeletedNode(ctx, work.nodeID)
+	}
+}
+
+func (scheduler *Scheduler) completeNodeDurably(ctx context.Context, work scheduledNode, step string) bool {
+	const retryDelay = 25 * time.Millisecond
+
+	for {
+		if err := scheduler.controller.schedulerCompleteNode(ctx, work.jobID, work.nodeID, step); err == nil {
+			return true
+		}
+		timer := time.NewTimer(retryDelay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return false
+		case <-timer.C:
+		}
+	}
 }
 
 func (scheduler *Scheduler) waitForOrderedNode(ctx context.Context, jobID, nodeID string) bool {
@@ -319,14 +383,7 @@ func (scheduler *Scheduler) stopNode(ctx context.Context, work scheduledNode, no
 }
 
 func (scheduler *Scheduler) cleanupBarrier(ctx context.Context, work scheduledNode, node model.Node, status NodeStatus, ownershipGeneration uint64) NodeStatus {
-	request := platform.NodeRequest{Node: node, JobID: work.jobID, Generation: ownershipGeneration}
-	session := scheduler.takeSession(work.nodeID)
-	stopCtx, cancel := context.WithTimeout(context.Background(), scheduler.config.StopTimeout)
-	defer cancel()
-	for index := len(scheduler.gates) - 1; index >= 0; index-- {
-		_ = scheduler.gates[index].Close(stopCtx, request, session)
-	}
-	if err := scheduler.adapter.Stop(stopCtx, request, session); err != nil {
+	if !scheduler.closeOwnedSession(work, node, ownershipGeneration) {
 		failed, _ := scheduler.controller.schedulerApply(ctx, work.jobID, work.nodeID, status.Generation, EventFailure, &model.CodeError{Code: ErrorCodeStopTimeout}, "cleanup_failed")
 		return failed
 	}
@@ -340,6 +397,23 @@ func (scheduler *Scheduler) cleanupBarrier(ctx context.Context, work scheduledNo
 	}
 	updated, _ := scheduler.controller.schedulerApply(ctx, work.jobID, work.nodeID, status.Generation, complete, nil, "cleanup_complete")
 	return updated
+}
+
+func (scheduler *Scheduler) closeOwnedSession(work scheduledNode, node model.Node, ownershipGeneration uint64) bool {
+	request := platform.NodeRequest{Node: node, JobID: work.jobID, Generation: ownershipGeneration}
+	session := scheduler.takeSession(work.nodeID)
+	stopCtx, cancel := context.WithTimeout(context.Background(), scheduler.config.StopTimeout)
+	defer cancel()
+	succeeded := true
+	for index := len(scheduler.gates) - 1; index >= 0; index-- {
+		if err := scheduler.gates[index].Close(stopCtx, request, session); err != nil {
+			succeeded = false
+		}
+	}
+	if err := scheduler.adapter.Stop(stopCtx, request, session); err != nil {
+		succeeded = false
+	}
+	return succeeded
 }
 
 func (scheduler *Scheduler) startNode(ctx context.Context, work scheduledNode, node model.Node, status NodeStatus) {
@@ -499,6 +573,61 @@ func (controller *Controller) schedulerNode(nodeID string) (model.Node, bool) {
 	defer controller.mu.Unlock()
 	node, exists := controller.desired.Nodes[nodeID]
 	return node, exists
+}
+
+func (controller *Controller) schedulerFinalizeNodeDelete(ctx context.Context, nodeID string) (bool, error) {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	current, err := controller.desiredStore.Load()
+	if err != nil {
+		return false, errors.New("delete finalization configuration load failed")
+	}
+	node, exists := current.Nodes[nodeID]
+	if !exists {
+		return true, nil
+	}
+	if !node.DeletePending {
+		return false, errors.New("delete finalization tombstone is missing")
+	}
+	next := cloneControllerConfig(current)
+	delete(next.Nodes, nodeID)
+	if err := model.Validate(next); err != nil {
+		return false, errors.New("delete finalization configuration is invalid")
+	}
+	stored, err := controller.desiredStore.Replace(ctx, current.Revision, next)
+	if err != nil {
+		observed, observeErr := controller.desiredStore.Load()
+		if observeErr != nil || !controllerConfigMatchesStoredMutation(current, next, observed) {
+			return false, errors.New("delete finalization persistence failed")
+		}
+		durableCtx, cancel := context.WithTimeout(context.Background(), controller.leaseRollbackTimeout)
+		durableErr := controller.desiredStore.EnsureDurable(durableCtx)
+		cancel()
+		if durableErr != nil {
+			return false, errors.New("delete finalization durability failed")
+		}
+		stored = observed
+	}
+	controller.desired = cloneControllerConfig(stored)
+	return true, nil
+}
+
+func (controller *Controller) schedulerFailNode(ctx context.Context, jobID, nodeID, step string) error {
+	return controller.schedulerRecordStatus(ctx, jobID, NodeStatus{
+		NodeID: nodeID, State: model.StateFailed,
+		LastError: publicErrorFromCode(&model.CodeError{Code: ErrorCodeInternal}),
+	}, step)
+}
+
+func (controller *Controller) schedulerForgetDeletedNode(ctx context.Context, nodeID string) error {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	delete(controller.statuses, nodeID)
+	controller.machine.restoreNode(nodeID, NodeStatus{}, false)
+	if err := controller.persistLocked(ctx); err != nil {
+		return errors.New("delete status cleanup persistence failed")
+	}
+	return nil
 }
 
 func (controller *Controller) schedulerEnsureKnown(ctx context.Context, jobID, nodeID string) (NodeStatus, bool, error) {

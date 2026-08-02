@@ -54,8 +54,12 @@ func validatePendingBindings(nodes map[string]Node, devices map[string]Device, p
 		if key == "" || binding.ID != key || !binding.LegacyIPv4.Is4() || binding.CreatedAt.IsZero() {
 			return invalid("invalid_config", "pending binding is invalid")
 		}
-		if _, exists := nodes[binding.NodeID]; !exists {
+		node, exists := nodes[binding.NodeID]
+		if !exists {
 			return invalid("not_found", "pending binding node does not exist")
+		}
+		if node.DeletePending {
+			return invalid("invalid_config", "pending binding references a delete-pending node")
 		}
 		if binding.ErrorCode != "" && binding.ErrorCode != "duplicate" {
 			return invalid("invalid_config", "pending binding error is invalid")
@@ -76,6 +80,9 @@ func validateNodeIdentity(nodes map[string]Node, nodeKeys []string) error {
 	policyIDs := make(map[uint16]struct{}, len(nodes))
 	for _, key := range nodeKeys {
 		node := nodes[key]
+		if node.DeletePending && node.Enabled {
+			return invalid("invalid_config", "delete-pending node must be disabled")
+		}
 		if key == "" || node.ID != key {
 			return invalid("invalid_config", "node identity is invalid")
 		}
@@ -178,8 +185,12 @@ func validateDeviceReferences(nodes map[string]Node, devices map[string]Device, 
 		if nodeID == "" {
 			continue
 		}
-		if _, exists := nodes[nodeID]; !exists {
+		node, exists := nodes[nodeID]
+		if !exists {
 			return invalid("not_found", "device node does not exist")
+		}
+		if node.DeletePending {
+			return invalid("invalid_config", "device references a delete-pending node")
 		}
 	}
 	return nil

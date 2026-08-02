@@ -51,14 +51,21 @@ type DesiredSummary struct {
 	PendingBindings []DesiredPendingBindingStatus `json:"pending_bindings,omitempty"`
 }
 
-// DesiredNodeSummary intentionally omits endpoints, usernames and all
-// credential/token fields from model.Node.
+// DesiredNodeSummary exposes fields needed to edit a node while returning only
+// credential-presence booleans, never usernames, passwords, tokens or keys.
 type DesiredNodeSummary struct {
-	ID       string         `json:"id"`
-	Name     string         `json:"name"`
-	Protocol model.Protocol `json:"protocol"`
-	Enabled  bool           `json:"enabled"`
-	PolicyID uint16         `json:"policy_id"`
+	ID            string         `json:"id"`
+	Name          string         `json:"name"`
+	Protocol      model.Protocol `json:"protocol"`
+	Enabled       bool           `json:"enabled"`
+	DeletePending bool           `json:"delete_pending"`
+	Server        string         `json:"server"`
+	Port          uint16         `json:"port"`
+	HasUsername   bool           `json:"has_username"`
+	HasPassword   bool           `json:"has_password"`
+	ExpiresAt     *time.Time     `json:"expires_at,omitempty"`
+	PolicyID      uint16         `json:"policy_id"`
+	Revision      uint64         `json:"revision"`
 }
 
 type DesiredDeviceStatus struct {
@@ -246,7 +253,12 @@ func summarizeDesired(desired model.DesiredConfig) (DesiredSummary, RuntimeSumma
 	sort.Strings(nodeIDs)
 	for _, id := range nodeIDs {
 		node := desired.Nodes[id]
-		summary.Nodes = append(summary.Nodes, DesiredNodeSummary{ID: node.ID, Name: node.Name, Protocol: node.Protocol, Enabled: node.Enabled, PolicyID: node.PolicyID})
+		summary.Nodes = append(summary.Nodes, DesiredNodeSummary{
+			ID: node.ID, Name: node.Name, Protocol: node.Protocol, Enabled: node.Enabled,
+			DeletePending: node.DeletePending, Server: node.Server, Port: node.Port,
+			HasUsername: node.Username != "", HasPassword: node.Password != "", ExpiresAt: node.ExpiresAt,
+			PolicyID: node.PolicyID, Revision: node.Revision,
+		})
 		runtimeSummary.Nodes = append(runtimeSummary.Nodes, RuntimeNodeSummary{NodeID: node.ID, State: model.StateDisabled})
 	}
 	deviceIDs := make([]string, 0, len(desired.Devices))
@@ -304,6 +316,12 @@ func summarizeReconciliation(job Job) ReconciliationSummary {
 
 func cloneShadowStatus(status ShadowStatus) ShadowStatus {
 	status.Desired.Nodes = append([]DesiredNodeSummary(nil), status.Desired.Nodes...)
+	for index := range status.Desired.Nodes {
+		if status.Desired.Nodes[index].ExpiresAt != nil {
+			expires := *status.Desired.Nodes[index].ExpiresAt
+			status.Desired.Nodes[index].ExpiresAt = &expires
+		}
+	}
 	status.Desired.Devices = append([]DesiredDeviceStatus(nil), status.Desired.Devices...)
 	status.Runtime.Nodes = append([]RuntimeNodeSummary(nil), status.Runtime.Nodes...)
 	if status.Config.Error != nil {

@@ -56,6 +56,15 @@ func TestRunPreservesVersionAndStrictlyRequiresShadow(t *testing.T) {
 	}
 }
 
+func TestLiveControlMethodsExposeTypedNodeMutations(t *testing.T) {
+	methods := liveControlMethods()
+	for _, method := range []string{"node.save", "node.delete", "node.action"} {
+		if _, exists := methods[method]; !exists {
+			t.Fatalf("live daemon method allowlist omitted %q", method)
+		}
+	}
+}
+
 func TestRunStrictlySelectsShadowOrLiveMode(t *testing.T) {
 	tests := []struct {
 		name     string

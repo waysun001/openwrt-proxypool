@@ -126,6 +126,7 @@ func Encode(w io.Writer, cfg model.DesiredConfig) error {
 		writeOption(&output, "name", node.Name)
 		writeOption(&output, "protocol", string(node.Protocol))
 		writeOption(&output, "enabled", boolText(node.Enabled))
+		writeOption(&output, "delete_pending", boolText(node.DeletePending))
 		writeOption(&output, "server", node.Server)
 		writeOption(&output, "port", strconv.FormatUint(uint64(node.Port), 10))
 		writeOption(&output, "username", node.Username)
@@ -357,12 +358,19 @@ func decodeGlobal(section *uciSection) (int, uint64, model.GlobalConfig, error) 
 }
 
 func decodeNode(section *uciSection) (model.Node, error) {
-	if !onlyKeys(section.options, nodeOptions) || len(section.lists) != 0 || !hasAll(section.options, nodeOptions) {
+	if !onlyKeys(section.options, nodeOptions) || len(section.lists) != 0 || !hasAll(section.options, nodeRequiredOptions) {
 		return model.Node{}, errors.New("invalid node options")
 	}
 	enabled, err := parseBool(section.options["enabled"])
 	if err != nil {
 		return model.Node{}, err
+	}
+	deletePending := false
+	if value, exists := section.options["delete_pending"]; exists {
+		deletePending, err = parseBool(value)
+		if err != nil {
+			return model.Node{}, err
+		}
 	}
 	port, err := strconv.ParseUint(section.options["port"], 10, 16)
 	if err != nil || port == 0 {
@@ -392,7 +400,7 @@ func decodeNode(section *uciSection) (model.Node, error) {
 		}
 		expiresAt = &parsed
 	}
-	return model.Node{ID: section.name, Name: section.options["name"], Protocol: model.Protocol(section.options["protocol"]), Enabled: enabled, Server: section.options["server"], Port: uint16(port), Username: section.options["username"], Password: section.options["password"], SLPToken: section.options["slp_token"], SLPTransport: section.options["slp_transport"], SLPObfs: slpObfs, SLPObfsKey: section.options["slp_obfs_key"], SLPInsecure: slpInsecure, ExpiresAt: expiresAt, PolicyID: uint16(policyID), Revision: revision}, nil
+	return model.Node{ID: section.name, Name: section.options["name"], Protocol: model.Protocol(section.options["protocol"]), Enabled: enabled, DeletePending: deletePending, Server: section.options["server"], Port: uint16(port), Username: section.options["username"], Password: section.options["password"], SLPToken: section.options["slp_token"], SLPTransport: section.options["slp_transport"], SLPObfs: slpObfs, SLPObfsKey: section.options["slp_obfs_key"], SLPInsecure: slpInsecure, ExpiresAt: expiresAt, PolicyID: uint16(policyID), Revision: revision}, nil
 }
 
 func decodeDevice(section *uciSection) (model.Device, error) {
@@ -430,7 +438,8 @@ func decodePendingBinding(section *uciSection) (model.PendingBinding, error) {
 
 var globalOptions = []string{"schema_version", "revision", "enabled", "runtime_backend", "max_nodes", "lan_device", "l2tp_concurrency", "proxy_concurrency", "connect_timeout", "stop_timeout"}
 var globalLists = []string{"management_port", "doh_url", "doh_bootstrap_ip", "doh_server_name"}
-var nodeOptions = []string{"name", "protocol", "enabled", "server", "port", "username", "password", "slp_token", "slp_transport", "slp_obfs", "slp_obfs_key", "slp_insecure", "expires_at", "policy_id", "revision"}
+var nodeRequiredOptions = []string{"name", "protocol", "enabled", "server", "port", "username", "password", "slp_token", "slp_transport", "slp_obfs", "slp_obfs_key", "slp_insecure", "expires_at", "policy_id", "revision"}
+var nodeOptions = append(append([]string(nil), nodeRequiredOptions...), "delete_pending")
 var deviceOptions = []string{"mac", "hostname", "fixed_ipv4", "node_id", "enabled"}
 var pendingBindingOptions = []string{"legacy_ipv4", "node_id", "created_at", "error_code"}
 

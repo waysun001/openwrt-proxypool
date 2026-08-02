@@ -37,25 +37,26 @@ type GlobalConfig struct {
 }
 
 type Node struct {
-	ID, Name     string
-	Protocol     Protocol
-	Enabled      bool
-	Server       string
-	Port         uint16
-	Username     string
-	Password     string `json:"-"`
-	SLPToken     string `json:"-"`
-	SLPTransport string
-	SLPObfs      bool
-	SLPObfsKey   string `json:"-"`
-	SLPInsecure  bool
-	ExpiresAt    *time.Time
-	PolicyID     uint16
-	Revision     uint64
+	ID, Name      string
+	Protocol      Protocol
+	Enabled       bool
+	DeletePending bool
+	Server        string
+	Port          uint16
+	Username      string
+	Password      string `json:"-"`
+	SLPToken      string `json:"-"`
+	SLPTransport  string
+	SLPObfs       bool
+	SLPObfsKey    string `json:"-"`
+	SLPInsecure   bool
+	ExpiresAt     *time.Time
+	PolicyID      uint16
+	Revision      uint64
 }
 
 func (n Node) String() string {
-	return fmt.Sprintf("Node{ID:%q Name:%q Protocol:%q Enabled:%t Server:%q Port:%d Username:%q Password:<redacted> SLPToken:<redacted> SLPTransport:%q SLPObfs:%t SLPObfsKey:<redacted> SLPInsecure:%t ExpiresAt:%v PolicyID:%d Revision:%d}", n.ID, n.Name, n.Protocol, n.Enabled, n.Server, n.Port, n.Username, n.SLPTransport, n.SLPObfs, n.SLPInsecure, n.ExpiresAt, n.PolicyID, n.Revision)
+	return fmt.Sprintf("Node{ID:%q Name:%q Protocol:%q Enabled:%t DeletePending:%t Server:%q Port:%d Username:%q Password:<redacted> SLPToken:<redacted> SLPTransport:%q SLPObfs:%t SLPObfsKey:<redacted> SLPInsecure:%t ExpiresAt:%v PolicyID:%d Revision:%d}", n.ID, n.Name, n.Protocol, n.Enabled, n.DeletePending, n.Server, n.Port, n.Username, n.SLPTransport, n.SLPObfs, n.SLPInsecure, n.ExpiresAt, n.PolicyID, n.Revision)
 }
 
 func (n Node) GoString() string {

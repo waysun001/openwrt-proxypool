@@ -63,6 +63,57 @@ func TestDecodeEncodeRoundTripPreservesEveryField(t *testing.T) {
 	}
 }
 
+func TestCodecDeletePendingIsBackwardCompatibleAndRoundTrips(t *testing.T) {
+	input, err := os.ReadFile("testdata/v2-valid.uci")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Decode(bytes.NewReader(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Nodes["node_a"].DeletePending {
+		t.Fatal("legacy V2 config defaulted delete_pending to true")
+	}
+	node := cfg.Nodes["node_a"]
+	node.Enabled = false
+	node.DeletePending = true
+	cfg.Nodes[node.ID] = node
+	device := cfg.Devices["device_a"]
+	device.Enabled = false
+	device.NodeID = ""
+	cfg.Devices[device.ID] = device
+	var encoded bytes.Buffer
+	if err := Encode(&encoded, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(encoded.Bytes(), []byte("option delete_pending '1'")) {
+		t.Fatal("encoded tombstone omitted delete_pending")
+	}
+	roundTrip, err := Decode(bytes.NewReader(encoded.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !roundTrip.Nodes["node_a"].DeletePending {
+		t.Fatal("round trip lost delete_pending")
+	}
+}
+
+func TestConfigEqualityIncludesDeletePending(t *testing.T) {
+	left := validConfig()
+	right := cloneConfig(left)
+	node := right.Nodes["node_a"]
+	node.Enabled = false
+	node.DeletePending = true
+	right.Nodes[node.ID] = node
+	leftNode := left.Nodes["node_a"]
+	leftNode.Enabled = false
+	left.Nodes[leftNode.ID] = leftNode
+	if configsEqual(left, right) {
+		t.Fatal("config equality ignored delete_pending")
+	}
+}
+
 func TestEncodeOrdersSectionsAndQuotesApostrophes(t *testing.T) {
 	cfg := validConfig()
 	first := cfg.Nodes["node_a"]

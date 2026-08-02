@@ -587,6 +587,26 @@ func validConfig() model.DesiredConfig {
 	return validConfigWithNodes(1)
 }
 
+func TestValidateDeletePendingNodeMustBeDisabledAndUnreferenced(t *testing.T) {
+	cfg := validConfig()
+	node := cfg.Nodes["node-01"]
+	node.DeletePending = true
+	node.Enabled = false
+	cfg.Nodes[node.ID] = node
+	if err := model.Validate(cfg); err != nil {
+		t.Fatalf("unreferenced delete-pending node rejected: %v", err)
+	}
+
+	node.Enabled = true
+	cfg.Nodes[node.ID] = node
+	assertCode(t, model.Validate(cfg), "invalid_config")
+
+	node.Enabled = false
+	cfg.Nodes[node.ID] = node
+	cfg.Devices = map[string]model.Device{"device-01": validDevice("device-01", "00:11:22:33:44:55", "192.168.9.20")}
+	assertCode(t, model.Validate(cfg), "invalid_config")
+}
+
 func validConfigWithNodes(count int) model.DesiredConfig {
 	nodes := make(map[string]model.Node, count)
 	for i := 1; i <= count; i++ {

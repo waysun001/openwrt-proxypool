@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -57,6 +58,14 @@ func WithControllerJobIDSource(source func() string) ControllerOption {
 	}
 }
 
+func WithControllerNodeIDSource(source func() string) ControllerOption {
+	return func(controller *Controller) {
+		if source != nil {
+			controller.newNodeID = source
+		}
+	}
+}
+
 func WithDeviceServices(source platform.DeviceSource, leases platform.LeaseManager) ControllerOption {
 	return func(controller *Controller) {
 		controller.deviceSource = source
@@ -100,6 +109,7 @@ type Controller struct {
 	idempotencyOrder     []string
 	now                  func() time.Time
 	newJobID             func() string
+	newNodeID            func() string
 	leaseRollbackTimeout time.Duration
 }
 
@@ -122,6 +132,7 @@ func NewController(desiredStore desiredConfigStore, runtimeStore runtimePersiste
 		idempotency:          make(map[string]IdempotencyRecord),
 		now:                  time.Now,
 		newJobID:             randomReconciliationID,
+		newNodeID:            randomControllerNodeID,
 		leaseRollbackTimeout: defaultControllerLeaseRollbackTimeout,
 		importer:             importer.New(),
 	}
@@ -171,9 +182,30 @@ func NewController(desiredStore desiredConfigStore, runtimeStore runtimePersiste
 	}
 	if snapshot.ConfigRevision < desired.Revision {
 		// A desired write may have reached disk immediately before a crash or
-		// runtime persistence failure. Never carry observational online state
-		// across that revision gap.
-		controller.statuses = make(map[string]NodeStatus)
+		// runtime persistence failure. Only a delete tombstone may retain its
+		// prior generation: the adapter needs that ownership evidence to remove
+		// the old session. Every other observational state is discarded.
+		for _, job := range controller.jobs.List() {
+			if isTerminalJob(job.State) {
+				continue
+			}
+			for _, progress := range job.Nodes {
+				if _, exists := desired.Nodes[progress.NodeID]; exists {
+					continue
+				}
+				if err := controller.updateJobForStatus(job.ID, NodeStatus{NodeID: progress.NodeID, State: model.StateDisabled}, "desired_removed"); err != nil {
+					return nil, errors.New("live runtime finalized-delete reconciliation failed")
+				}
+			}
+		}
+		for nodeID := range controller.statuses {
+			node, exists := desired.Nodes[nodeID]
+			if exists && node.DeletePending {
+				continue
+			}
+			delete(controller.statuses, nodeID)
+			controller.machine.restoreNode(nodeID, NodeStatus{}, false)
+		}
 		if err := controller.persistLocked(context.Background()); err != nil {
 			return nil, errors.New("live runtime reconciliation persistence failed")
 		}
@@ -210,7 +242,7 @@ func (controller *Controller) ReconcileStartup(ctx context.Context) error {
 	}
 	nodeIDs := make([]string, 0, len(controller.desired.Nodes))
 	for nodeID, node := range controller.desired.Nodes {
-		if !controller.desired.Global.Enabled || !node.Enabled {
+		if !node.DeletePending && (!controller.desired.Global.Enabled || !node.Enabled) {
 			continue
 		}
 		if _, exists := covered[nodeID]; !exists {
@@ -422,6 +454,10 @@ func (controller *Controller) Handle(ctx context.Context, request api.Request) a
 		return controller.handleDeviceBind(ctx, request)
 	case "device.unbind":
 		return controller.handleDeviceUnbind(ctx, request)
+	case "node.save":
+		return controller.handleNodeSave(ctx, request)
+	case "node.delete":
+		return controller.handleNodeDelete(ctx, request)
 	case "node.action":
 		return controller.handleNodeAction(ctx, request)
 	case "import.preview":
@@ -457,6 +493,24 @@ type unbindParams struct {
 type nodeActionParams struct {
 	NodeID           string  `json:"node_id"`
 	Action           string  `json:"action"`
+	ExpectedRevision *uint64 `json:"expected_revision"`
+}
+
+type nodeSaveParams struct {
+	NodeID           string         `json:"node_id"`
+	Name             string         `json:"name"`
+	Protocol         model.Protocol `json:"protocol"`
+	Enabled          bool           `json:"enabled"`
+	Server           string         `json:"server"`
+	Port             uint16         `json:"port"`
+	Username         string         `json:"username"`
+	Password         string         `json:"password"`
+	ExpiresAt        string         `json:"expires_at"`
+	ExpectedRevision *uint64        `json:"expected_revision"`
+}
+
+type nodeDeleteParams struct {
+	NodeID           string  `json:"node_id"`
 	ExpectedRevision *uint64 `json:"expected_revision"`
 }
 
@@ -715,7 +769,7 @@ func (controller *Controller) handleDeviceUnbind(ctx context.Context, request ap
 	stored, err := controller.desiredStore.Replace(ctx, current.Revision, next)
 	if err != nil {
 		observed, observeErr := controller.desiredStore.Load()
-		if observeErr == nil && controllerConfigMatchesStoredMutation(current.Revision, next, observed) {
+		if observeErr == nil && controllerConfigMatchesStoredMutation(current, next, observed) {
 			return controller.finishObservedMutationLocked(request, digest, observed, "device.unbind", nodeIDs)
 		}
 		if observeErr == nil && !controllerConfigsEqual(observed, current) {
@@ -734,7 +788,7 @@ func (controller *Controller) handleDeviceUnbind(ctx context.Context, request ap
 					return response
 				}
 				observed, observeErr = controller.desiredStore.Load()
-				if observeErr == nil && controllerConfigMatchesStoredMutation(current.Revision, next, observed) {
+				if observeErr == nil && controllerConfigMatchesStoredMutation(current, next, observed) {
 					response := controller.finishObservedMutationLocked(request, digest, observed, "device.unbind", nodeIDs)
 					cancelRepair()
 					return response
@@ -772,6 +826,9 @@ func (controller *Controller) handleNodeAction(ctx context.Context, request api.
 	if !exists {
 		return controllerError(request.ID, ErrorCodeNotFound)
 	}
+	if node.DeletePending {
+		return controllerError(request.ID, ErrorCodeInvalidConfig)
+	}
 	stored := current
 	wantEnabled := params.Action != "stop"
 	if params.Action != "reconnect" && node.Enabled != wantEnabled {
@@ -784,6 +841,189 @@ func (controller *Controller) handleNodeAction(ctx context.Context, request api.
 		}
 	}
 	return controller.finishMutationLocked(ctx, request, digest, stored, "node."+params.Action, []string{params.NodeID})
+}
+
+func (controller *Controller) handleNodeSave(ctx context.Context, request api.Request) api.Response {
+	var params nodeSaveParams
+	if decodeControllerParams(request.Params, &params) != nil || request.ID == "" ||
+		params.ExpectedRevision == nil || *params.ExpectedRevision == 0 ||
+		strings.TrimSpace(params.Name) == "" || strings.TrimSpace(params.Server) == "" ||
+		params.Port == 0 {
+		return controllerError(request.ID, ErrorCodeInvalidRequest)
+	}
+	if params.Protocol != model.ProtocolL2TP {
+		return controllerError(request.ID, ErrorCodeUnsupported)
+	}
+	var expiresAt *time.Time
+	if params.ExpiresAt != "" {
+		parsed, err := time.Parse(time.RFC3339, params.ExpiresAt)
+		if err != nil {
+			return controllerError(request.ID, ErrorCodeInvalidRequest)
+		}
+		parsed = parsed.UTC()
+		expiresAt = &parsed
+	}
+	digest := controllerDigest(request.Method, params)
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	if response, handled := controller.replayLocked(request, digest); handled {
+		return response
+	}
+	if contextDone(ctx) != nil {
+		return controllerError(request.ID, "operation_timeout")
+	}
+	current, err := controller.desiredStore.Load()
+	if err != nil {
+		return controllerError(request.ID, ErrorCodeInternal)
+	}
+	if current.Revision != *params.ExpectedRevision {
+		return controllerError(request.ID, ErrorCodeRevisionConflict)
+	}
+	nodeID := params.NodeID
+	previous, updating := current.Nodes[nodeID]
+	if nodeID != "" && !updating {
+		return controllerError(request.ID, ErrorCodeNotFound)
+	}
+	if updating && previous.DeletePending {
+		return controllerError(request.ID, ErrorCodeInvalidConfig)
+	}
+	if !updating {
+		if len(current.Nodes) >= 60 {
+			return controllerError(request.ID, ErrorCodeCapacityExceeded)
+		}
+		nodeID = controller.allocateNodeIDLocked(current.Nodes)
+		if nodeID == "" {
+			return controllerError(request.ID, ErrorCodeCapacityExceeded)
+		}
+	}
+	username := params.Username
+	if updating && username == "" {
+		username = previous.Username
+	}
+	if username == "" {
+		return controllerError(request.ID, ErrorCodeInvalidRequest)
+	}
+	password := params.Password
+	if updating && password == "" {
+		password = previous.Password
+	}
+	node := model.Node{
+		ID: nodeID, Name: strings.TrimSpace(params.Name), Protocol: params.Protocol, Enabled: params.Enabled,
+		Server: strings.TrimSpace(params.Server), Port: params.Port, Username: username, Password: password,
+		ExpiresAt: expiresAt, PolicyID: previous.PolicyID, Revision: previous.Revision,
+	}
+	if !updating {
+		node.PolicyID = firstFreePolicyID(current.Nodes)
+	}
+	next := cloneControllerConfig(current)
+	next.Nodes[nodeID] = node
+	if err := model.Validate(next); err != nil {
+		return controllerModelError(request.ID, err)
+	}
+	nodeIDs := []string(nil)
+	if (updating && previous.Enabled) || (current.Global.Enabled && node.Enabled) {
+		nodeIDs = []string{nodeID}
+	}
+	stored, err := controller.desiredStore.Replace(ctx, current.Revision, next)
+	if err != nil {
+		observed, observeErr := controller.desiredStore.Load()
+		if observeErr == nil && controllerConfigMatchesStoredMutation(current, next, observed) {
+			return controller.finishObservedReplayDurableMutationLocked(request, digest, observed, "node.save", nodeIDs)
+		}
+		return controllerModelError(request.ID, err)
+	}
+	return controller.finishReplayDurableMutationLocked(ctx, request, digest, stored, "node.save", nodeIDs)
+}
+
+func (controller *Controller) handleNodeDelete(ctx context.Context, request api.Request) api.Response {
+	var params nodeDeleteParams
+	if decodeControllerParams(request.Params, &params) != nil || request.ID == "" || params.NodeID == "" ||
+		params.ExpectedRevision == nil || *params.ExpectedRevision == 0 {
+		return controllerError(request.ID, ErrorCodeInvalidRequest)
+	}
+	digest := controllerDigest(request.Method, params)
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	if response, handled := controller.replayLocked(request, digest); handled {
+		return response
+	}
+	if contextDone(ctx) != nil {
+		return controllerError(request.ID, "operation_timeout")
+	}
+	current, err := controller.desiredStore.Load()
+	if err != nil {
+		return controllerError(request.ID, ErrorCodeInternal)
+	}
+	if current.Revision != *params.ExpectedRevision {
+		return controllerError(request.ID, ErrorCodeRevisionConflict)
+	}
+	node, exists := current.Nodes[params.NodeID]
+	if !exists {
+		return controllerError(request.ID, ErrorCodeNotFound)
+	}
+	if node.DeletePending {
+		return controller.finishReplayDurableMutationLocked(ctx, request, digest, current, "node.delete", []string{params.NodeID})
+	}
+	next := cloneControllerConfig(current)
+	node.Enabled = false
+	node.DeletePending = true
+	next.Nodes[params.NodeID] = node
+	for id, device := range next.Devices {
+		if device.NodeID != params.NodeID {
+			continue
+		}
+		device.NodeID = ""
+		device.Enabled = false
+		next.Devices[id] = device
+	}
+	for id, binding := range next.PendingBindings {
+		if binding.NodeID == params.NodeID {
+			delete(next.PendingBindings, id)
+		}
+	}
+	if err := model.Validate(next); err != nil {
+		return controllerModelError(request.ID, err)
+	}
+	stored, err := controller.desiredStore.Replace(ctx, current.Revision, next)
+	if err != nil {
+		observed, observeErr := controller.desiredStore.Load()
+		if observeErr == nil && controllerConfigMatchesStoredMutation(current, next, observed) {
+			return controller.finishObservedReplayDurableMutationLocked(request, digest, observed, "node.delete", []string{params.NodeID})
+		}
+		return controllerModelError(request.ID, err)
+	}
+	return controller.finishReplayDurableMutationLocked(ctx, request, digest, stored, "node.delete", []string{params.NodeID})
+}
+
+func (controller *Controller) allocateNodeIDLocked(nodes map[string]model.Node) string {
+	for attempt := 0; attempt < 64; attempt++ {
+		id := controller.newNodeID()
+		if id == "" {
+			continue
+		}
+		if _, exists := nodes[id]; !exists {
+			return id
+		}
+	}
+	return ""
+}
+
+func firstFreePolicyID(nodes map[string]model.Node) uint16 {
+	used := make(map[uint16]struct{}, len(nodes))
+	for _, node := range nodes {
+		used[node.PolicyID] = struct{}{}
+	}
+	for policyID := uint16(1); policyID <= 60; policyID++ {
+		if _, exists := used[policyID]; !exists {
+			return policyID
+		}
+	}
+	return 0
+}
+
+func randomControllerNodeID() string {
+	id := strings.TrimPrefix(randomReconciliationID(), "reconcile-")
+	return "node_" + strings.ReplaceAll(id, "-", "_")
 }
 
 func (controller *Controller) handleImportPreview(ctx context.Context, request api.Request) api.Response {
@@ -843,7 +1083,7 @@ func (controller *Controller) handleImportCommit(ctx context.Context, request ap
 	stored, err := controller.desiredStore.Replace(ctx, current.Revision, next)
 	if err != nil {
 		observed, observeErr := controller.desiredStore.Load()
-		if observeErr == nil && controllerConfigMatchesStoredMutation(current.Revision, next, observed) {
+		if observeErr == nil && controllerConfigMatchesStoredMutation(current, next, observed) {
 			controller.importer.Consume(params.PreviewID)
 			return controller.finishObservedDurableMutationLocked(request, digest, observed, "import.commit", nodeIDs)
 		}
@@ -854,14 +1094,18 @@ func (controller *Controller) handleImportCommit(ctx context.Context, request ap
 }
 
 func (controller *Controller) finishMutationLocked(ctx context.Context, request api.Request, digest string, desired model.DesiredConfig, kind string, nodeIDs []string) api.Response {
-	return controller.finishMutationWithDurabilityLocked(ctx, request, digest, desired, kind, nodeIDs, false)
+	return controller.finishMutationWithDurabilityLocked(ctx, request, digest, desired, kind, nodeIDs, false, false)
 }
 
 func (controller *Controller) finishDurableMutationLocked(ctx context.Context, request api.Request, digest string, desired model.DesiredConfig, kind string, nodeIDs []string) api.Response {
-	return controller.finishMutationWithDurabilityLocked(ctx, request, digest, desired, kind, nodeIDs, true)
+	return controller.finishMutationWithDurabilityLocked(ctx, request, digest, desired, kind, nodeIDs, true, false)
 }
 
-func (controller *Controller) finishMutationWithDurabilityLocked(ctx context.Context, request api.Request, digest string, desired model.DesiredConfig, kind string, nodeIDs []string, requireRuntimeDurable bool) api.Response {
+func (controller *Controller) finishReplayDurableMutationLocked(ctx context.Context, request api.Request, digest string, desired model.DesiredConfig, kind string, nodeIDs []string) api.Response {
+	return controller.finishMutationWithDurabilityLocked(ctx, request, digest, desired, kind, nodeIDs, true, true)
+}
+
+func (controller *Controller) finishMutationWithDurabilityLocked(ctx context.Context, request api.Request, digest string, desired model.DesiredConfig, kind string, nodeIDs []string, requireRuntimeDurable, persistReplayWithJob bool) api.Response {
 	beforeJobs := controller.jobs.Snapshot()
 	// Desired configuration was durably replaced before this function. Keep
 	// the in-memory revision aligned even if later runtime persistence fails.
@@ -880,6 +1124,19 @@ func (controller *Controller) finishMutationWithDurabilityLocked(ctx context.Con
 		Result: append(json.RawMessage(nil), resultBytes...), ConfigRevision: desired.Revision, CreatedAt: controller.now(),
 	}
 	if requireRuntimeDurable {
+		if persistReplayWithJob {
+			controller.addIdempotencyLocked(record)
+			if err := controller.persistLocked(ctx); err != nil {
+				if controller.scheduler != nil && !isTerminalJob(job.State) {
+					controller.scheduler.Submit(job)
+				}
+				return controllerError(request.ID, ErrorCodeInternal)
+			}
+			if controller.scheduler != nil && !isTerminalJob(job.State) {
+				controller.scheduler.Submit(job)
+			}
+			return api.Response{Version: api.ProtocolVersion, ID: request.ID, Result: resultBytes}
+		}
 		// Persist the promised job before adding the success replay record. If
 		// Save reports an error after its atomic rename, a restart may observe
 		// the job, but it can never observe a success response we did not return.
@@ -916,18 +1173,22 @@ func (controller *Controller) finishMutationWithDurabilityLocked(ctx context.Con
 }
 
 func (controller *Controller) finishObservedMutationLocked(request api.Request, digest string, desired model.DesiredConfig, kind string, nodeIDs []string) api.Response {
-	return controller.finishObservedMutationWithDurabilityLocked(request, digest, desired, kind, nodeIDs, false)
+	return controller.finishObservedMutationWithDurabilityLocked(request, digest, desired, kind, nodeIDs, false, false)
 }
 
 func (controller *Controller) finishObservedDurableMutationLocked(request api.Request, digest string, desired model.DesiredConfig, kind string, nodeIDs []string) api.Response {
-	return controller.finishObservedMutationWithDurabilityLocked(request, digest, desired, kind, nodeIDs, true)
+	return controller.finishObservedMutationWithDurabilityLocked(request, digest, desired, kind, nodeIDs, true, false)
 }
 
-func (controller *Controller) finishObservedMutationWithDurabilityLocked(request api.Request, digest string, desired model.DesiredConfig, kind string, nodeIDs []string, requireRuntimeDurable bool) api.Response {
+func (controller *Controller) finishObservedReplayDurableMutationLocked(request api.Request, digest string, desired model.DesiredConfig, kind string, nodeIDs []string) api.Response {
+	return controller.finishObservedMutationWithDurabilityLocked(request, digest, desired, kind, nodeIDs, true, true)
+}
+
+func (controller *Controller) finishObservedMutationWithDurabilityLocked(request api.Request, digest string, desired model.DesiredConfig, kind string, nodeIDs []string, requireRuntimeDurable, persistReplayWithJob bool) api.Response {
 	durableCtx, cancel := context.WithTimeout(context.Background(), controller.leaseRollbackTimeout)
 	err := controller.desiredStore.EnsureDurable(durableCtx)
 	if err == nil {
-		response := controller.finishMutationWithDurabilityLocked(durableCtx, request, digest, desired, kind, nodeIDs, requireRuntimeDurable)
+		response := controller.finishMutationWithDurabilityLocked(durableCtx, request, digest, desired, kind, nodeIDs, requireRuntimeDurable, persistReplayWithJob)
 		cancel()
 		return response
 	}
@@ -1131,19 +1392,32 @@ func controllerDigest(method string, params any) string {
 	return hex.EncodeToString(digest[:])
 }
 
-func controllerConfigMatchesStoredMutation(previousRevision uint64, next, observed model.DesiredConfig) bool {
-	if previousRevision == ^uint64(0) {
+func controllerConfigMatchesStoredMutation(current, next, observed model.DesiredConfig) bool {
+	if current.Revision == ^uint64(0) {
 		return false
 	}
 	expected := cloneControllerConfig(next)
-	expected.Revision = previousRevision + 1
+	expected.Revision = current.Revision + 1
+	for id, node := range expected.Nodes {
+		previous, exists := current.Nodes[id]
+		if exists && sameControllerNodeIgnoringRevision(previous, node) {
+			node.Revision = previous.Revision
+		} else {
+			node.Revision = expected.Revision
+		}
+		expected.Nodes[id] = node
+	}
 	return controllerConfigsEqual(expected, observed)
 }
 
+func sameControllerNodeIgnoringRevision(left, right model.Node) bool {
+	left.Revision = 0
+	right.Revision = 0
+	return reflect.DeepEqual(left, right)
+}
+
 func controllerConfigsEqual(left, right model.DesiredConfig) bool {
-	leftJSON, leftErr := json.Marshal(left)
-	rightJSON, rightErr := json.Marshal(right)
-	return leftErr == nil && rightErr == nil && bytes.Equal(leftJSON, rightJSON)
+	return reflect.DeepEqual(left, right)
 }
 
 func controllerResult(id string, value any) api.Response {
@@ -1158,7 +1432,7 @@ func controllerModelError(id string, err error) api.Response {
 	var codeErr *model.CodeError
 	if errors.As(err, &codeErr) {
 		switch codeErr.Code {
-		case ErrorCodeInvalidRequest, ErrorCodeInvalidConfig, ErrorCodeRevisionConflict, ErrorCodeCapacityExceeded, ErrorCodeDuplicate, ErrorCodeNotFound:
+		case ErrorCodeInvalidRequest, ErrorCodeInvalidConfig, ErrorCodeRevisionConflict, ErrorCodeCapacityExceeded, ErrorCodeDuplicate, ErrorCodeNotFound, ErrorCodeUnsupported:
 			return controllerError(id, codeErr.Code)
 		}
 	}
@@ -1195,6 +1469,7 @@ func controllerError(id, code string) api.Response {
 		ErrorCodeCapacityExceeded: "controller capacity is exceeded",
 		ErrorCodeDuplicate:        "request ID is already used by different work",
 		ErrorCodeNotFound:         "requested object was not found",
+		ErrorCodeUnsupported:      "requested protocol is not supported",
 		ErrorCodeInternal:         "internal control error",
 		"operation_timeout":       "operation timed out",
 	}

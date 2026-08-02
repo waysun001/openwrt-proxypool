@@ -217,7 +217,7 @@ func withRevision(current, next model.DesiredConfig, revision uint64) model.Desi
 }
 
 func sameNodeIgnoringRevision(a, b model.Node) bool {
-	return a.ID == b.ID && a.Name == b.Name && a.Protocol == b.Protocol && a.Enabled == b.Enabled &&
+	return a.ID == b.ID && a.Name == b.Name && a.Protocol == b.Protocol && a.Enabled == b.Enabled && a.DeletePending == b.DeletePending &&
 		a.Server == b.Server && a.Port == b.Port && a.Username == b.Username && a.Password == b.Password &&
 		a.SLPToken == b.SLPToken && a.SLPTransport == b.SLPTransport && a.SLPObfs == b.SLPObfs &&
 		a.SLPObfsKey == b.SLPObfsKey && a.SLPInsecure == b.SLPInsecure && a.PolicyID == b.PolicyID &&
@@ -263,7 +263,7 @@ func configsEqual(a, b model.DesiredConfig) bool {
 	}
 	for id, nodeA := range a.Nodes {
 		nodeB, ok := b.Nodes[id]
-		if !ok || nodeA.ID != nodeB.ID || nodeA.Name != nodeB.Name || nodeA.Protocol != nodeB.Protocol || nodeA.Enabled != nodeB.Enabled || nodeA.Server != nodeB.Server || nodeA.Port != nodeB.Port || nodeA.Username != nodeB.Username || nodeA.Password != nodeB.Password || nodeA.SLPToken != nodeB.SLPToken || nodeA.SLPTransport != nodeB.SLPTransport || nodeA.SLPObfs != nodeB.SLPObfs || nodeA.SLPObfsKey != nodeB.SLPObfsKey || nodeA.SLPInsecure != nodeB.SLPInsecure || nodeA.PolicyID != nodeB.PolicyID || nodeA.Revision != nodeB.Revision || !equalTime(nodeA.ExpiresAt, nodeB.ExpiresAt) {
+		if !ok || nodeA.ID != nodeB.ID || nodeA.Name != nodeB.Name || nodeA.Protocol != nodeB.Protocol || nodeA.Enabled != nodeB.Enabled || nodeA.DeletePending != nodeB.DeletePending || nodeA.Server != nodeB.Server || nodeA.Port != nodeB.Port || nodeA.Username != nodeB.Username || nodeA.Password != nodeB.Password || nodeA.SLPToken != nodeB.SLPToken || nodeA.SLPTransport != nodeB.SLPTransport || nodeA.SLPObfs != nodeB.SLPObfs || nodeA.SLPObfsKey != nodeB.SLPObfsKey || nodeA.SLPInsecure != nodeB.SLPInsecure || nodeA.PolicyID != nodeB.PolicyID || nodeA.Revision != nodeB.Revision || !equalTime(nodeA.ExpiresAt, nodeB.ExpiresAt) {
 			return false
 		}
 	}

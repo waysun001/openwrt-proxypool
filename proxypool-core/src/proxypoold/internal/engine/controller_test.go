@@ -104,7 +104,9 @@ func TestControllerStrictWriteSchemasAndRevisionConflictsHaveZeroMutation(t *tes
 		{name: "unknown action", method: "node.action", params: `{"node_id":"node_a","action":"explode","expected_revision":3}`, code: ErrorCodeInvalidRequest},
 		{name: "import preview unknown field", method: "import.preview", params: `{"protocol":"l2tp","raw":"vpn.example|user|password","expected_revision":3,"future":true}`, code: ErrorCodeInvalidRequest},
 		{name: "import commit missing revision", method: "import.commit", params: `{"preview_id":"preview","preview_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`, code: ErrorCodeInvalidRequest},
-		{name: "unknown method", method: "node.save", params: `{}`, code: "unknown_method"},
+		{name: "node save missing revision", method: "node.save", params: `{"name":"New","protocol":"l2tp","enabled":true,"server":"new.example","port":1701,"username":"user","password":"password"}`, code: ErrorCodeInvalidRequest},
+		{name: "node delete missing revision", method: "node.delete", params: `{"node_id":"node_a"}`, code: ErrorCodeInvalidRequest},
+		{name: "unknown method", method: "node.future", params: `{}`, code: "unknown_method"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -130,6 +132,307 @@ func TestControllerStrictWriteSchemasAndRevisionConflictsHaveZeroMutation(t *tes
 				t.Fatal("rejected write mutated config or jobs")
 			}
 		})
+	}
+}
+
+func TestControllerNodeDeleteAtomicallyOfflinesBindingsAndPersistsTombstone(t *testing.T) {
+	cfg := controllerConfig()
+	cfg.PendingBindings = map[string]model.PendingBinding{
+		"pending_a": {ID: "pending_a", LegacyIPv4: netip.MustParseAddr("192.168.9.20"), NodeID: "node_a", CreatedAt: stateTestEpoch},
+	}
+	configPath := writeControllerConfig(t, cfg)
+	jobs := NewJobStore()
+	controller, err := NewController(
+		config.NewStore(configPath), NewRuntimeStore(filepath.Join(t.TempDir(), "runtime.json")), NewMachine(nil), jobs,
+		WithControllerJobIDSource(func() string { return "job-node-delete" }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := controller.Handle(context.Background(), controllerRequest("delete-node-a", "node.delete", `{"node_id":"node_a","expected_revision":3}`))
+	assertControllerSuccess(t, response)
+	stored, err := config.NewStore(configPath).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, exists := stored.Nodes["node_a"]
+	device := stored.Devices["device_a"]
+	if stored.Revision != 4 || !exists || node.Enabled || !node.DeletePending || device.Enabled || device.NodeID != "" || len(stored.PendingBindings) != 0 {
+		t.Fatalf("delete tombstone = revision %d node %#v exists=%t device %#v pending %#v", stored.Revision, node, exists, device, stored.PendingBindings)
+	}
+	job, exists := jobs.Get("job-node-delete")
+	if !exists || job.Kind != "node.delete" || len(job.Nodes) != 1 || job.Nodes[0].NodeID != "node_a" {
+		t.Fatalf("delete job = %#v exists=%t", job, exists)
+	}
+	status := controller.Handle(context.Background(), controllerRequest("status-after-delete", "status.get", `{}`))
+	assertControllerSuccess(t, status)
+	if !bytes.Contains(status.Result, []byte(`"delete_pending":true`)) || bytes.Contains(status.Result, []byte("password-a")) {
+		t.Fatalf("delete status is unsafe or incomplete: %s", status.Result)
+	}
+	action := controller.Handle(context.Background(), controllerRequest("connect-deleting", "node.action", `{"node_id":"node_a","action":"connect","expected_revision":4}`))
+	assertControllerError(t, action, ErrorCodeInvalidConfig)
+	save := controller.Handle(context.Background(), controllerRequest("save-deleting", "node.save", `{"node_id":"node_a","name":"Node A","protocol":"l2tp","enabled":true,"server":"a.example","port":1701,"username":"","password":"","expected_revision":4}`))
+	assertControllerError(t, save, ErrorCodeInvalidConfig)
+}
+
+func TestControllerNodeDeleteRecognizesPostRenameCommitAndQueuesCleanup(t *testing.T) {
+	desired := &postCommitErrorDesiredStore{cfg: controllerConfig()}
+	recorder := &controllerSchedulerRecorder{}
+	controller, err := NewController(
+		desired, &memoryRuntimePersistence{}, NewMachine(nil), NewJobStore(),
+		WithControllerJobIDSource(func() string { return "job-post-rename-delete" }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.AttachScheduler(recorder)
+	response := controller.Handle(context.Background(), controllerRequest("post-rename-delete", "node.delete", `{"node_id":"node_a","expected_revision":3}`))
+	assertControllerSuccess(t, response)
+	stored, err := desired.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stored.Nodes["node_a"].DeletePending || stored.Nodes["node_a"].Enabled || stored.Devices["device_a"].Enabled || stored.Devices["device_a"].NodeID != "" {
+		t.Fatalf("post-rename delete state = %#v", stored)
+	}
+	job, exists := controller.jobs.Get("job-post-rename-delete")
+	if !exists || len(recorder.jobs) != 1 || recorder.jobs[0].ID != job.ID {
+		t.Fatalf("post-rename cleanup = job %#v exists=%t submitted=%#v", job, exists, recorder.jobs)
+	}
+}
+
+func TestControllerNodeDeleteUncertainDurabilityStillQueuesFailClosedCleanup(t *testing.T) {
+	desired := &postCommitErrorDesiredStore{cfg: controllerConfig(), ensureErr: errors.New("directory sync unavailable")}
+	recorder := &controllerSchedulerRecorder{}
+	controller, err := NewController(
+		desired, &memoryRuntimePersistence{}, NewMachine(nil), NewJobStore(),
+		WithControllerJobIDSource(func() string { return "job-uncertain-delete" }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.AttachScheduler(recorder)
+	response := controller.Handle(context.Background(), controllerRequest("uncertain-delete", "node.delete", `{"node_id":"node_a","expected_revision":3}`))
+	assertControllerError(t, response, ErrorCodeInternal)
+	job, exists := controller.jobs.Get("job-uncertain-delete")
+	if !exists || len(recorder.jobs) != 1 || recorder.jobs[0].ID != job.ID {
+		t.Fatalf("uncertain delete cleanup = job %#v exists=%t submitted=%#v", job, exists, recorder.jobs)
+	}
+}
+
+func TestControllerNodeSaveCreatesL2TPWithServerAllocatedIdentity(t *testing.T) {
+	cfg := controllerConfig()
+	configPath := writeControllerConfig(t, cfg)
+	jobs := NewJobStore()
+	controller, err := NewController(
+		config.NewStore(configPath), NewRuntimeStore(filepath.Join(t.TempDir(), "runtime.json")), NewMachine(nil), jobs,
+		WithControllerJobIDSource(func() string { return "job-node-create" }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := controller.Handle(context.Background(), controllerRequest(
+		"node-create", "node.save", `{"name":"Node C","protocol":"l2tp","enabled":true,"server":"c.example","port":1701,"username":"user-c","password":"new-node-secret","expected_revision":3}`,
+	))
+	assertControllerSuccess(t, response)
+	if bytes.Contains(response.Result, []byte("new-node-secret")) {
+		t.Fatal("node.save response exposed the password")
+	}
+	stored, err := config.NewStore(configPath).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Revision != 4 || len(stored.Nodes) != 3 {
+		t.Fatalf("stored config = revision %d nodes %d", stored.Revision, len(stored.Nodes))
+	}
+	var created model.Node
+	for id, node := range stored.Nodes {
+		if id != "node_a" && id != "node_b" {
+			created = node
+		}
+	}
+	if created.ID == "" || created.PolicyID != 3 || created.Password != "new-node-secret" || created.Revision != 4 || !created.Enabled {
+		t.Fatalf("created node = %#v", created)
+	}
+	job, exists := jobs.Get("job-node-create")
+	if !exists || job.Kind != "node.save" || len(job.Nodes) != 1 || job.Nodes[0].NodeID != created.ID || job.ConfigRevision != 4 {
+		t.Fatalf("created job = %#v exists=%t", job, exists)
+	}
+}
+
+func TestControllerNodeSavePreservesBlankPasswordAndReplacesExplicitSecret(t *testing.T) {
+	configPath := writeControllerConfig(t, controllerConfig())
+	jobIDs := []string{"job-node-preserve", "job-node-replace"}
+	controller, err := NewController(
+		config.NewStore(configPath), NewRuntimeStore(filepath.Join(t.TempDir(), "runtime.json")), NewMachine(nil), NewJobStore(),
+		WithControllerJobIDSource(func() string {
+			id := jobIDs[0]
+			jobIDs = jobIDs[1:]
+			return id
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preserve := controller.Handle(context.Background(), controllerRequest(
+		"node-preserve", "node.save", `{"node_id":"node_a","name":"Node A edited","protocol":"l2tp","enabled":true,"server":"a-edited.example","port":1701,"username":"","password":"","expected_revision":3}`,
+	))
+	assertControllerSuccess(t, preserve)
+	stored, err := config.NewStore(configPath).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Nodes["node_a"].Username != "user-a" || stored.Nodes["node_a"].Password != "password-a" || stored.Nodes["node_a"].Server != "a-edited.example" {
+		t.Fatalf("blank password update = %#v", stored.Nodes["node_a"])
+	}
+	replace := controller.Handle(context.Background(), controllerRequest(
+		"node-replace", "node.save", `{"node_id":"node_a","name":"Node A edited","protocol":"l2tp","enabled":true,"server":"a-edited.example","port":1701,"username":"user-a","password":"replacement-secret","expected_revision":4}`,
+	))
+	assertControllerSuccess(t, replace)
+	if bytes.Contains(replace.Result, []byte("replacement-secret")) {
+		t.Fatal("node.save response exposed the replacement password")
+	}
+	stored, err = config.NewStore(configPath).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Revision != 5 || stored.Nodes["node_a"].Password != "replacement-secret" || stored.Nodes["node_a"].Revision != 5 {
+		t.Fatalf("explicit password update = revision %d node %#v", stored.Revision, stored.Nodes["node_a"])
+	}
+}
+
+func TestControllerStoredMutationMatchIncludesNodeSecrets(t *testing.T) {
+	current := controllerConfig()
+	next := cloneControllerConfig(current)
+	node := next.Nodes["node_a"]
+	node.Password = "replacement-secret"
+	next.Nodes[node.ID] = node
+	observed := cloneControllerConfig(next)
+	observed.Revision = 4
+	observedNode := observed.Nodes["node_a"]
+	observedNode.Revision = 4
+	observedNode.Password = "password-a"
+	observed.Nodes[observedNode.ID] = observedNode
+	if controllerConfigMatchesStoredMutation(current, next, observed) {
+		t.Fatal("ambiguous commit comparison ignored a mismatched password")
+	}
+}
+
+func TestControllerNodeSaveRejectsUnsupportedProtocolAndSixtyFirstNodeWithoutMutation(t *testing.T) {
+	tests := []struct {
+		name   string
+		cfg    model.DesiredConfig
+		params string
+		code   string
+	}{
+		{
+			name: "socks5 is not yet implemented", cfg: controllerConfig(), code: ErrorCodeUnsupported,
+			params: `{"name":"Proxy","protocol":"socks5","enabled":false,"server":"proxy.example","port":1080,"username":"","password":"","expected_revision":3}`,
+		},
+	}
+	full := controllerConfig()
+	full.Nodes = make(map[string]model.Node, 60)
+	for index := 1; index <= 60; index++ {
+		id := fmt.Sprintf("node_%02d", index)
+		full.Nodes[id] = model.Node{ID: id, Name: fmt.Sprintf("Node %02d", index), Protocol: model.ProtocolL2TP, Enabled: true, Server: fmt.Sprintf("vpn-%02d.example", index), Port: 1701, Username: "user", Password: "password", PolicyID: uint16(index), Revision: 3}
+	}
+	full.Devices = map[string]model.Device{}
+	tests = append(tests, struct {
+		name   string
+		cfg    model.DesiredConfig
+		params string
+		code   string
+	}{
+		name: "sixty first node", cfg: full, code: ErrorCodeCapacityExceeded,
+		params: `{"name":"Overflow","protocol":"l2tp","enabled":true,"server":"overflow.example","port":1701,"username":"user","password":"password","expected_revision":3}`,
+	})
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			configPath := writeControllerConfig(t, test.cfg)
+			jobs := NewJobStore()
+			controller, err := NewController(config.NewStore(configPath), NewRuntimeStore(filepath.Join(t.TempDir(), "runtime.json")), NewMachine(nil), jobs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response := controller.Handle(context.Background(), controllerRequest("node-rejected", "node.save", test.params))
+			assertControllerError(t, response, test.code)
+			after, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, after) || len(jobs.List()) != 0 {
+				t.Fatal("rejected node.save mutated config or jobs")
+			}
+		})
+	}
+}
+
+func TestControllerNodeMethodsDoNotPromiseSuccessBeforeJobIsDurable(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		params string
+	}{
+		{
+			name: "save", method: "node.save",
+			params: `{"node_id":"node_a","name":"Node A","protocol":"l2tp","enabled":true,"server":"a-new.example","port":1701,"username":"","password":"","expected_revision":3}`,
+		},
+		{name: "delete", method: "node.delete", params: `{"node_id":"node_a","expected_revision":3}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			desired := &memoryDesiredStore{cfg: controllerConfig()}
+			runtime := &memoryRuntimePersistence{failSaveAt: 2}
+			recorder := &controllerSchedulerRecorder{}
+			controller, err := NewController(
+				desired, runtime, NewMachine(nil), NewJobStore(),
+				WithControllerJobIDSource(func() string { return "job-durability-" + test.name }),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			controller.AttachScheduler(recorder)
+			response := controller.Handle(context.Background(), controllerRequest("durability-"+test.name, test.method, test.params))
+			assertControllerError(t, response, ErrorCodeInternal)
+			stored, err := desired.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			job, exists := controller.jobs.Get("job-durability-" + test.name)
+			if stored.Revision != 4 || !exists || len(recorder.jobs) != 1 || recorder.jobs[0].ID != job.ID {
+				t.Fatalf("durability failure = revision %d job %#v exists=%t submitted=%#v", stored.Revision, job, exists, recorder.jobs)
+			}
+		})
+	}
+}
+
+func TestControllerNodeSavePersistsReplayWithPromisedJobInOneSnapshot(t *testing.T) {
+	desired := &memoryDesiredStore{cfg: controllerConfig()}
+	runtime := &memoryRuntimePersistence{failSaveAt: 3}
+	firstJobs := NewJobStore()
+	first, err := NewController(
+		desired, runtime, NewMachine(nil), firstJobs,
+		WithControllerJobIDSource(func() string { return "job-atomic-node-replay" }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := controllerRequest(
+		"atomic-node-replay", "node.save", `{"node_id":"node_a","name":"Node A","protocol":"l2tp","enabled":true,"server":"a-atomic.example","port":1701,"username":"","password":"","expected_revision":3}`,
+	)
+	response := first.Handle(context.Background(), request)
+	assertControllerSuccess(t, response)
+	restarted, err := NewController(desired, runtime, NewMachine(nil), NewJobStore(), WithControllerJobIDSource(func() string { return "must-not-be-used" }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed := restarted.Handle(context.Background(), request)
+	if !reflect.DeepEqual(replayed, response) {
+		t.Fatalf("restart lost atomic node replay:\n got: %#v\nwant: %#v", replayed, response)
 	}
 }
 
@@ -376,7 +679,7 @@ func TestControllerReadMethodsAreStrictBoundedAndCredentialFree(t *testing.T) {
 		response := controller.Handle(context.Background(), request)
 		assertControllerSuccess(t, response)
 		lower := strings.ToLower(string(response.Result))
-		for _, forbidden := range []string{"credential-do-not-return", "secret-user", "password", "slp_token", "obfs_key"} {
+		for _, forbidden := range []string{"credential-do-not-return", "secret-user", `"password":`, `"username":`, "slp_token", "obfs_key"} {
 			if strings.Contains(lower, forbidden) {
 				t.Fatalf("%s response leaked %q: %s", request.Method, forbidden, response.Result)
 			}
@@ -386,6 +689,31 @@ func TestControllerReadMethodsAreStrictBoundedAndCredentialFree(t *testing.T) {
 	assertControllerError(t, controller.Handle(context.Background(), controllerRequest("bad-status", "status.get", `{"future":1}`)), ErrorCodeInvalidRequest)
 	assertControllerError(t, controller.Handle(context.Background(), controllerRequest("bad-job", "job.get", `{"job_id":"missing"}`)), ErrorCodeNotFound)
 	assertControllerError(t, controller.Handle(context.Background(), controllerRequest("bad-events", "system.events", `{"after_sequence":0,"limit":1001}`)), ErrorCodeInvalidRequest)
+}
+
+func TestControllerStatusReturnsEditableNonSecretNodeFields(t *testing.T) {
+	cfg := controllerConfig()
+	expires := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
+	node := cfg.Nodes["node_a"]
+	node.ExpiresAt = &expires
+	cfg.Nodes[node.ID] = node
+	controller, err := NewController(&memoryDesiredStore{cfg: cfg}, &memoryRuntimePersistence{}, NewMachine(nil), NewJobStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := controller.Handle(context.Background(), controllerRequest("editable-status", "status.get", `{}`))
+	assertControllerSuccess(t, response)
+	encoded := string(response.Result)
+	for _, required := range []string{`"server":"a.example"`, `"port":1701`, `"has_username":true`, `"has_password":true`, `"expires_at":"2030-01-02T03:04:05Z"`, `"revision":3`} {
+		if !strings.Contains(encoded, required) {
+			t.Fatalf("status omitted editable field %s: %s", required, response.Result)
+		}
+	}
+	for _, forbidden := range []string{"user-a", "password-a"} {
+		if strings.Contains(encoded, forbidden) {
+			t.Fatalf("status exposed credential %s", forbidden)
+		}
+	}
 }
 
 func TestControllerNetifdHintQueuesOwnedNodeRecoveryAndRejectsSpoofing(t *testing.T) {
@@ -815,6 +1143,42 @@ func TestControllerRecoversWhenRuntimeRevisionIsAheadOfDesired(t *testing.T) {
 	}
 }
 
+func TestControllerRestartCompletesActiveJobForAlreadyFinalizedDelete(t *testing.T) {
+	desiredStore := &memoryDesiredStore{cfg: controllerConfig()}
+	runtime := &memoryRuntimePersistence{}
+	first, err := NewController(
+		desiredStore, runtime, NewMachine(nil), NewJobStore(),
+		WithControllerJobIDSource(func() string { return "job-crash-after-delete-finalize" }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertControllerSuccess(t, first.Handle(context.Background(), controllerRequest("crash-delete", "node.delete", `{"node_id":"node_a","expected_revision":3}`)))
+	tombstone, err := desiredStore.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalized := cloneControllerConfig(tombstone)
+	delete(finalized.Nodes, "node_a")
+	if _, err := desiredStore.Replace(context.Background(), 4, finalized); err != nil {
+		t.Fatal(err)
+	}
+	restartedJobs := NewJobStore()
+	if _, err := NewController(desiredStore, runtime, NewMachine(nil), restartedJobs); err != nil {
+		t.Fatal(err)
+	}
+	job, exists := restartedJobs.Get("job-crash-after-delete-finalize")
+	if !exists || job.State != JobSucceeded {
+		t.Fatalf("restart orphaned finalized delete job: %#v exists=%t", job, exists)
+	}
+	runtime.mu.Lock()
+	runtimeRevision := runtime.snapshot.ConfigRevision
+	runtime.mu.Unlock()
+	if runtimeRevision != 5 {
+		t.Fatalf("restart runtime revision = %d, want 5", runtimeRevision)
+	}
+}
+
 func TestControllerRebindQueuesOldNodeBeforeNewNode(t *testing.T) {
 	cfg := controllerConfig()
 	configPath := writeControllerConfig(t, cfg)
@@ -923,6 +1287,15 @@ func (s *failOnceDesiredStore) Replace(_ context.Context, expected uint64, next 
 		return model.DesiredConfig{}, codeError(ErrorCodeRevisionConflict, "revision conflict")
 	}
 	next.Revision = expected + 1
+	for id, node := range next.Nodes {
+		previous, exists := s.cfg.Nodes[id]
+		if exists && sameControllerNodeIgnoringRevision(previous, node) {
+			node.Revision = previous.Revision
+		} else {
+			node.Revision = next.Revision
+		}
+		next.Nodes[id] = node
+	}
 	s.cfg = cloneControllerConfig(next)
 	return cloneControllerConfig(next), nil
 }
@@ -948,6 +1321,15 @@ func (s *postCommitErrorDesiredStore) Replace(_ context.Context, expected uint64
 		return model.DesiredConfig{}, codeError(ErrorCodeRevisionConflict, "revision conflict")
 	}
 	next.Revision = expected + 1
+	for id, node := range next.Nodes {
+		previous, exists := s.cfg.Nodes[id]
+		if exists && sameControllerNodeIgnoringRevision(previous, node) {
+			node.Revision = previous.Revision
+		} else {
+			node.Revision = next.Revision
+		}
+		next.Nodes[id] = node
+	}
 	s.cfg = cloneControllerConfig(next)
 	return model.DesiredConfig{}, errors.New("directory sync failed after rename")
 }
