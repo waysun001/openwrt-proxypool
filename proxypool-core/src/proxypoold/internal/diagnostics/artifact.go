@@ -39,14 +39,16 @@ type Artifact struct {
 }
 
 type ArtifactClaim struct {
-	Path     string
-	Filename string
-	Size     int64
+	ArtifactID string
+	Path       string
+	Filename   string
+	Size       int64
 }
 
 type artifactRecord struct {
 	artifact Artifact
 	path     string
+	claimed  bool
 }
 
 type ArtifactStoreOption func(*ArtifactStore)
@@ -186,7 +188,7 @@ func (store *ArtifactStore) Claim(id string) (ArtifactClaim, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	record, exists := store.records[id]
-	if !exists {
+	if !exists || record.claimed {
 		return ArtifactClaim{}, ErrArtifactNotFound
 	}
 	if !store.now().Before(record.artifact.ExpiresAt) {
@@ -203,8 +205,48 @@ func (store *ArtifactStore) Claim(id string) (ArtifactClaim, error) {
 		delete(store.records, id)
 		return ArtifactClaim{}, ErrArtifactUnsafe
 	}
+	record.claimed = true
+	store.records[id] = record
+	return ArtifactClaim{ArtifactID: id, Path: record.path, Filename: record.artifact.Filename, Size: record.artifact.Size}, nil
+}
+
+func (store *ArtifactStore) Release(id string) error {
+	if store == nil || !artifactIDPattern.MatchString(id) {
+		return ErrArtifactNotFound
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	record, exists := store.records[id]
+	if !exists || !record.claimed {
+		return ErrArtifactNotFound
+	}
+	if !pathWithinRoot(store.root, record.path) {
+		return ErrArtifactUnsafe
+	}
+	if err := os.Remove(record.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return errors.New("diagnostic artifact removal failed")
+	}
 	delete(store.records, id)
-	return ArtifactClaim{Path: record.path, Filename: record.artifact.Filename, Size: record.artifact.Size}, nil
+	return nil
+}
+
+func (store *ArtifactStore) CleanupExpired() error {
+	if store == nil {
+		return errors.New("diagnostic artifact store is invalid")
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	now := store.now()
+	for id, record := range store.records {
+		if now.Before(record.artifact.ExpiresAt) {
+			continue
+		}
+		delete(store.records, id)
+		if pathWithinRoot(store.root, record.path) {
+			_ = os.Remove(record.path)
+		}
+	}
+	return nil
 }
 
 func ensureArtifactRoot(root string) error {

@@ -52,6 +52,12 @@ func TestArtifactStoreWritesPrivateBoundedArchiveAndClaimsOnce(t *testing.T) {
 	if string(entries["status.json"]) != `{"state":"ready"}` || string(entries["ip-rules.txt"]) != "rule" {
 		t.Fatalf("archive entries = %#v", entries)
 	}
+	if err := store.Release(artifact.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(claim.Path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("released artifact remains: %v", err)
+	}
 }
 
 func TestArtifactStoreRejectsUnsafeRootIDsEntriesAndSymlinkReplacement(t *testing.T) {
