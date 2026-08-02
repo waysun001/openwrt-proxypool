@@ -22,6 +22,8 @@ type Store struct {
 	mu   sync.Mutex
 }
 
+var errStoreTransactionBusy = errors.New("configuration transaction is busy")
+
 type fsOps interface {
 	CreateTemp(string, string) (tempFile, error)
 	ReadFile(string) ([]byte, error)
@@ -81,10 +83,38 @@ func (s *Store) EnsureDurable(ctx context.Context) error {
 	return contextError(ctx)
 }
 
+// ConfirmDurable verifies the exact visible configuration and syncs its
+// directory while excluding every other Store writer for the same path.
+func (s *Store) ConfirmDurable(ctx context.Context, expected model.DesiredConfig) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	transaction, err := acquireStoreTransactionLock(ctx, s.path+".lock")
+	if err != nil {
+		return err
+	}
+	defer transaction.Close()
+	if err := contextError(ctx); err != nil {
+		return err
+	}
+	current, err := s.loadLocked()
+	if err != nil || !configsEqual(current, expected) {
+		return errors.New("configuration durability target changed")
+	}
+	if err := s.ops.SyncDir(filepath.Dir(s.path)); err != nil {
+		return errors.New("configuration directory sync failed")
+	}
+	return contextError(ctx)
+}
+
 // Replace persists next only if expectedRevision matches the on-disk revision.
 func (s *Store) Replace(ctx context.Context, expectedRevision uint64, next model.DesiredConfig) (model.DesiredConfig, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	transaction, err := acquireStoreTransactionLock(ctx, s.path+".lock")
+	if err != nil {
+		return model.DesiredConfig{}, err
+	}
+	defer transaction.Close()
 	if err := contextError(ctx); err != nil {
 		return model.DesiredConfig{}, err
 	}
@@ -210,11 +240,15 @@ func cloneConfig(cfg model.DesiredConfig) model.DesiredConfig {
 	for id, device := range cfg.Devices {
 		clone.Devices[id] = device
 	}
+	clone.PendingBindings = make(map[string]model.PendingBinding, len(cfg.PendingBindings))
+	for id, binding := range cfg.PendingBindings {
+		clone.PendingBindings[id] = binding
+	}
 	return clone
 }
 
 func configsEqual(a, b model.DesiredConfig) bool {
-	if a.SchemaVersion != b.SchemaVersion || a.Revision != b.Revision || a.Global.Enabled != b.Global.Enabled || a.Global.RuntimeBackend != b.Global.RuntimeBackend || a.Global.MaxNodes != b.Global.MaxNodes || a.Global.LANDevice != b.Global.LANDevice || a.Global.L2TPConcurrency != b.Global.L2TPConcurrency || a.Global.ProxyConcurrency != b.Global.ProxyConcurrency || a.Global.ConnectTimeout != b.Global.ConnectTimeout || a.Global.StopTimeout != b.Global.StopTimeout || len(a.Global.ManagementPorts) != len(b.Global.ManagementPorts) || len(a.Global.DoHEndpoints) != len(b.Global.DoHEndpoints) || len(a.Nodes) != len(b.Nodes) || len(a.Devices) != len(b.Devices) {
+	if a.SchemaVersion != b.SchemaVersion || a.Revision != b.Revision || a.Global.Enabled != b.Global.Enabled || a.Global.RuntimeBackend != b.Global.RuntimeBackend || a.Global.MaxNodes != b.Global.MaxNodes || a.Global.LANDevice != b.Global.LANDevice || a.Global.L2TPConcurrency != b.Global.L2TPConcurrency || a.Global.ProxyConcurrency != b.Global.ProxyConcurrency || a.Global.ConnectTimeout != b.Global.ConnectTimeout || a.Global.StopTimeout != b.Global.StopTimeout || len(a.Global.ManagementPorts) != len(b.Global.ManagementPorts) || len(a.Global.DoHEndpoints) != len(b.Global.DoHEndpoints) || len(a.Nodes) != len(b.Nodes) || len(a.Devices) != len(b.Devices) || len(a.PendingBindings) != len(b.PendingBindings) {
 		return false
 	}
 	for i := range a.Global.ManagementPorts {
@@ -236,6 +270,12 @@ func configsEqual(a, b model.DesiredConfig) bool {
 	for id, deviceA := range a.Devices {
 		deviceB, ok := b.Devices[id]
 		if !ok || deviceA != deviceB {
+			return false
+		}
+	}
+	for id, pendingA := range a.PendingBindings {
+		pendingB, ok := b.PendingBindings[id]
+		if !ok || pendingA != pendingB {
 			return false
 		}
 	}

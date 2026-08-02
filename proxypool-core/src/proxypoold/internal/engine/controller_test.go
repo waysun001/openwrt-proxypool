@@ -501,6 +501,127 @@ func TestControllerListsAndBindsDiscoveredDeviceWithoutCallerMAC(t *testing.T) {
 	assertControllerError(t, withMAC, ErrorCodeInvalidRequest)
 }
 
+func TestControllerLearnsPendingBindingFromConfirmedDHCP(t *testing.T) {
+	cfg := controllerConfig()
+	cfg.Devices = map[string]model.Device{}
+	cfg.PendingBindings = map[string]model.PendingBinding{
+		"pending_192_168_9_20": {
+			ID: "pending_192_168_9_20", LegacyIPv4: netip.MustParseAddr("192.168.9.20"),
+			NodeID: "node_a", CreatedAt: stateTestEpoch,
+		},
+	}
+	desired := &memoryDesiredStore{cfg: cfg}
+	discovered := platform.DiscoveredDevice{
+		ID: "device_001122334455", MAC: "00:11:22:33:44:55", IPv4: netip.MustParseAddr("192.168.9.20"),
+		Hostname: "phone", Ingress: "lan1", Confirmed: true,
+	}
+	leases := &controllerLeaseManager{}
+	recorder := &controllerSchedulerRecorder{}
+	controller, err := NewController(
+		desired, &memoryRuntimePersistence{}, NewMachine(nil), NewJobStore(),
+		WithDeviceServices(&controllerDeviceSource{devices: []platform.DiscoveredDevice{discovered}}, leases),
+		WithControllerJobIDSource(func() string { return "job-pending-learn" }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.AttachScheduler(recorder)
+	if err := controller.LearnPendingBindings(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := desired.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	device := stored.Devices[discovered.ID]
+	if stored.Revision != 4 || len(stored.PendingBindings) != 0 || device.MAC != discovered.MAC || device.NodeID != "node_a" || !device.Enabled {
+		t.Fatalf("learned config = revision %d pending %#v device %#v", stored.Revision, stored.PendingBindings, device)
+	}
+	if len(leases.applied) != 1 || len(recorder.jobs) != 1 || recorder.jobs[0].Kind != "pending.learn" {
+		t.Fatalf("learned side effects = leases %#v jobs %#v", leases.applied, recorder.jobs)
+	}
+}
+
+func TestControllerKeepsAmbiguousPendingBindingWithoutRepeatedRevision(t *testing.T) {
+	cfg := controllerConfig()
+	cfg.Devices = map[string]model.Device{}
+	cfg.PendingBindings = map[string]model.PendingBinding{
+		"pending_192_168_9_20": {
+			ID: "pending_192_168_9_20", LegacyIPv4: netip.MustParseAddr("192.168.9.20"),
+			NodeID: "node_a", CreatedAt: stateTestEpoch,
+		},
+	}
+	desired := &memoryDesiredStore{cfg: cfg}
+	source := &controllerDeviceSource{devices: []platform.DiscoveredDevice{
+		{ID: "device_001122334455", MAC: "00:11:22:33:44:55", IPv4: netip.MustParseAddr("192.168.9.20"), Confirmed: true},
+		{ID: "device_001122334466", MAC: "00:11:22:33:44:66", IPv4: netip.MustParseAddr("192.168.9.20"), Confirmed: true},
+	}}
+	leases := &controllerLeaseManager{}
+	controller, err := NewController(desired, &memoryRuntimePersistence{}, NewMachine(nil), NewJobStore(), WithDeviceServices(source, leases))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.LearnPendingBindings(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.LearnPendingBindings(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	stored, _ := desired.Load()
+	pending := stored.PendingBindings["pending_192_168_9_20"]
+	if stored.Revision != 4 || pending.ErrorCode != "duplicate" || len(stored.Devices) != 0 || desired.replaceCount != 1 || len(leases.applied) != 0 || len(controller.jobs.List()) != 0 {
+		t.Fatalf("ambiguous learn = revision %d pending %#v devices %#v replaces %d", stored.Revision, pending, stored.Devices, desired.replaceCount)
+	}
+}
+
+func TestControllerLearnsIndependentPendingWhenOfflineAddressStillConflicts(t *testing.T) {
+	cfg := controllerConfig()
+	cfg.Devices = map[string]model.Device{
+		"device_existing": {
+			ID: "device_existing", MAC: "00:11:22:33:44:10", FixedIPv4: netip.MustParseAddr("192.168.9.20"),
+			NodeID: "node_a", Enabled: true,
+		},
+	}
+	cfg.PendingBindings = map[string]model.PendingBinding{
+		"pending_192_168_9_20": {
+			ID: "pending_192_168_9_20", LegacyIPv4: netip.MustParseAddr("192.168.9.20"),
+			NodeID: "node_a", CreatedAt: stateTestEpoch, ErrorCode: "duplicate",
+		},
+		"pending_192_168_9_21": {
+			ID: "pending_192_168_9_21", LegacyIPv4: netip.MustParseAddr("192.168.9.21"),
+			NodeID: "node_b", CreatedAt: stateTestEpoch,
+		},
+	}
+	desired := &memoryDesiredStore{cfg: cfg}
+	discovered := platform.DiscoveredDevice{
+		ID: "device_001122334421", MAC: "00:11:22:33:44:21", IPv4: netip.MustParseAddr("192.168.9.21"), Confirmed: true,
+	}
+	leases := &controllerLeaseManager{}
+	controller, err := NewController(
+		desired, &memoryRuntimePersistence{}, NewMachine(nil), NewJobStore(),
+		WithDeviceServices(&controllerDeviceSource{devices: []platform.DiscoveredDevice{discovered}}, leases),
+		WithControllerJobIDSource(func() string { return "job-independent-pending-learn" }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.LearnPendingBindings(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := desired.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	conflict := stored.PendingBindings["pending_192_168_9_20"]
+	learned := stored.Devices[discovered.ID]
+	if stored.Revision != 4 || conflict.ErrorCode != "duplicate" || learned.NodeID != "node_b" || len(stored.PendingBindings) != 1 {
+		t.Fatalf("partial learn = revision %d pending %#v learned %#v", stored.Revision, stored.PendingBindings, learned)
+	}
+	if len(leases.applied) != 1 || leases.applied[0].ID != discovered.ID {
+		t.Fatalf("lease applications = %#v", leases.applied)
+	}
+}
+
 func TestControllerLeaseFailureDoesNotPublishDiscoveredBinding(t *testing.T) {
 	cfg := controllerConfig()
 	cfg.Devices = map[string]model.Device{}

@@ -4,3 +4,5 @@
 /etc/proxypool/cleanup-required
 /etc/proxypool/firewall-transaction
 /etc/proxypool/wireless-quarantine
+/etc/proxypool/migration-v1.json
+/etc/proxypool/backups/

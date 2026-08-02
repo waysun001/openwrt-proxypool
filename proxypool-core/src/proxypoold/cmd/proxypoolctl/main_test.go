@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -15,12 +16,76 @@ import (
 	"time"
 
 	"proxypoold/internal/api"
+	"proxypoold/internal/config"
+	"proxypoold/internal/model"
 )
 
 func TestRunVersion(t *testing.T) {
 	var out, err bytes.Buffer
 	if code := run([]string{"--version"}, bytes.NewReader(nil), &out, &err); code != 0 || out.Len() == 0 || err.Len() != 0 {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), err.String())
+	}
+}
+
+func TestRunMigrateV1WritesOnlySafeSummaryAndIsIdempotent(t *testing.T) {
+	directory := t.TempDir()
+	sourcePath := filepath.Join(directory, "proxypool")
+	targetPath := filepath.Join(directory, "proxypool_v2")
+	backupDir := filepath.Join(directory, "backups")
+	markerPath := filepath.Join(directory, "migration.json")
+	source, err := os.ReadFile("../../internal/config/testdata/v1-realistic.uci")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sourcePath, source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base := model.DesiredConfig{
+		SchemaVersion: 2, Revision: 1,
+		Global: model.GlobalConfig{
+			Enabled: true, RuntimeBackend: "v2_shadow", MaxNodes: 60, LANDevice: "br-lan",
+			ManagementPorts: []uint16{80, 443}, L2TPConcurrency: 4, ProxyConcurrency: 8,
+			ConnectTimeout: 90 * time.Second, StopTimeout: 30 * time.Second,
+			DoHEndpoints: []model.DoHEndpoint{{URL: "https://dns.example/dns-query", BootstrapIP: netip.MustParseAddr("192.0.2.53").String(), ServerName: "dns.example"}},
+		},
+		Nodes: map[string]model.Node{}, Devices: map[string]model.Device{}, PendingBindings: map[string]model.PendingBinding{},
+	}
+	var encoded bytes.Buffer
+	if err := config.Encode(&encoded, base); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(targetPath, encoded.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"migrate-v1", "--source", sourcePath, "--target", targetPath, "--backup-dir", backupDir, "--marker", markerPath, "--socket", filepath.Join(directory, "daemon.sock")}
+	for attempt, wantStatus := range []string{"migrated", "unchanged"} {
+		var stdout, stderr bytes.Buffer
+		if code := run(args, bytes.NewReader(nil), &stdout, &stderr); code != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), `"status":"`+wantStatus+`"`) {
+			t.Fatalf("attempt %d code/output/error = %d / %s / %s", attempt, code, stdout.String(), stderr.String())
+		}
+		for _, secret := range []string{"legacy-password", "proxy-password", "legacy-token", "legacy-obfs-key"} {
+			if strings.Contains(stdout.String(), secret) || strings.Contains(stderr.String(), secret) {
+				t.Fatalf("migration output leaked %q", secret)
+			}
+		}
+	}
+	stored, err := config.NewStore(targetPath).Load()
+	if err != nil || stored.Revision != 2 || len(stored.Nodes) != 3 || len(stored.PendingBindings) != 2 {
+		t.Fatalf("migration target = revision %d nodes %d pending %d / %v", stored.Revision, len(stored.Nodes), len(stored.PendingBindings), err)
+	}
+	exportPath := filepath.Join(directory, "recovery", "proxypool-v1.uci")
+	var exportOut, exportErr bytes.Buffer
+	if code := run([]string{"export-v1", "--config", targetPath, "--output", exportPath}, bytes.NewReader(nil), &exportOut, &exportErr); code != 0 || exportErr.Len() != 0 || !strings.Contains(exportOut.String(), `"bindings":2`) {
+		t.Fatalf("export code/output/error = %d / %s / %s", code, exportOut.String(), exportErr.String())
+	}
+	for _, secret := range []string{"legacy-password", "proxy-password", "legacy-token", "legacy-obfs-key"} {
+		if strings.Contains(exportOut.String(), secret) || strings.Contains(exportErr.String(), secret) {
+			t.Fatalf("export status leaked %q", secret)
+		}
+	}
+	exported, err := os.ReadFile(exportPath)
+	if err != nil || !bytes.Contains(exported, []byte("legacy-password")) || !bytes.Contains(exported, []byte("192.168.9.21")) {
+		t.Fatalf("recovery export is incomplete: %v", err)
 	}
 }
 

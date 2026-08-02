@@ -22,6 +22,59 @@ type recordingHandler struct {
 	fn    func(context.Context, api.Request) api.Response
 }
 
+func TestServerUsesPreAcquiredEndpointLeaseUntilCallerReleasesIt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Go's Unix socket server is not available on Windows")
+	}
+	path := filepath.Join(t.TempDir(), "proxypoold.sock")
+	lease, err := api.AcquireEndpointLease(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if competing, err := api.AcquireEndpointLease(path); err == nil {
+		_ = competing.Close()
+		t.Fatal("pre-acquired endpoint lease allowed a competing owner")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- (&api.Server{Path: path, Handler: &recordingHandler{}, Lease: lease}).Serve(ctx)
+	}()
+	waitForSocket(t, path)
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if competing, err := api.AcquireEndpointLease(path); err == nil {
+		_ = competing.Close()
+		t.Fatal("server released its caller-owned endpoint lease")
+	}
+	if err := lease.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reacquired, err := api.AcquireEndpointLease(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reacquired.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func waitForSocket(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, err := os.Lstat(path); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("server did not create socket")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func (h *recordingHandler) Handle(ctx context.Context, req api.Request) api.Response {
 	h.calls.Add(1)
 	if h.fn != nil {

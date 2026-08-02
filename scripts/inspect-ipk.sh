@@ -100,7 +100,7 @@ fi
 
 keep="$inspect_tmp/data/lib/upgrade/keep.d/proxypool"
 expected_keep="$inspect_tmp/expected-keep"
-printf '/etc/config/proxypool_v2\n/etc/config/proxypool_runtime\n/etc/proxypool/activated-backend\n/etc/proxypool/cleanup-required\n/etc/proxypool/firewall-transaction\n/etc/proxypool/wireless-quarantine\n' >"$expected_keep"
+printf '/etc/config/proxypool_v2\n/etc/config/proxypool_runtime\n/etc/proxypool/activated-backend\n/etc/proxypool/cleanup-required\n/etc/proxypool/firewall-transaction\n/etc/proxypool/wireless-quarantine\n/etc/proxypool/migration-v1.json\n/etc/proxypool/backups/\n' >"$expected_keep"
 [ -f "$keep" ] && cmp -s "$expected_keep" "$keep" || { echo 'missing or invalid sysupgrade keep list' >&2; exit 1; }
 [ "$(stat -c '%a' "$keep")" = 644 ] || { echo 'unexpected mode for sysupgrade keep list' >&2; exit 1; }
 
@@ -140,6 +140,7 @@ for executable_relative in \
 	usr/lib/proxypool/proxypool-fw4-activate \
 	usr/lib/proxypool/proxypool-fw4-check-staged \
 	usr/lib/proxypool/proxypool-postinst \
+	usr/lib/proxypool/proxypool-migrate.sh \
 	usr/lib/proxypool/proxypool-safety-uci-default \
 	usr/lib/proxypool/ubus-call-stdin.uc; do
 	require_mode "$executable_relative" 755

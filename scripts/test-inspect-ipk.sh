@@ -89,7 +89,7 @@ make_ipk() {
 	esac
 
 	cp "$ROOT/proxypool-core/files/proxypool.config" "$data/etc/config/proxypool"
-	printf '/etc/config/proxypool_v2\n/etc/config/proxypool_runtime\n/etc/proxypool/activated-backend\n/etc/proxypool/cleanup-required\n/etc/proxypool/firewall-transaction\n/etc/proxypool/wireless-quarantine\n' \
+	printf '/etc/config/proxypool_v2\n/etc/config/proxypool_runtime\n/etc/proxypool/activated-backend\n/etc/proxypool/cleanup-required\n/etc/proxypool/firewall-transaction\n/etc/proxypool/wireless-quarantine\n/etc/proxypool/migration-v1.json\n/etc/proxypool/backups/\n' \
 		>"$data/lib/upgrade/keep.d/proxypool"
 	case "$fixture_kind" in
 		payload_v2) printf "config global 'global'\n" >"$data/etc/config/proxypool_v2" ;;
@@ -155,6 +155,7 @@ make_ipk() {
 		proxypool-fw4-activate \
 		proxypool-fw4-check-staged \
 		proxypool-postinst \
+		proxypool-migrate.sh \
 		proxypool-safety-uci-default \
 		ubus-call-stdin.uc; do
 		printf '%s\n' '#!/bin/sh' 'exit 0' >"$data/usr/lib/proxypool/$helper"

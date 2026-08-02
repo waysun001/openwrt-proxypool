@@ -441,6 +441,27 @@ func sameDoH(a, b []model.DoHEndpoint) bool {
 	return true
 }
 
+func TestCodecRoundTripsPendingBindings(t *testing.T) {
+	cfg := validConfig()
+	cfg.PendingBindings = map[string]model.PendingBinding{
+		"pending_192_168_9_20": {
+			ID: "pending_192_168_9_20", LegacyIPv4: mustAddr("192.168.9.20"), NodeID: "node_a",
+			CreatedAt: time.Date(2026, 8, 1, 1, 2, 3, 0, time.UTC), ErrorCode: "duplicate",
+		},
+	}
+	var encoded bytes.Buffer
+	if err := Encode(&encoded, cfg); err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(bytes.NewReader(encoded.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(decoded, cfg) {
+		t.Fatalf("pending round trip mismatch:\n got %#v\nwant %#v", decoded.PendingBindings, cfg.PendingBindings)
+	}
+}
+
 func safeConfigsEqual(a, b model.DesiredConfig) bool {
 	return reflect.DeepEqual(a, b)
 }
@@ -470,6 +491,7 @@ func validConfig() model.DesiredConfig {
 			"device_b": {ID: "device_b", MAC: "00:11:22:33:44:66", Hostname: "B", FixedIPv4: mustAddr("192.0.2.11"), NodeID: "node_b", Enabled: true},
 			"device_a": {ID: "device_a", MAC: "00:11:22:33:44:55", Hostname: "A", FixedIPv4: mustAddr("192.0.2.10"), NodeID: "node_a", Enabled: true},
 		},
+		PendingBindings: map[string]model.PendingBinding{},
 	}
 }
 

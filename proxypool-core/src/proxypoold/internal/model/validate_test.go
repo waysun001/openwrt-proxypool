@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
 
 	"proxypoold/internal/model"
 )
@@ -515,6 +516,70 @@ func secretValue(name string) string {
 		return "token-secret"
 	default:
 		return "obfs-key-secret"
+	}
+}
+
+func TestValidatePendingBindingsRequiresUniqueIPv4AndExistingNode(t *testing.T) {
+	now := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	cfg := validConfig()
+	cfg.PendingBindings = map[string]model.PendingBinding{
+		"pending_a": {ID: "pending_a", LegacyIPv4: netip.MustParseAddr("192.168.9.20"), NodeID: "node-01", CreatedAt: now},
+	}
+	if err := model.Validate(cfg); err != nil {
+		t.Fatalf("valid pending binding: %v", err)
+	}
+	duplicate := cfg
+	duplicate.PendingBindings = map[string]model.PendingBinding{"pending_a": cfg.PendingBindings["pending_a"]}
+	duplicate.Devices = map[string]model.Device{"device-01": validDevice("device-01", "00:11:22:33:44:55", "192.168.9.20")}
+	value := duplicate.PendingBindings["pending_a"]
+	value.ErrorCode = "duplicate"
+	duplicate.PendingBindings["pending_a"] = value
+	if err := model.Validate(duplicate); err != nil {
+		t.Fatalf("explicit duplicate pending state: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*model.DesiredConfig)
+	}{
+		{name: "identity", mutate: func(cfg *model.DesiredConfig) {
+			value := cfg.PendingBindings["pending_a"]
+			value.ID = "wrong"
+			cfg.PendingBindings["pending_a"] = value
+		}},
+		{name: "ipv6", mutate: func(cfg *model.DesiredConfig) {
+			value := cfg.PendingBindings["pending_a"]
+			value.LegacyIPv4 = netip.MustParseAddr("2001:db8::1")
+			cfg.PendingBindings["pending_a"] = value
+		}},
+		{name: "missing node", mutate: func(cfg *model.DesiredConfig) {
+			value := cfg.PendingBindings["pending_a"]
+			value.NodeID = "missing"
+			cfg.PendingBindings["pending_a"] = value
+		}},
+		{name: "missing timestamp", mutate: func(cfg *model.DesiredConfig) {
+			value := cfg.PendingBindings["pending_a"]
+			value.CreatedAt = time.Time{}
+			cfg.PendingBindings["pending_a"] = value
+		}},
+		{name: "bad error", mutate: func(cfg *model.DesiredConfig) {
+			value := cfg.PendingBindings["pending_a"]
+			value.ErrorCode = "secret-detail"
+			cfg.PendingBindings["pending_a"] = value
+		}},
+		{name: "device address collision", mutate: func(cfg *model.DesiredConfig) {
+			cfg.Devices = map[string]model.Device{"device-01": validDevice("device-01", "00:11:22:33:44:55", "192.168.9.20")}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := cfg
+			candidate.PendingBindings = map[string]model.PendingBinding{"pending_a": cfg.PendingBindings["pending_a"]}
+			test.mutate(&candidate)
+			if err := model.Validate(candidate); err == nil {
+				t.Fatal("Validate() error = nil")
+			}
+		})
 	}
 }
 

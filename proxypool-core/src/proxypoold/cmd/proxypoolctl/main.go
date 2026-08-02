@@ -45,6 +45,12 @@ func runWithUbus(args []string, stdin io.Reader, stdout, stderr io.Writer, execu
 	if len(args) > 0 && args[0] == "procd-state" {
 		return runProcdState(args, stdout, stderr, execute)
 	}
+	if len(args) > 0 && args[0] == "migrate-v1" {
+		return runMigrateV1(args, stdout, stderr)
+	}
+	if len(args) > 0 && args[0] == "export-v1" {
+		return runExportV1(args, stdout, stderr)
+	}
 	if len(args) == 0 || args[0] != "call" {
 		_, _ = fmt.Fprintln(stderr, "usage: proxypoolctl call [--socket PATH]")
 		return 2
@@ -93,6 +99,59 @@ func runWithUbus(args []string, stdin io.Reader, stdout, stderr io.Writer, execu
 	}
 	if err := writeAll(stdout, append(encoded, '\n')); err != nil {
 		_, _ = fmt.Fprintln(stderr, "control response output failed")
+		return 1
+	}
+	return 0
+}
+
+func runExportV1(args []string, stdout, stderr io.Writer) int {
+	const usage = "usage: proxypoolctl export-v1 --config PATH --output PATH"
+	if len(args) != 5 || args[1] != "--config" || args[2] == "" || args[3] != "--output" || args[4] == "" {
+		_, _ = fmt.Fprintln(stderr, usage)
+		return 2
+	}
+	result, err := config.ExportV1File(context.Background(), args[2], args[4])
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, "V1 recovery export failed")
+		return 1
+	}
+	payload, err := json.Marshal(struct {
+		SHA256   string `json:"sha256"`
+		Nodes    int    `json:"nodes"`
+		Bindings int    `json:"bindings"`
+	}{result.SHA256, result.Nodes, result.Bindings})
+	if err != nil || writeAll(stdout, append(payload, '\n')) != nil {
+		_, _ = fmt.Fprintln(stderr, "V1 recovery export result output failed")
+		return 1
+	}
+	return 0
+}
+
+func runMigrateV1(args []string, stdout, stderr io.Writer) int {
+	const usage = "usage: proxypoolctl migrate-v1 --source PATH --target PATH --backup-dir PATH --marker PATH --socket PATH"
+	if len(args) != 11 || args[1] != "--source" || args[2] == "" || args[3] != "--target" || args[4] == "" ||
+		args[5] != "--backup-dir" || args[6] == "" || args[7] != "--marker" || args[8] == "" || args[9] != "--socket" || args[10] == "" {
+		_, _ = fmt.Fprintln(stderr, usage)
+		return 2
+	}
+	result, err := config.MigrateV1Files(context.Background(), args[2], args[4], args[6], args[8], args[10], time.Now().UTC())
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, "V1 migration failed")
+		return 1
+	}
+	status := "migrated"
+	if result.AlreadyApplied {
+		status = "unchanged"
+	}
+	payload, err := json.Marshal(struct {
+		Status   string `json:"status"`
+		Revision uint64 `json:"revision"`
+		Nodes    int    `json:"nodes"`
+		Devices  int    `json:"devices"`
+		Pending  int    `json:"pending"`
+	}{status, result.TargetRevision, result.MigratedNodes, result.LearnedDevices, result.PendingBindings})
+	if err != nil || writeAll(stdout, append(payload, '\n')) != nil {
+		_, _ = fmt.Fprintln(stderr, "V1 migration result output failed")
 		return 1
 	}
 	return 0

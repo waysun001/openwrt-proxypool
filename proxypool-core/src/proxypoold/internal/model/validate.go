@@ -37,7 +37,37 @@ func Validate(cfg DesiredConfig) error {
 	if err := validateDeviceReferences(cfg.Nodes, cfg.Devices, deviceKeys); err != nil {
 		return err
 	}
+	if err := validatePendingBindings(cfg.Nodes, cfg.Devices, cfg.PendingBindings); err != nil {
+		return err
+	}
 
+	return nil
+}
+
+func validatePendingBindings(nodes map[string]Node, devices map[string]Device, pending map[string]PendingBinding) error {
+	addresses := make(map[string]struct{}, len(devices)+len(pending))
+	for _, device := range devices {
+		addresses[device.FixedIPv4.String()] = struct{}{}
+	}
+	for _, key := range sortedKeys(pending) {
+		binding := pending[key]
+		if key == "" || binding.ID != key || !binding.LegacyIPv4.Is4() || binding.CreatedAt.IsZero() {
+			return invalid("invalid_config", "pending binding is invalid")
+		}
+		if _, exists := nodes[binding.NodeID]; !exists {
+			return invalid("not_found", "pending binding node does not exist")
+		}
+		if binding.ErrorCode != "" && binding.ErrorCode != "duplicate" {
+			return invalid("invalid_config", "pending binding error is invalid")
+		}
+		address := binding.LegacyIPv4.String()
+		if _, exists := addresses[address]; exists {
+			if binding.ErrorCode != "duplicate" {
+				return invalid("duplicate", "pending binding IPv4 is duplicated")
+			}
+		}
+		addresses[address] = struct{}{}
+	}
 	return nil
 }
 

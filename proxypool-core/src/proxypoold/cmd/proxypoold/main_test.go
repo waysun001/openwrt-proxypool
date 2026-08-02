@@ -87,6 +87,24 @@ func TestRunStrictlySelectsShadowOrLiveMode(t *testing.T) {
 	}
 }
 
+func TestRunReservesLiveEndpointBeforeReadingConfiguration(t *testing.T) {
+	directory := t.TempDir()
+	socketPath := filepath.Join(directory, "proxypoold.sock")
+	lease, err := api.AcquireEndpointLease(socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{
+		"--live", "--config", filepath.Join(directory, "missing-config"),
+		"--state", filepath.Join(directory, "runtime.json"), "--socket", socketPath,
+	}, &stdout, &stderr)
+	if code != 1 || stdout.Len() != 0 || stderr.String() != "proxypoold: control endpoint is already owned\n" {
+		t.Fatalf("run result = %d / %q / %q", code, stdout.String(), stderr.String())
+	}
+}
+
 func TestRunServesOnlyStatusAndShutsDownAfterCancellation(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Go's Unix socket server is not available on Windows")

@@ -45,9 +45,10 @@ type ConfigSummary struct {
 }
 
 type DesiredSummary struct {
-	Enabled bool                  `json:"enabled"`
-	Nodes   []DesiredNodeSummary  `json:"nodes"`
-	Devices []DesiredDeviceStatus `json:"devices"`
+	Enabled         bool                          `json:"enabled"`
+	Nodes           []DesiredNodeSummary          `json:"nodes"`
+	Devices         []DesiredDeviceStatus         `json:"devices"`
+	PendingBindings []DesiredPendingBindingStatus `json:"pending_bindings,omitempty"`
 }
 
 // DesiredNodeSummary intentionally omits endpoints, usernames and all
@@ -67,6 +68,13 @@ type DesiredDeviceStatus struct {
 	FixedIPv4 string `json:"fixed_ipv4"`
 	NodeID    string `json:"node_id,omitempty"`
 	Enabled   bool   `json:"enabled"`
+}
+
+type DesiredPendingBindingStatus struct {
+	ID         string `json:"id"`
+	LegacyIPv4 string `json:"legacy_ipv4"`
+	NodeID     string `json:"node_id"`
+	ErrorCode  string `json:"error_code,omitempty"`
 }
 
 type RuntimeSummary struct {
@@ -249,6 +257,20 @@ func summarizeDesired(desired model.DesiredConfig) (DesiredSummary, RuntimeSumma
 	for _, id := range deviceIDs {
 		device := desired.Devices[id]
 		summary.Devices = append(summary.Devices, DesiredDeviceStatus{ID: device.ID, MAC: device.MAC, Hostname: device.Hostname, FixedIPv4: device.FixedIPv4.String(), NodeID: device.NodeID, Enabled: device.Enabled})
+	}
+	pendingIDs := make([]string, 0, len(desired.PendingBindings))
+	for id := range desired.PendingBindings {
+		pendingIDs = append(pendingIDs, id)
+	}
+	sort.Strings(pendingIDs)
+	if len(pendingIDs) > 0 {
+		summary.PendingBindings = make([]DesiredPendingBindingStatus, 0, len(pendingIDs))
+	}
+	for _, id := range pendingIDs {
+		pending := desired.PendingBindings[id]
+		summary.PendingBindings = append(summary.PendingBindings, DesiredPendingBindingStatus{
+			ID: pending.ID, LegacyIPv4: pending.LegacyIPv4.String(), NodeID: pending.NodeID, ErrorCode: pending.ErrorCode,
+		})
 	}
 	return summary, runtimeSummary
 }

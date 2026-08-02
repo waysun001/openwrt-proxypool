@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=proxypool-core
 PKG_VERSION:=2.0.0
-PKG_RELEASE:=2
+PKG_RELEASE:=3
 
 PKG_MAINTAINER:=ProxyPool maintainers
 PKG_LICENSE:=MIT
@@ -93,6 +93,7 @@ define Package/proxypool-core/install
 	$(INSTALL_BIN) ./files/proxypool-fw4-activate $(1)/usr/lib/proxypool/proxypool-fw4-activate
 	$(INSTALL_BIN) ./files/proxypool-fw4-check-staged $(1)/usr/lib/proxypool/proxypool-fw4-check-staged
 	$(INSTALL_BIN) ./files/proxypool-postinst $(1)/usr/lib/proxypool/proxypool-postinst
+	$(INSTALL_BIN) ./files/proxypool-migrate.sh $(1)/usr/lib/proxypool/proxypool-migrate.sh
 	$(INSTALL_BIN) ./files/proxypool-safety-uci-default $(1)/usr/lib/proxypool/proxypool-safety-uci-default
 	$(INSTALL_DATA) ./files/proxypool-guard.nft $(1)/usr/lib/proxypool/proxypool-guard.nft
 	$(INSTALL_DATA) ./files/proxypool-fw4-input-gate.nft $(1)/usr/lib/proxypool/proxypool-fw4-input-gate.nft

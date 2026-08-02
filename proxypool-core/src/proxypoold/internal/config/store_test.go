@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -181,6 +182,21 @@ func TestEnsureDurableRetriesDirectorySyncAfterAmbiguousReplace(t *testing.T) {
 	}
 }
 
+func TestConfirmDurableRejectsDifferentCurrentConfiguration(t *testing.T) {
+	path := writeInitialConfig(t, 3)
+	store := NewStore(path)
+	expected, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewStore(path).Replace(context.Background(), 3, validConfig()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ConfirmDurable(context.Background(), expected); err == nil {
+		t.Fatal("ConfirmDurable accepted a different current configuration")
+	}
+}
+
 func TestReplaceWithSameExpectedRevisionHasOneWinner(t *testing.T) {
 	path := writeInitialConfig(t, 3)
 	store := NewStore(path)
@@ -213,6 +229,42 @@ func TestReplaceWithSameExpectedRevisionHasOneWinner(t *testing.T) {
 	}
 	if successes != 1 || conflicts != 1 {
 		t.Fatalf("concurrent replace results = %d successes, %d conflicts", successes, conflicts)
+	}
+}
+
+func TestReplaceAcrossStoreInstancesHasOneWinner(t *testing.T) {
+	path := writeInitialConfig(t, 3)
+	gate := &coordinatedTargetReads{path: path, ready: make(chan struct{})}
+	stores := []*Store{newStore(path, gate), newStore(path, gate)}
+	start := make(chan struct{})
+	results := make(chan error, len(stores))
+	var wg sync.WaitGroup
+	for _, store := range stores {
+		wg.Add(1)
+		go func(store *Store) {
+			defer wg.Done()
+			<-start
+			_, err := store.Replace(context.Background(), 3, validConfig())
+			results <- err
+		}(store)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	successes, conflicts := 0, 0
+	for err := range results {
+		if err == nil {
+			successes++
+			continue
+		}
+		var codeErr *model.CodeError
+		if errors.As(err, &codeErr) && codeErr.Code == "revision_conflict" {
+			conflicts++
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("cross-store replace results = %d successes, %d conflicts", successes, conflicts)
 	}
 }
 
@@ -339,6 +391,27 @@ type failingOps struct {
 	chmodCalls      int
 	closeCalls      int
 	syncDirCalls    int
+}
+
+type coordinatedTargetReads struct {
+	osFS
+	path  string
+	reads atomic.Int32
+	once  sync.Once
+	ready chan struct{}
+}
+
+func (ops *coordinatedTargetReads) ReadFile(path string) ([]byte, error) {
+	if path == ops.path && ops.reads.Add(1) <= 2 {
+		if ops.reads.Load() == 2 {
+			ops.once.Do(func() { close(ops.ready) })
+		}
+		select {
+		case <-ops.ready:
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	return ops.osFS.ReadFile(path)
 }
 
 func (f *failingOps) CreateTemp(dir, pattern string) (tempFile, error) {

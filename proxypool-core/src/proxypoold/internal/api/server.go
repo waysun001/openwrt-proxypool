@@ -27,10 +27,56 @@ type Handler interface {
 	Handle(context.Context, Request) Response
 }
 
+// EndpointLease reserves one control endpoint before callers load any state
+// that will be served from memory. The caller owns the lease until Close.
+type EndpointLease struct {
+	path   string
+	lock   *endpointLock
+	mu     sync.Mutex
+	closed bool
+}
+
+func AcquireEndpointLease(path string) (*EndpointLease, error) {
+	if path == "" {
+		path = DefaultSocketPath
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, fmt.Errorf("create socket directory: %w", err)
+	}
+	lock, err := acquireEndpointLock(path + ".lock")
+	if err != nil {
+		return nil, errors.New("control socket is already owned")
+	}
+	return &EndpointLease{path: filepath.Clean(path), lock: lock}, nil
+}
+
+func (lease *EndpointLease) Close() error {
+	if lease == nil {
+		return nil
+	}
+	lease.mu.Lock()
+	defer lease.mu.Unlock()
+	if lease.closed {
+		return nil
+	}
+	lease.closed = true
+	return lease.lock.Close()
+}
+
+func (lease *EndpointLease) owns(path string) bool {
+	if lease == nil {
+		return false
+	}
+	lease.mu.Lock()
+	defer lease.mu.Unlock()
+	return !lease.closed && lease.path == filepath.Clean(path)
+}
+
 // Server serves one bounded request per Unix connection.
 type Server struct {
 	Path                                                       string
 	Handler                                                    Handler
+	Lease                                                      *EndpointLease
 	ReadTimeout, WriteTimeout, HandlerTimeout, ShutdownTimeout time.Duration
 	MaxConnections                                             int
 	MaxHandlers                                                int
@@ -46,14 +92,17 @@ func (s *Server) Serve(ctx context.Context) error {
 	if path == "" {
 		path = DefaultSocketPath
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("create socket directory: %w", err)
+	lease := s.Lease
+	if lease == nil {
+		var err error
+		lease, err = AcquireEndpointLease(path)
+		if err != nil {
+			return err
+		}
+		defer lease.Close()
+	} else if !lease.owns(path) {
+		return errors.New("control endpoint lease is invalid")
 	}
-	lock, err := acquireEndpointLock(path + ".lock")
-	if err != nil {
-		return errors.New("control socket is already owned")
-	}
-	defer lock.Close()
 	if err := removeStaleSocket(path); err != nil {
 		return err
 	}

@@ -15,11 +15,12 @@ const (
 )
 
 type DesiredConfig struct {
-	SchemaVersion int
-	Revision      uint64
-	Global        GlobalConfig
-	Nodes         map[string]Node
-	Devices       map[string]Device
+	SchemaVersion   int
+	Revision        uint64
+	Global          GlobalConfig
+	Nodes           map[string]Node
+	Devices         map[string]Device
+	PendingBindings map[string]PendingBinding
 }
 
 type GlobalConfig struct {
@@ -74,4 +75,14 @@ type Device struct {
 	FixedIPv4         netip.Addr
 	NodeID            string
 	Enabled           bool
+}
+
+// PendingBinding preserves a legacy IPv4 assignment until DHCP identifies
+// the device MAC. It never authorizes traffic by itself.
+type PendingBinding struct {
+	ID         string
+	LegacyIPv4 netip.Addr
+	NodeID     string
+	CreatedAt  time.Time
+	ErrorCode  string
 }

@@ -9,8 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -232,6 +234,179 @@ func (controller *Controller) ReconcileStartup(ctx context.Context) error {
 		controller.scheduler.Submit(job)
 	}
 	return nil
+}
+
+// LearnPendingBindings converts legacy IP-only bindings after DHCP confirms
+// the corresponding MAC. Pending entries never authorize traffic, and the
+// whole discovered batch is published in one desired-config replacement.
+func (controller *Controller) LearnPendingBindings(ctx context.Context) error {
+	if controller == nil || controller.deviceSource == nil || contextDone(ctx) != nil {
+		return errors.New("pending binding learning is unavailable")
+	}
+	discovered, err := controller.deviceSource.List(ctx)
+	if err != nil {
+		return errors.New("pending binding discovery failed")
+	}
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	current, err := controller.desiredStore.Load()
+	if err != nil {
+		return errors.New("pending binding configuration load failed")
+	}
+	if len(current.PendingBindings) == 0 {
+		return nil
+	}
+	next := cloneControllerConfig(current)
+	byAddress := make(map[string][]platform.DiscoveredDevice)
+	for _, device := range discovered {
+		if device.IPv4.Is4() && device.Confirmed {
+			key := device.IPv4.Unmap().String()
+			byAddress[key] = append(byAddress[key], device)
+		}
+	}
+	usedIDs := make(map[string]struct{}, len(next.Devices))
+	usedMACs := make(map[string]struct{}, len(next.Devices))
+	usedAddresses := make(map[string]struct{}, len(next.Devices))
+	for id, device := range next.Devices {
+		usedIDs[id] = struct{}{}
+		usedMACs[strings.ToLower(device.MAC)] = struct{}{}
+		usedAddresses[device.FixedIPv4.String()] = struct{}{}
+	}
+	pendingIDs := make([]string, 0, len(next.PendingBindings))
+	for id := range next.PendingBindings {
+		pendingIDs = append(pendingIDs, id)
+	}
+	sort.Strings(pendingIDs)
+	applied := make([]model.Device, 0)
+	nodeSet := make(map[string]struct{})
+	changed := false
+	for _, pendingID := range pendingIDs {
+		pending := next.PendingBindings[pendingID]
+		matches := byAddress[pending.LegacyIPv4.String()]
+		if len(matches) == 0 {
+			_, addressConflict := usedAddresses[pending.LegacyIPv4.String()]
+			wantError := ""
+			if addressConflict {
+				wantError = "duplicate"
+			}
+			if pending.ErrorCode != wantError {
+				pending.ErrorCode = wantError
+				next.PendingBindings[pendingID] = pending
+				changed = true
+			}
+			continue
+		}
+		if len(matches) != 1 {
+			if pending.ErrorCode != "duplicate" {
+				pending.ErrorCode = "duplicate"
+				next.PendingBindings[pendingID] = pending
+				changed = true
+			}
+			continue
+		}
+		candidate, ok := pendingLearnedDevice(matches[0], pending)
+		_, idConflict := usedIDs[candidate.ID]
+		_, macConflict := usedMACs[candidate.MAC]
+		_, addressConflict := usedAddresses[candidate.FixedIPv4.String()]
+		if !ok || idConflict || macConflict || addressConflict {
+			if pending.ErrorCode != "duplicate" {
+				pending.ErrorCode = "duplicate"
+				next.PendingBindings[pendingID] = pending
+				changed = true
+			}
+			continue
+		}
+		next.Devices[candidate.ID] = candidate
+		delete(next.PendingBindings, pendingID)
+		usedIDs[candidate.ID] = struct{}{}
+		usedMACs[candidate.MAC] = struct{}{}
+		usedAddresses[candidate.FixedIPv4.String()] = struct{}{}
+		applied = append(applied, candidate)
+		nodeSet[candidate.NodeID] = struct{}{}
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	if err := model.Validate(next); err != nil {
+		return errors.New("pending binding candidate is invalid")
+	}
+	if len(applied) > 0 && controller.leaseManager == nil {
+		return errors.New("pending binding lease manager is unavailable")
+	}
+	for _, device := range applied {
+		if err := controller.leaseManager.Apply(ctx, device, current.Revision+1); err != nil {
+			controller.rollbackPendingLeases(applied[:lenAppliedBefore(applied, device)], current.Revision+1)
+			return errors.New("pending binding lease apply failed")
+		}
+	}
+	stored, err := controller.desiredStore.Replace(ctx, current.Revision, next)
+	if err != nil {
+		controller.rollbackPendingLeases(applied, current.Revision+1)
+		return errors.New("pending binding configuration persistence failed")
+	}
+	controller.desired = cloneControllerConfig(stored)
+	if len(nodeSet) == 0 {
+		if err := controller.persistLocked(ctx); err != nil {
+			return errors.New("pending binding runtime persistence failed")
+		}
+		return nil
+	}
+	nodeIDs := make([]string, 0, len(nodeSet))
+	for nodeID := range nodeSet {
+		nodeIDs = append(nodeIDs, nodeID)
+	}
+	sort.Strings(nodeIDs)
+	job := newControllerJob(controller.newJobID(), "pending.learn", controller.now(), stored.Revision, nodeIDs)
+	if err := controller.jobs.Put(job); err != nil {
+		return errors.New("pending binding job creation failed")
+	}
+	if err := controller.persistLocked(ctx); err != nil {
+		if controller.scheduler != nil && !isTerminalJob(job.State) {
+			controller.scheduler.Submit(job)
+		}
+		return errors.New("pending binding runtime persistence failed")
+	}
+	if controller.scheduler != nil && !isTerminalJob(job.State) {
+		controller.scheduler.Submit(job)
+	}
+	return nil
+}
+
+func pendingLearnedDevice(discovered platform.DiscoveredDevice, pending model.PendingBinding) (model.Device, bool) {
+	parsed, err := net.ParseMAC(discovered.MAC)
+	if err != nil || len(parsed) != 6 || !discovered.IPv4.Is4() || discovered.IPv4.Unmap() != pending.LegacyIPv4.Unmap() {
+		return model.Device{}, false
+	}
+	mac := strings.ToLower(parsed.String())
+	id := "device_" + strings.ReplaceAll(mac, ":", "")
+	if discovered.ID != id {
+		return model.Device{}, false
+	}
+	return model.Device{
+		ID: id, MAC: mac, Hostname: discovered.Hostname, FixedIPv4: pending.LegacyIPv4.Unmap(),
+		NodeID: pending.NodeID, Enabled: true,
+	}, true
+}
+
+func lenAppliedBefore(devices []model.Device, target model.Device) int {
+	for index := range devices {
+		if devices[index].ID == target.ID {
+			return index
+		}
+	}
+	return len(devices)
+}
+
+func (controller *Controller) rollbackPendingLeases(devices []model.Device, revision uint64) {
+	if controller.leaseManager == nil {
+		return
+	}
+	rollbackCtx, cancel := context.WithTimeout(context.Background(), controller.leaseRollbackTimeout)
+	defer cancel()
+	for index := len(devices) - 1; index >= 0; index-- {
+		_ = controller.leaseManager.Remove(rollbackCtx, devices[index], revision)
+	}
 }
 
 func (controller *Controller) Handle(ctx context.Context, request api.Request) api.Response {
@@ -1045,6 +1220,10 @@ func cloneControllerConfig(cfg model.DesiredConfig) model.DesiredConfig {
 	clone.Devices = make(map[string]model.Device, len(cfg.Devices))
 	for id, device := range cfg.Devices {
 		clone.Devices[id] = device
+	}
+	clone.PendingBindings = make(map[string]model.PendingBinding, len(cfg.PendingBindings))
+	for id, binding := range cfg.PendingBindings {
+		clone.PendingBindings[id] = binding
 	}
 	return clone
 }

@@ -26,7 +26,10 @@ func Decode(r io.Reader) (model.DesiredConfig, error) {
 		return model.DesiredConfig{}, invalidConfig()
 	}
 
-	cfg := model.DesiredConfig{Nodes: make(map[string]model.Node), Devices: make(map[string]model.Device)}
+	cfg := model.DesiredConfig{
+		Nodes: make(map[string]model.Node), Devices: make(map[string]model.Device),
+		PendingBindings: make(map[string]model.PendingBinding),
+	}
 	var global *uciSection
 	for _, section := range sections {
 		switch section.kind {
@@ -59,6 +62,18 @@ func Decode(r io.Reader) (model.DesiredConfig, error) {
 				return model.DesiredConfig{}, invalidConfig()
 			}
 			cfg.Devices[section.name] = device
+		case "pending_binding":
+			if !safeUCISectionName(section.name) {
+				return model.DesiredConfig{}, invalidConfig()
+			}
+			if _, exists := cfg.PendingBindings[section.name]; exists {
+				return model.DesiredConfig{}, invalidConfig()
+			}
+			binding, err := decodePendingBinding(section)
+			if err != nil {
+				return model.DesiredConfig{}, invalidConfig()
+			}
+			cfg.PendingBindings[section.name] = binding
 		default:
 			return model.DesiredConfig{}, invalidConfig()
 		}
@@ -137,6 +152,15 @@ func Encode(w io.Writer, cfg model.DesiredConfig) error {
 		writeOption(&output, "fixed_ipv4", device.FixedIPv4.String())
 		writeOption(&output, "node_id", device.NodeID)
 		writeOption(&output, "enabled", boolText(device.Enabled))
+	}
+	for _, id := range sortedPendingBindingIDs(cfg.PendingBindings) {
+		binding := cfg.PendingBindings[id]
+		output.WriteByte('\n')
+		writeSection(&output, "pending_binding", id)
+		writeOption(&output, "legacy_ipv4", binding.LegacyIPv4.String())
+		writeOption(&output, "node_id", binding.NodeID)
+		writeOption(&output, "created_at", binding.CreatedAt.UTC().Format(time.RFC3339Nano))
+		writeOption(&output, "error_code", binding.ErrorCode)
 	}
 	if _, err := io.WriteString(w, output.String()); err != nil {
 		return errors.New("configuration write failed")
@@ -386,10 +410,29 @@ func decodeDevice(section *uciSection) (model.Device, error) {
 	return model.Device{ID: section.name, MAC: section.options["mac"], Hostname: section.options["hostname"], FixedIPv4: address, NodeID: section.options["node_id"], Enabled: enabled}, nil
 }
 
+func decodePendingBinding(section *uciSection) (model.PendingBinding, error) {
+	if !onlyKeys(section.options, pendingBindingOptions) || len(section.lists) != 0 || !hasAll(section.options, pendingBindingOptions) {
+		return model.PendingBinding{}, errors.New("invalid pending binding options")
+	}
+	address, err := netip.ParseAddr(section.options["legacy_ipv4"])
+	if err != nil || !address.Is4() {
+		return model.PendingBinding{}, errors.New("invalid pending binding IPv4")
+	}
+	createdAt, err := time.Parse(time.RFC3339Nano, section.options["created_at"])
+	if err != nil {
+		return model.PendingBinding{}, errors.New("invalid pending binding timestamp")
+	}
+	return model.PendingBinding{
+		ID: section.name, LegacyIPv4: address, NodeID: section.options["node_id"],
+		CreatedAt: createdAt, ErrorCode: section.options["error_code"],
+	}, nil
+}
+
 var globalOptions = []string{"schema_version", "revision", "enabled", "runtime_backend", "max_nodes", "lan_device", "l2tp_concurrency", "proxy_concurrency", "connect_timeout", "stop_timeout"}
 var globalLists = []string{"management_port", "doh_url", "doh_bootstrap_ip", "doh_server_name"}
 var nodeOptions = []string{"name", "protocol", "enabled", "server", "port", "username", "password", "slp_token", "slp_transport", "slp_obfs", "slp_obfs_key", "slp_insecure", "expires_at", "policy_id", "revision"}
 var deviceOptions = []string{"mac", "hostname", "fixed_ipv4", "node_id", "enabled"}
+var pendingBindingOptions = []string{"legacy_ipv4", "node_id", "created_at", "error_code"}
 
 func onlyKeys[V any](values map[string]V, allowed []string) bool {
 	for key := range values {
@@ -477,6 +520,11 @@ func validateCodecConfig(cfg model.DesiredConfig) error {
 			return invalidConfig()
 		}
 	}
+	for id, binding := range cfg.PendingBindings {
+		if !safeUCISectionName(id) || !safeUCISectionName(binding.ID) || !safeUCIString(binding.NodeID) || !safeUCIString(binding.ErrorCode) {
+			return invalidConfig()
+		}
+	}
 	return nil
 }
 
@@ -536,6 +584,15 @@ func sortedNodeIDs(nodes map[string]model.Node) []string {
 func sortedDeviceIDs(devices map[string]model.Device) []string {
 	ids := make([]string, 0, len(devices))
 	for id := range devices {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func sortedPendingBindingIDs(bindings map[string]model.PendingBinding) []string {
+	ids := make([]string, 0, len(bindings))
+	for id := range bindings {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)

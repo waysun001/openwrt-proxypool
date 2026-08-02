@@ -45,25 +45,31 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 0
 	default:
 	}
+	endpointLease, err := api.AcquireEndpointLease(options.socketPath)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, "proxypoold: control endpoint is already owned")
+		return 1
+	}
+	defer endpointLease.Close()
 
 	if options.mode == "shadow" {
 		shadow := engine.NewShadow(options.configPath, nil)
 		shadow.Start()
-		server := &api.Server{Path: options.socketPath, Handler: shadow, Methods: map[string]struct{}{"status.get": {}}}
+		server := &api.Server{Path: options.socketPath, Handler: shadow, Lease: endpointLease, Methods: map[string]struct{}{"status.get": {}}}
 		if err := server.Serve(ctx); err != nil {
 			_, _ = fmt.Fprintln(stderr, "proxypoold: control service failed")
 			return 1
 		}
 		return 0
 	}
-	if err := runLive(ctx, options); err != nil {
+	if err := runLive(ctx, options, endpointLease); err != nil {
 		_, _ = fmt.Fprintln(stderr, "proxypoold: live service failed")
 		return 1
 	}
 	return 0
 }
 
-func runLive(ctx context.Context, options daemonOptions) error {
+func runLive(ctx context.Context, options daemonOptions, endpointLease *api.EndpointLease) error {
 	if err := ensurePrivateStateParent(options.statePath); err != nil {
 		return err
 	}
@@ -107,7 +113,7 @@ func runLive(ctx context.Context, options daemonOptions) error {
 	}, routeGate, dnsGate, authorizationGate)
 	controller.AttachScheduler(scheduler)
 	server := &api.Server{
-		Path: options.socketPath, Handler: controller,
+		Path: options.socketPath, Handler: controller, Lease: endpointLease,
 		Methods: map[string]struct{}{
 			"status.get": {}, "device.list": {}, "device.bind": {}, "device.unbind": {},
 			"node.action": {}, "import.preview": {}, "import.commit": {}, "job.get": {}, "job.list": {}, "system.events": {}, "system.interface_event": {},
@@ -154,6 +160,7 @@ func serveLive(ctx context.Context, controller *engine.Controller, scheduler *en
 	serverDone := make(chan error, 1)
 	go func() { schedulerDone <- scheduler.Run(serviceCtx) }()
 	go func() { serverDone <- server.Serve(serviceCtx) }()
+	go runPendingBindingLearner(serviceCtx, controller, 5*time.Second)
 	var serviceErr error
 	schedulerStopped := false
 	select {
@@ -189,6 +196,23 @@ func serveLive(ctx context.Context, controller *engine.Controller, scheduler *en
 		shutdownErr = drainErr
 	}
 	return liveServiceResult(ctx.Err(), serviceErr, shutdownErr, revokeErr)
+}
+
+func runPendingBindingLearner(ctx context.Context, controller *engine.Controller, interval time.Duration) {
+	if controller == nil || interval <= 0 {
+		return
+	}
+	_ = controller.LearnPendingBindings(ctx)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			_ = controller.LearnPendingBindings(ctx)
+		}
+	}
 }
 
 func liveServiceResult(parentErr, serviceErr, shutdownErr, revokeErr error) error {

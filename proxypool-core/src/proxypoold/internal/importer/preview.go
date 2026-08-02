@@ -290,6 +290,10 @@ func cloneDesired(config model.DesiredConfig) model.DesiredConfig {
 	for id, device := range config.Devices {
 		clone.Devices[id] = device
 	}
+	clone.PendingBindings = make(map[string]model.PendingBinding, len(config.PendingBindings))
+	for id, binding := range config.PendingBindings {
+		clone.PendingBindings[id] = binding
+	}
 	return clone
 }
 

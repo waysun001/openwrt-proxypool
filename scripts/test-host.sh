@@ -32,6 +32,7 @@ for shell_file in \
 	proxypool-core/files/proxypool-guard.init \
 	proxypool-core/files/proxypool.init \
 	proxypool-core/files/proxypool-postinst \
+	proxypool-core/files/proxypool-migrate.sh \
 	proxypool-core/files/proxypool-safety-uci-default \
 	proxypool-core/files/status.sh \
 	scripts/check-whitespace-range.sh \
@@ -60,6 +61,7 @@ for shell_file in \
 	scripts/test-status-readonly.sh \
 	scripts/test-v2-l2tp-adapter.sh \
 	scripts/test-v2-live-integration.sh \
+	scripts/test-v2-migration.sh \
 	scripts/test-whitespace-range.sh; do
 	sh -n "$shell_file"
 done
@@ -84,6 +86,7 @@ sh scripts/test-release-contracts.sh
 sh scripts/test-status-readonly.sh
 sh scripts/test-v2-l2tp-adapter.sh
 sh scripts/test-v2-live-integration.sh
+sh scripts/test-v2-migration.sh
 sh scripts/test-whitespace-range.sh
 git diff --check
 
