@@ -36,9 +36,11 @@ case "$live_line" in *--shadow*) fail 'OpenWrt init still launches shadow mode' 
 for forbidden in proxypool.sh l2tp-manager.sh socks5-manager.sh slp-manager.sh 'luci.model.uci' 'os.execute'; do
 	if grep -Fq "$forbidden" "$LUCI"; then fail "LuCI directly invokes forbidden path: $forbidden"; fi
 done
-for contract in 'device.bind' 'device.unbind' 'node.action' 'node.save' 'node.delete' 'import.preview' 'import.commit' 'job.get' 'job.list' 'post("api_write")'; do
+for contract in 'device.bind' 'device.unbind' 'node.action' 'node.save' 'node.delete' 'import.preview' 'import.commit' 'job.get' 'job.list' 'diagnostics.create' 'diagnostics.get' 'diagnostics.claim' 'diagnostics.release' 'post("api_write")'; do
 	require "$LUCI" "$contract" "LuCI is missing control contract: $contract"
 done
+require "$V2_JS" "apiCall('diagnostics_create', {}, true)" 'LuCI does not create diagnostics asynchronously'
+require "$LUCI" 'post("diagnostics_download")' 'diagnostic download is not POST protected'
 require "$LUCI_RPC" 'nixio.socket("unix", "stream")' 'LuCI RPC bridge does not use a Unix socket'
 require "$LUCI_RPC" 'socket:setopt("socket", "sndtimeo", TIMEOUT_SECONDS, 0)' 'LuCI control writes can hang without a deadline'
 require "$LUCI_RPC" 'socket:setopt("socket", "rcvtimeo", TIMEOUT_SECONDS, 0)' 'LuCI control reads can hang without a deadline'

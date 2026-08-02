@@ -15,6 +15,7 @@ import (
 	"proxypoold/internal/api"
 	"proxypoold/internal/buildinfo"
 	"proxypoold/internal/config"
+	"proxypoold/internal/diagnostics"
 	"proxypoold/internal/dnsproxy"
 	"proxypoold/internal/engine"
 	"proxypoold/internal/live"
@@ -69,7 +70,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func runLive(ctx context.Context, options daemonOptions, endpointLease *api.EndpointLease) error {
+func runLive(ctx context.Context, options daemonOptions, endpointLease *api.EndpointLease) (returnErr error) {
 	if err := ensurePrivateStateParent(options.statePath); err != nil {
 		return err
 	}
@@ -83,9 +84,34 @@ func runLive(ctx context.Context, options daemonOptions, endpointLease *api.Endp
 	leaseManager := openwrtplatform.NewLeaseManager(
 		runner, inventory, netip.MustParsePrefix("192.168.9.0/24"), netip.MustParseAddr("192.168.9.1"),
 	)
-	controller, err := engine.NewController(
+	diagnosticStore, err := diagnostics.NewArtifactStore("/tmp/proxypool/diagnostics")
+	if err != nil {
+		return errors.New("diagnostic artifact initialization failed")
+	}
+	diagnosticCtx, diagnosticCancel := context.WithCancel(ctx)
+	var controller *engine.Controller
+	diagnosticManager := diagnostics.NewManager(diagnosticCtx, diagnosticStore,
+		func(snapshotCtx context.Context) (diagnostics.Snapshot, error) {
+			if controller == nil {
+				return diagnostics.Snapshot{}, errors.New("live controller is unavailable")
+			}
+			return controller.DiagnosticSnapshot(snapshotCtx)
+		},
+		func(collectCtx context.Context, snapshot diagnostics.Snapshot) ([]diagnostics.Entry, error) {
+			collector := diagnostics.NewCollector(diagnostics.ExecRunner{}, diagnostics.NewRedactor(snapshot.Secrets), defaultDiagnosticCommands())
+			return collector.Collect(collectCtx, snapshot.Entries)
+		},
+	)
+	defer func() {
+		diagnosticCancel()
+		if cleanupErr := diagnosticManager.Wait(); cleanupErr != nil && returnErr == nil {
+			returnErr = errors.New("diagnostic artifact cleanup failed")
+		}
+	}()
+	controller, err = engine.NewController(
 		desiredStore, engine.NewRuntimeStore(options.statePath), engine.NewMachine(nil), engine.NewJobStore(),
 		engine.WithDeviceServices(inventory, leaseManager),
+		engine.WithDiagnostics(diagnosticManager),
 	)
 	if err != nil {
 		return errors.New("live control initialization failed")
@@ -124,6 +150,18 @@ func liveControlMethods() map[string]struct{} {
 		"status.get": {}, "device.list": {}, "device.bind": {}, "device.unbind": {},
 		"node.save": {}, "node.delete": {}, "node.action": {}, "import.preview": {}, "import.commit": {},
 		"job.get": {}, "job.list": {}, "system.events": {}, "system.interface_event": {},
+		"diagnostics.create": {}, "diagnostics.get": {}, "diagnostics.claim": {}, "diagnostics.release": {},
+	}
+}
+
+func defaultDiagnosticCommands() []diagnostics.Command {
+	return []diagnostics.Command{
+		{Name: "network-interface.json", Path: "/bin/ubus", Args: []string{"call", "network.interface", "dump"}},
+		{Name: "firewall-nft.json", Path: "/usr/sbin/nft", Args: []string{"-j", "list", "table", "inet", "proxypool_guard"}},
+		{Name: "ipv4-rules.json", Path: "/sbin/ip", Args: []string{"-4", "-j", "rule", "show"}},
+		{Name: "ipv4-routes.json", Path: "/sbin/ip", Args: []string{"-4", "-j", "route", "show", "table", "all"}},
+		{Name: "recent-log.txt", Path: "/sbin/logread", Args: []string{"-e", "proxypool", "-l", "500"}},
+		{Name: "dhcp-leases.txt", Path: "/bin/cat", Args: []string{"/tmp/dhcp.leases"}},
 	}
 }
 

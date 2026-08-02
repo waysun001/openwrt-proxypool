@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 )
@@ -99,6 +100,9 @@ func NewArtifactStore(root string, options ...ArtifactStoreOption) (*ArtifactSto
 	if err := ensureArtifactRoot(root); err != nil {
 		return nil, err
 	}
+	if err := cleanupArtifactRoot(root); err != nil {
+		return nil, err
+	}
 	return store, nil
 }
 
@@ -169,7 +173,7 @@ func (store *ArtifactStore) Write(ctx context.Context, entries []Entry) (Artifac
 	}
 	committed = true
 	info, err := os.Lstat(finalPath)
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || !ownedByEffectiveUser(info) || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
 		_ = os.Remove(finalPath)
 		return Artifact{}, ErrArtifactUnsafe
 	}
@@ -201,7 +205,7 @@ func (store *ArtifactStore) Claim(id string) (ArtifactClaim, error) {
 		return ArtifactClaim{}, ErrArtifactUnsafe
 	}
 	info, err := os.Lstat(record.path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() != record.artifact.Size || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || !ownedByEffectiveUser(info) || info.Size() != record.artifact.Size || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
 		delete(store.records, id)
 		return ArtifactClaim{}, ErrArtifactUnsafe
 	}
@@ -249,6 +253,19 @@ func (store *ArtifactStore) CleanupExpired() error {
 	return nil
 }
 
+func (store *ArtifactStore) CleanupAll() error {
+	if store == nil {
+		return errors.New("diagnostic artifact store is invalid")
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if err := cleanupArtifactRoot(store.root); err != nil {
+		return err
+	}
+	store.records = make(map[string]artifactRecord)
+	return nil
+}
+
 func ensureArtifactRoot(root string) error {
 	info, err := os.Lstat(root)
 	if errors.Is(err, os.ErrNotExist) {
@@ -257,8 +274,12 @@ func ensureArtifactRoot(root string) error {
 		}
 		info, err = os.Lstat(root)
 	}
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !ownedByEffectiveUser(info) {
 		return errors.New("diagnostic artifact root is unsafe")
+	}
+	parentInfo, parentErr := os.Lstat(filepath.Dir(root))
+	if parentErr != nil || !parentInfo.IsDir() || parentInfo.Mode()&os.ModeSymlink != 0 || !ownedByEffectiveUser(parentInfo) || (runtime.GOOS != "windows" && parentInfo.Mode().Perm()&0o022 != 0) {
+		return errors.New("diagnostic artifact parent is unsafe")
 	}
 	if runtime.GOOS != "windows" {
 		resolved, err := filepath.EvalSymlinks(root)
@@ -268,6 +289,31 @@ func ensureArtifactRoot(root string) error {
 	}
 	if err := os.Chmod(root, 0o700); err != nil {
 		return errors.New("diagnostic artifact root permissions failed")
+	}
+	return nil
+}
+
+func cleanupArtifactRoot(root string) error {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return errors.New("diagnostic artifact root scan failed")
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		artifactName := strings.TrimSuffix(name, ".tar.gz")
+		knownArtifact := strings.HasSuffix(name, ".tar.gz") && artifactIDPattern.MatchString(artifactName)
+		knownTemporary := strings.HasPrefix(name, ".diagnostic-") && len(name) <= 128
+		if !knownArtifact && !knownTemporary {
+			return errors.New("diagnostic artifact root contains an unsafe entry")
+		}
+		path := filepath.Join(root, name)
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || !ownedByEffectiveUser(info) {
+			return ErrArtifactUnsafe
+		}
+		if err := os.Remove(path); err != nil {
+			return errors.New("diagnostic orphan removal failed")
+		}
 	}
 	return nil
 }

@@ -4,6 +4,7 @@
 <div id="pp-v2-app" class="pp-v2-app"
      data-api-read="<%=url([[admin]], [[services]], [[proxypool]], [[api]], [[read]])%>"
      data-api-write="<%=url([[admin]], [[services]], [[proxypool]], [[api]], [[write]])%>"
+     data-diagnostics-download="<%=url([[admin]], [[services]], [[proxypool]], [[download]])%>"
      data-token="<%=token%>">
     <div class="pp-v2-header">
         <div>
@@ -59,7 +60,13 @@
     <section data-pp-panel="jobs" hidden>
         <div class="pp-v2-toolbar">
             <div><h3>后台任务</h3><p>任务由路由器后台执行，刷新或关闭页面不会取消拨号与清理。</p></div>
+            <div class="pp-v2-actions"><button id="pp-v2-diagnostics-create" type="button" class="cbi-button cbi-button-apply">生成诊断包</button></div>
         </div>
+        <div id="pp-v2-diagnostics-status" class="pp-v2-job"></div>
+        <form id="pp-v2-diagnostics-download-form" method="post" hidden>
+            <input type="hidden" name="token" value="<%=token%>" />
+            <input id="pp-v2-diagnostics-artifact" type="hidden" name="artifact_id" value="" />
+        </form>
         <div id="pp-v2-job-list" class="pp-v2-jobs"></div>
     </section>
 

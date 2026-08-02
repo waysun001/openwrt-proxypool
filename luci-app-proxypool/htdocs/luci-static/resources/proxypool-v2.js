@@ -12,7 +12,9 @@
     'use strict';
 
     var TRACKED_JOBS_KEY = 'proxypool.v2.tracked_jobs';
+    var DIAGNOSTIC_JOB_KEY = 'proxypool.v2.diagnostic_job';
     var ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+    var ARTIFACT_PATTERN = /^diag-[a-f0-9]{16,64}$/;
 
     function initialState() {
         return {
@@ -339,12 +341,32 @@
         };
     }
 
+    function diagnosticViewModel(status, nowMilliseconds) {
+        status = status || {};
+        var artifact = status.artifact || {};
+        var artifactID = String(artifact.artifact_id || '');
+        var expiresAt = String(artifact.expires_at || '');
+        var expires = Date.parse(expiresAt);
+        var now = Number.isFinite(nowMilliseconds) ? nowMilliseconds : Date.now();
+        var ready = status.state === 'ready' && ARTIFACT_PATTERN.test(artifactID) && Number.isFinite(expires) && expires > now;
+        return {
+            state: status.state === 'ready' && !ready ? 'expired' : String(status.state || 'idle'),
+            error_code: String(status.error_code || ''),
+            artifact_id: ready ? artifactID : '',
+            filename: ready ? String(artifact.filename || '') : '',
+            size: ready ? Number(artifact.size || 0) : 0,
+            expires_at: ready ? expiresAt : '',
+            can_download: ready
+        };
+    }
+
     function boot(document, environment) {
         var app = document.getElementById('pp-v2-app');
         if (!app || app.getAttribute('data-booted') === '1') return;
         app.setAttribute('data-booted', '1');
         var apiRead = app.getAttribute('data-api-read');
         var apiWrite = app.getAttribute('data-api-write');
+        var diagnosticsDownload = app.getAttribute('data-diagnostics-download');
         var token = app.getAttribute('data-token');
         var storage = environment.sessionStorage;
         var state = initialState();
@@ -354,6 +376,20 @@
         var pollGeneration = 0;
         var importGeneration = 0;
         var stopped = false;
+        var diagnosticJobId = '';
+        var diagnosticStatus = null;
+        try {
+            diagnosticJobId = String(storage && storage.getItem(DIAGNOSTIC_JOB_KEY) || '');
+            if (!ID_PATTERN.test(diagnosticJobId)) diagnosticJobId = '';
+        } catch (_) { diagnosticJobId = ''; }
+
+        function saveDiagnosticJob(id) {
+            diagnosticJobId = ID_PATTERN.test(String(id || '')) ? String(id) : '';
+            try {
+                if (storage && diagnosticJobId) storage.setItem(DIAGNOSTIC_JOB_KEY, diagnosticJobId);
+                else if (storage && typeof storage.removeItem === 'function') storage.removeItem(DIAGNOSTIC_JOB_KEY);
+            } catch (_) {}
+        }
 
         function element(tag, className, text) {
             var node = document.createElement(tag);
@@ -586,11 +622,38 @@
             if (!state.jobs.length) target.appendChild(element('div', 'pp-v2-empty', '暂无后台任务。'));
         }
 
+        function renderDiagnostics() {
+            var target = document.getElementById('pp-v2-diagnostics-status');
+            var create = document.getElementById('pp-v2-diagnostics-create');
+            target.textContent = '';
+            var model = diagnosticViewModel(diagnosticStatus);
+            create.disabled = model.state === 'queued' || model.state === 'running';
+            if (model.state === 'idle') {
+                target.appendChild(element('span', '', '尚未生成诊断包。诊断内容会自动脱敏并在 15 分钟后过期。'));
+                return;
+            }
+            target.appendChild(element('strong', '', '诊断包：' + model.state));
+            if (model.error_code) target.appendChild(element('span', 'pp-v2-job-summary', model.error_code));
+            if (model.can_download) {
+                var detail = model.filename + ' · ' + model.size + ' bytes';
+                target.appendChild(element('span', 'pp-v2-job-summary', detail));
+                target.appendChild(actionButton('下载一次', function() {
+                    var form = document.getElementById('pp-v2-diagnostics-download-form');
+                    document.getElementById('pp-v2-diagnostics-artifact').value = model.artifact_id;
+                    saveDiagnosticJob('');
+                    diagnosticStatus = null;
+                    form.submit();
+                    renderDiagnostics();
+                }));
+            }
+        }
+
         function render() {
             renderSummary();
             renderNodes();
             renderDevices();
             renderJobs();
+            renderDiagnostics();
         }
 
         function poll() {
@@ -599,15 +662,31 @@
             if (pollController) pollController.abort();
             pollController = typeof environment.AbortController === 'function' ? new environment.AbortController() : null;
             if (timer) environment.clearTimeout(timer);
-            return Promise.all([
+            var calls = [
                 apiCall('status', {}, false, pollController && pollController.signal),
                 apiCall('devices', {}, false, pollController && pollController.signal),
                 apiCall('jobs', {}, false, pollController && pollController.signal)
-            ]).then(function(values) {
+            ];
+            if (diagnosticJobId) {
+                calls.push(apiCall('diagnostics', { job_id: diagnosticJobId }, false, pollController && pollController.signal)
+                    .catch(function(error) { return { diagnostic_error: error || { code: 'bad_gateway' } }; }));
+            }
+            return Promise.all(calls).then(function(values) {
                 if (stopped || generation !== pollGeneration) return;
                 state = reduceState(state, { type: 'status.received', value: values[0] });
                 state = reduceState(state, { type: 'devices.received', value: values[1] });
                 state = reduceState(state, { type: 'jobs.received', value: values[2] });
+                if (values[3]) {
+                    if (values[3].diagnostic_error) {
+                        if (values[3].diagnostic_error.code === 'not_found') {
+                            saveDiagnosticJob('');
+                            diagnosticStatus = null;
+                        }
+                    } else {
+                        diagnosticStatus = values[3];
+                        if (diagnosticStatus.state === 'failed' || diagnosticViewModel(diagnosticStatus).state === 'expired') saveDiagnosticJob('');
+                    }
+                }
                 showError(null);
                 render();
             }).catch(function(error) {
@@ -751,6 +830,23 @@
             document.body.removeChild(link);
             environment.setTimeout(function() { environment.URL.revokeObjectURL(url); }, 0);
         });
+        document.getElementById('pp-v2-diagnostics-download-form').action = diagnosticsDownload;
+        document.getElementById('pp-v2-diagnostics-create').addEventListener('click', function() {
+            showError(null);
+            diagnosticStatus = { state: 'queued' };
+            renderDiagnostics();
+            apiCall('diagnostics_create', {}, true).then(function(result) {
+                diagnosticStatus = result;
+                saveDiagnosticJob(result && result.job_id);
+                renderDiagnostics();
+                return poll();
+            }).catch(function(error) {
+                diagnosticStatus = { state: 'failed', error_code: String(error && error.code || 'collection_failed') };
+                saveDiagnosticJob('');
+                renderDiagnostics();
+                showError(error);
+            });
+        });
         environment.addEventListener('pagehide', function() {
             stopped = true;
             pollGeneration++;
@@ -782,6 +878,7 @@
         buildImportCommitRequest: buildImportCommitRequest,
         pendingBindingRows: pendingBindingRows,
         sanitizedExport: sanitizedExport,
+        diagnosticViewModel: diagnosticViewModel,
         boot: boot
     };
 });

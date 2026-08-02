@@ -17,10 +17,104 @@ import (
 
 	"proxypoold/internal/api"
 	"proxypoold/internal/config"
+	"proxypoold/internal/diagnostics"
 	"proxypoold/internal/importer"
 	"proxypoold/internal/model"
 	"proxypoold/internal/platform"
 )
+
+func TestControllerDiagnosticsLifecycleUsesStrictSafeDTOs(t *testing.T) {
+	service := &controllerDiagnosticsService{
+		created: diagnostics.DiagnosticStatus{ID: "diagnostic-job-1", State: diagnostics.DiagnosticQueued, CreatedAt: stateTestEpoch, UpdatedAt: stateTestEpoch},
+		status: diagnostics.DiagnosticStatus{ID: "diagnostic-job-1", State: diagnostics.DiagnosticReady, CreatedAt: stateTestEpoch, UpdatedAt: stateTestEpoch,
+			Artifact: &diagnostics.Artifact{ID: "diag-0123456789abcdef", State: diagnostics.ArtifactReady, Filename: "proxypool-diagnostics-diag-0123456789abcdef.tar.gz", Size: 123, CreatedAt: stateTestEpoch, ExpiresAt: stateTestEpoch.Add(time.Minute)}},
+		claim: diagnostics.ArtifactClaim{ArtifactID: "diag-0123456789abcdef", Path: "/tmp/proxypool/diagnostics/diag-0123456789abcdef.tar.gz", Filename: "proxypool-diagnostics-diag-0123456789abcdef.tar.gz", Size: 123},
+	}
+	controller, err := NewController(
+		config.NewStore(writeControllerConfig(t, controllerConfig())), NewRuntimeStore(filepath.Join(t.TempDir(), "runtime.json")), NewMachine(nil), NewJobStore(),
+		WithDiagnostics(service),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	created := controller.Handle(context.Background(), controllerRequest("diagnostic-create", "diagnostics.create", `{}`))
+	assertControllerSuccess(t, created)
+	if !bytes.Contains(created.Result, []byte(`"job_id":"diagnostic-job-1"`)) || bytes.Contains(created.Result, []byte(`/tmp/`)) {
+		t.Fatalf("unsafe create result: %s", created.Result)
+	}
+
+	got := controller.Handle(context.Background(), controllerRequest("diagnostic-get", "diagnostics.get", `{"job_id":"diagnostic-job-1"}`))
+	assertControllerSuccess(t, got)
+	if !bytes.Contains(got.Result, []byte(`"artifact_id":"diag-0123456789abcdef"`)) || bytes.Contains(got.Result, []byte(`/tmp/`)) {
+		t.Fatalf("unsafe status result: %s", got.Result)
+	}
+
+	claimed := controller.Handle(context.Background(), controllerRequest("diagnostic-claim", "diagnostics.claim", `{"artifact_id":"diag-0123456789abcdef"}`))
+	assertControllerSuccess(t, claimed)
+	if !bytes.Contains(claimed.Result, []byte(`"path":"/tmp/proxypool/diagnostics/`)) {
+		t.Fatalf("claim result = %s", claimed.Result)
+	}
+	released := controller.Handle(context.Background(), controllerRequest("diagnostic-release", "diagnostics.release", `{"artifact_id":"diag-0123456789abcdef"}`))
+	assertControllerSuccess(t, released)
+	if service.released != "diag-0123456789abcdef" {
+		t.Fatalf("released = %q", service.released)
+	}
+	snapshot, err := controller.DiagnosticSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	encodedEntries, _ := json.Marshal(snapshot.Entries)
+	for _, name := range []string{"status.json", "config-summary.json", "jobs.json", "events.json", "daemon-metrics.json", "managed-processes.json"} {
+		if !json.Valid(snapshot.Entries[name]) {
+			t.Fatalf("missing or invalid diagnostic seed %s", name)
+		}
+	}
+	for _, secret := range []string{"user-a", "password-a", "user-b", "password-b"} {
+		if bytes.Contains(encodedEntries, []byte(secret)) {
+			t.Fatalf("diagnostic seed leaked %s", secret)
+		}
+		found := false
+		for _, known := range snapshot.Secrets {
+			if known == secret {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("diagnostic redactor omitted %s", secret)
+		}
+	}
+
+	for _, test := range []struct{ method, params string }{
+		{"diagnostics.create", `{"future":true}`}, {"diagnostics.get", `{}`}, {"diagnostics.get", `{"job_id":"bad id"}`},
+		{"diagnostics.claim", `{"artifact_id":"../escape"}`}, {"diagnostics.release", `{"artifact_id":"diag-0123456789abcdef","future":true}`},
+	} {
+		assertControllerError(t, controller.Handle(context.Background(), controllerRequest("invalid-diagnostic", test.method, test.params)), ErrorCodeInvalidRequest)
+	}
+	service.createErr = diagnostics.ErrDiagnosticCapacity
+	assertControllerError(t, controller.Handle(context.Background(), controllerRequest("diagnostic-capacity", "diagnostics.create", `{}`)), ErrorCodeCapacityExceeded)
+	service.createErr = errors.New("collector unavailable")
+	assertControllerError(t, controller.Handle(context.Background(), controllerRequest("diagnostic-internal", "diagnostics.create", `{}`)), ErrorCodeInternal)
+}
+
+type controllerDiagnosticsService struct {
+	created   diagnostics.DiagnosticStatus
+	status    diagnostics.DiagnosticStatus
+	claim     diagnostics.ArtifactClaim
+	released  string
+	createErr error
+}
+
+func (s *controllerDiagnosticsService) Create() (diagnostics.DiagnosticStatus, error) {
+	return s.created, s.createErr
+}
+func (s *controllerDiagnosticsService) Get(string) (diagnostics.DiagnosticStatus, bool) {
+	return s.status, true
+}
+func (s *controllerDiagnosticsService) Claim(string) (diagnostics.ArtifactClaim, error) {
+	return s.claim, nil
+}
+func (s *controllerDiagnosticsService) Release(id string) error { s.released = id; return nil }
 
 func TestControllerBindPersistsConfigJobAndIdempotencyAcrossRestart(t *testing.T) {
 	configPath := writeControllerConfig(t, controllerConfig())

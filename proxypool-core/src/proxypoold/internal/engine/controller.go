@@ -10,7 +10,10 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"reflect"
+	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,6 +21,7 @@ import (
 	"time"
 
 	"proxypoold/internal/api"
+	"proxypoold/internal/diagnostics"
 	"proxypoold/internal/importer"
 	"proxypoold/internal/model"
 	"proxypoold/internal/platform"
@@ -36,6 +40,13 @@ type runtimePersistence interface {
 
 type schedulerSubmitter interface {
 	Submit(Job)
+}
+
+type diagnosticsService interface {
+	Create() (diagnostics.DiagnosticStatus, error)
+	Get(string) (diagnostics.DiagnosticStatus, bool)
+	Claim(string) (diagnostics.ArtifactClaim, error)
+	Release(string) error
 }
 
 type ControllerOption func(*Controller)
@@ -89,6 +100,10 @@ func WithImporter(manager *importer.Manager) ControllerOption {
 	}
 }
 
+func WithDiagnostics(service diagnosticsService) ControllerOption {
+	return func(controller *Controller) { controller.diagnostics = service }
+}
+
 // Controller is the formal V2 single writer. Platform work is deliberately
 // only queued here; Scheduler becomes the sole side-effect owner in Task 4.
 type Controller struct {
@@ -102,6 +117,7 @@ type Controller struct {
 	leaseManager platform.LeaseManager
 	scheduler    schedulerSubmitter
 	importer     *importer.Manager
+	diagnostics  diagnosticsService
 
 	desired              model.DesiredConfig
 	statuses             map[string]NodeStatus
@@ -472,6 +488,14 @@ func (controller *Controller) Handle(ctx context.Context, request api.Request) a
 		return controller.handleEvents(request)
 	case "system.interface_event":
 		return controller.handleInterfaceEvent(ctx, request)
+	case "diagnostics.create":
+		return controller.handleDiagnosticsCreate(request)
+	case "diagnostics.get":
+		return controller.handleDiagnosticsGet(request)
+	case "diagnostics.claim":
+		return controller.handleDiagnosticsClaim(request)
+	case "diagnostics.release":
+		return controller.handleDiagnosticsRelease(request)
 	default:
 		return api.Response{Version: api.ProtocolVersion, ID: request.ID, Error: &api.Error{Code: "unknown_method", Message: "unknown control method"}}
 	}
@@ -538,6 +562,25 @@ type importCommitParams struct {
 	PreviewID        string  `json:"preview_id"`
 	PreviewHash      string  `json:"preview_hash"`
 	ExpectedRevision *uint64 `json:"expected_revision"`
+}
+
+type diagnosticJobParams struct {
+	JobID string `json:"job_id"`
+}
+type diagnosticArtifactParams struct {
+	ArtifactID string `json:"artifact_id"`
+}
+
+var (
+	diagnosticJobParamPattern      = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+	diagnosticArtifactParamPattern = regexp.MustCompile(`^diag-[a-f0-9]{16,64}$`)
+)
+
+type diagnosticClaimResult struct {
+	ArtifactID string `json:"artifact_id"`
+	Path       string `json:"path"`
+	Filename   string `json:"filename"`
+	Size       int64  `json:"size"`
 }
 
 type mutationResult struct {
@@ -1252,6 +1295,124 @@ func (controller *Controller) handleEvents(request api.Request) api.Response {
 	return controllerResult(request.ID, struct {
 		Events []NodeEvent `json:"events"`
 	}{filtered})
+}
+
+func (controller *Controller) handleDiagnosticsCreate(request api.Request) api.Response {
+	var params emptyParams
+	if decodeControllerParams(request.Params, &params) != nil {
+		return controllerError(request.ID, ErrorCodeInvalidRequest)
+	}
+	if controller.diagnostics == nil {
+		return controllerError(request.ID, ErrorCodeInternal)
+	}
+	status, err := controller.diagnostics.Create()
+	if err != nil {
+		if errors.Is(err, diagnostics.ErrDiagnosticCapacity) {
+			return controllerError(request.ID, ErrorCodeCapacityExceeded)
+		}
+		return controllerError(request.ID, ErrorCodeInternal)
+	}
+	return controllerResult(request.ID, status)
+}
+
+func (controller *Controller) handleDiagnosticsGet(request api.Request) api.Response {
+	var params diagnosticJobParams
+	if decodeControllerParams(request.Params, &params) != nil || !diagnosticJobParamPattern.MatchString(params.JobID) {
+		return controllerError(request.ID, ErrorCodeInvalidRequest)
+	}
+	if controller.diagnostics == nil {
+		return controllerError(request.ID, ErrorCodeInternal)
+	}
+	status, exists := controller.diagnostics.Get(params.JobID)
+	if !exists {
+		return controllerError(request.ID, ErrorCodeNotFound)
+	}
+	return controllerResult(request.ID, status)
+}
+
+func (controller *Controller) handleDiagnosticsClaim(request api.Request) api.Response {
+	var params diagnosticArtifactParams
+	if decodeControllerParams(request.Params, &params) != nil || !diagnosticArtifactParamPattern.MatchString(params.ArtifactID) {
+		return controllerError(request.ID, ErrorCodeInvalidRequest)
+	}
+	if controller.diagnostics == nil {
+		return controllerError(request.ID, ErrorCodeInternal)
+	}
+	claim, err := controller.diagnostics.Claim(params.ArtifactID)
+	if err != nil {
+		return controllerError(request.ID, ErrorCodeNotFound)
+	}
+	return controllerResult(request.ID, diagnosticClaimResult{ArtifactID: claim.ArtifactID, Path: claim.Path, Filename: claim.Filename, Size: claim.Size})
+}
+
+func (controller *Controller) handleDiagnosticsRelease(request api.Request) api.Response {
+	var params diagnosticArtifactParams
+	if decodeControllerParams(request.Params, &params) != nil || !diagnosticArtifactParamPattern.MatchString(params.ArtifactID) {
+		return controllerError(request.ID, ErrorCodeInvalidRequest)
+	}
+	if controller.diagnostics == nil {
+		return controllerError(request.ID, ErrorCodeInternal)
+	}
+	if err := controller.diagnostics.Release(params.ArtifactID); err != nil {
+		return controllerError(request.ID, ErrorCodeNotFound)
+	}
+	return controllerResult(request.ID, struct {
+		Released bool `json:"released"`
+	}{true})
+}
+
+// DiagnosticSnapshot captures only public controller DTOs. Authentication
+// material is returned separately so the collector can redact it from command
+// output without ever serializing it into a seed entry.
+func (controller *Controller) DiagnosticSnapshot(ctx context.Context) (diagnostics.Snapshot, error) {
+	if controller == nil || contextDone(ctx) != nil {
+		return diagnostics.Snapshot{}, errors.New("diagnostic snapshot is unavailable")
+	}
+	controller.mu.Lock()
+	secrets := make([]string, 0, len(controller.desired.Nodes)*4)
+	for _, node := range controller.desired.Nodes {
+		secrets = append(secrets, node.Username, node.Password, node.SLPToken, node.SLPObfsKey)
+	}
+	controller.mu.Unlock()
+	requests := []struct{ name, method, params string }{
+		{"status.json", "status.get", `{}`},
+		{"jobs.json", "job.list", `{}`},
+		{"events.json", "system.events", `{"after_sequence":0,"limit":200}`},
+	}
+	entries := make(map[string][]byte, len(requests))
+	for _, item := range requests {
+		if err := contextDone(ctx); err != nil {
+			return diagnostics.Snapshot{}, err
+		}
+		response := controller.Handle(ctx, controllerRequestForDiagnostic(item.method, item.params))
+		if response.Error != nil || !json.Valid(response.Result) {
+			return diagnostics.Snapshot{}, errors.New("diagnostic snapshot collection failed")
+		}
+		entries[item.name] = append([]byte(nil), response.Result...)
+	}
+	entries["config-summary.json"] = append([]byte(nil), entries["status.json"]...)
+	var memory runtime.MemStats
+	runtime.ReadMemStats(&memory)
+	fdCount := -1
+	if descriptors, err := os.ReadDir("/proc/self/fd"); err == nil {
+		fdCount = len(descriptors)
+	}
+	metrics, err := json.Marshal(struct {
+		Goroutines int    `json:"goroutines"`
+		FDCount    int    `json:"fd_count"`
+		HeapBytes  uint64 `json:"heap_bytes"`
+		SysBytes   uint64 `json:"sys_bytes"`
+	}{runtime.NumGoroutine(), fdCount, memory.HeapAlloc, memory.Sys})
+	if err != nil {
+		return diagnostics.Snapshot{}, errors.New("diagnostic metrics collection failed")
+	}
+	entries["daemon-metrics.json"] = metrics
+	entries["managed-processes.json"] = diagnostics.ReadManagedProcessMetadata("/proc")
+	return diagnostics.Snapshot{Entries: entries, Secrets: secrets}, nil
+}
+
+func controllerRequestForDiagnostic(method, params string) api.Request {
+	return api.Request{Version: api.ProtocolVersion, ID: "diagnostic-snapshot", Method: method, Params: json.RawMessage(params)}
 }
 
 func (controller *Controller) handleInterfaceEvent(ctx context.Context, request api.Request) api.Response {

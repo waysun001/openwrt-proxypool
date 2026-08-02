@@ -134,6 +134,21 @@ test('tracked jobs survive refresh through bounded session storage', () => {
   );
 });
 
+test('diagnostic view exposes only safe artifact metadata', () => {
+  const model = ui.diagnosticViewModel({
+    job_id: 'diagnostic-job-1', state: 'ready',
+    artifact: { artifact_id: 'diag-0123456789abcdef', filename: 'proxypool-diagnostics-diag-0123456789abcdef.tar.gz', size: 123,
+      expires_at: '2030-01-01T00:01:00Z', path: '/tmp/proxypool/diagnostics/secret.tar.gz' },
+  }, Date.parse('2030-01-01T00:00:00Z'));
+  assert.equal(model.can_download, true);
+  assert.equal(model.artifact_id, 'diag-0123456789abcdef');
+  assert.equal(JSON.stringify(model).includes('/tmp/'), false);
+  assert.equal(ui.diagnosticViewModel({ state: 'running' }).can_download, false);
+  assert.equal(ui.diagnosticViewModel({ state: 'ready', artifact: {
+    artifact_id: 'diag-0123456789abcdef', expires_at: '2029-12-31T23:59:59Z',
+  } }, Date.parse('2030-01-01T00:00:00Z')).state, 'expired');
+});
+
 test('import preview sends untouched raw text without browser credential parsing', () => {
   const raw = 'vpn.example|alice|p@ss|with|pipes\nsecond.example|bob|secret';
   assert.deepEqual(ui.buildImportPreviewRequest(raw, 17), {

@@ -58,9 +58,31 @@ func TestRunPreservesVersionAndStrictlyRequiresShadow(t *testing.T) {
 
 func TestLiveControlMethodsExposeTypedNodeMutations(t *testing.T) {
 	methods := liveControlMethods()
-	for _, method := range []string{"node.save", "node.delete", "node.action"} {
+	for _, method := range []string{"node.save", "node.delete", "node.action", "diagnostics.create", "diagnostics.get", "diagnostics.claim", "diagnostics.release"} {
 		if _, exists := methods[method]; !exists {
 			t.Fatalf("live daemon method allowlist omitted %q", method)
+		}
+	}
+}
+
+func TestDefaultDiagnosticCommandsAreFixedBoundedInputs(t *testing.T) {
+	commands := defaultDiagnosticCommands()
+	if len(commands) < 6 || len(commands) > 32 {
+		t.Fatalf("commands = %d", len(commands))
+	}
+	seen := map[string]bool{}
+	for _, command := range commands {
+		if !strings.HasPrefix(command.Path, "/") || strings.Contains(command.Path, "sh") {
+			t.Fatalf("unsafe command = %#v", command)
+		}
+		if seen[command.Name] {
+			t.Fatalf("duplicate command entry %q", command.Name)
+		}
+		seen[command.Name] = true
+		for _, argument := range command.Args {
+			if strings.ContainsAny(argument, ";|`$") {
+				t.Fatalf("shell-like argument = %q", argument)
+			}
 		}
 	}
 }

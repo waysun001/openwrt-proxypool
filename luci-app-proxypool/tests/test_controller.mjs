@@ -88,6 +88,18 @@ test('sanitized export is local allowlisted JSON and never requests credentials'
   assert.doesNotMatch(v2Script, /include_credentials|export_secret|credentials_export/);
 });
 
+test('diagnostic creation is RPC-only and download is protected one-time streaming', () => {
+  assert.match(source, /diagnostics_create\s*=\s*"diagnostics\.create"/);
+  assert.match(source, /diagnostics\s*=\s*"diagnostics\.get"/);
+  assert.match(source, /"download"[^\n]+post\("diagnostics_download"\)/);
+  assert.match(source, /rpc\.call\("diagnostics\.claim"/);
+  assert.match(source, /rpc\.call\("diagnostics\.release"/);
+  assert.match(source, /expected_path\s*=\s*"\/tmp\/proxypool\/diagnostics\/"\s*\.\.\s*artifact/);
+  assert.doesNotMatch(source, /diagnostics_claim\s*=/);
+  assert.match(mainView, /id="pp-v2-diagnostics-create"/);
+  assert.match(mainView, /id="pp-v2-diagnostics-download-form"/);
+});
+
 test('legacy auxiliary pages remain reachable without a dead mutation form', () => {
   assert.match(source, /"locked"[^\n]+call\("locked_page"\)/);
   assert.match(source, /"lease"[^\n]+call\("lease_page"\)/);

@@ -7,7 +7,8 @@ local READ_ACTIONS = {
     devices = "device.list",
     jobs = "job.list",
     job = "job.get",
-    events = "system.events"
+    events = "system.events",
+    diagnostics = "diagnostics.get"
 }
 
 local WRITE_ACTIONS = {
@@ -17,7 +18,8 @@ local WRITE_ACTIONS = {
     node_delete = "node.delete",
     node_action = "node.action",
     import_preview = "import.preview",
-    import_commit = "import.commit"
+    import_commit = "import.commit",
+    diagnostics_create = "diagnostics.create"
 }
 
 function index()
@@ -26,6 +28,7 @@ function index()
     entry({"admin", "services", "proxypool", "lease"}, call("lease_page")).leaf = true
     entry({"admin", "services", "proxypool", "api", "read"}, call("api_read")).leaf = true
     entry({"admin", "services", "proxypool", "api", "write"}, post("api_write")).leaf = true
+    entry({"admin", "services", "proxypool", "download"}, post("diagnostics_download")).leaf = true
     entry({"admin"}, alias("admin", "services", "proxypool"), _("Administration"), 10).index = true
 end
 
@@ -86,6 +89,11 @@ local function read_params(action, http)
         if not job then return nil end
         return { job_id = job }
     end
+    if action == "diagnostics" then
+        local job = exact_id(http.formvalue("job_id"))
+        if not job then return nil end
+        return { job_id = job }
+    end
     if action == "events" then
         local after = exact_integer(http.formvalue("after_sequence") or "0", 0, 9007199254740991)
         local limit = exact_integer(http.formvalue("limit") or "100", 1, 200)
@@ -126,6 +134,7 @@ end
 
 local function write_params(action, http)
     if action == "node_save" then return node_save_params(http) end
+    if action == "diagnostics_create" then return {} end
 
     local revision = exact_revision(http.formvalue("expected_revision"))
     if action == "import_preview" then
@@ -219,4 +228,46 @@ end
 
 function api_write()
     return dispatch_action(WRITE_ACTIONS, write_params)
+end
+
+function diagnostics_download()
+    local http = require "luci.http"
+    local json = require "luci.jsonc"
+    local fs = require "nixio.fs"
+    local rpc = require "luci.model.proxypool_rpc"
+    local artifact = tostring(http.formvalue("artifact_id") or "")
+    if not artifact:match("^diag%-[a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9]*$") or #artifact > 69 then
+        return write_error(http, json, { code = "invalid_request", message = "artifact id is invalid", http_status = 400 })
+    end
+    local claim, claim_error = rpc.call("diagnostics.claim", { artifact_id = artifact })
+    if claim_error then return write_error(http, json, claim_error) end
+    local expected_path = "/tmp/proxypool/diagnostics/" .. artifact .. ".tar.gz"
+    local expected_name = "proxypool-diagnostics-" .. artifact .. ".tar.gz"
+    local claim_path = claim and tostring(claim.path or "") or ""
+    local stat = claim_path == expected_path and fs.lstat(claim_path) or nil
+    local safe = claim and claim.artifact_id == artifact and claim_path == expected_path and claim.filename == expected_name and
+        tonumber(claim.size) and tonumber(claim.size) > 0 and tonumber(claim.size) <= 20 * 1024 * 1024 and
+        stat and stat.type == "reg" and tonumber(stat.size) == tonumber(claim.size)
+    if not safe then
+        rpc.call("diagnostics.release", { artifact_id = artifact })
+        return write_error(http, json, { code = "not_found", message = "diagnostic artifact is unavailable", http_status = 404 })
+    end
+    local file = io.open(expected_path, "rb")
+    if not file then
+        rpc.call("diagnostics.release", { artifact_id = artifact })
+        return write_error(http, json, { code = "not_found", message = "diagnostic artifact is unavailable", http_status = 404 })
+    end
+    http.header("Cache-Control", "no-store")
+    http.header("Content-Disposition", 'attachment; filename="' .. expected_name .. '"')
+    http.header("Content-Length", tostring(claim.size))
+    http.prepare_content("application/gzip")
+    pcall(function()
+        while true do
+            local chunk = file:read(65536)
+            if not chunk or #chunk == 0 then break end
+            http.write(chunk)
+        end
+    end)
+    file:close()
+    rpc.call("diagnostics.release", { artifact_id = artifact })
 end

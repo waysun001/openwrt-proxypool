@@ -142,6 +142,40 @@ func TestArtifactStoreRejectsUnboundedEntryCount(t *testing.T) {
 	}
 }
 
+func TestArtifactStoreRemovesOrphansOnStartupAndCleanupAll(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "diagnostics")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	orphan := filepath.Join(root, "diag-0123456789abcdef.tar.gz")
+	temporary := filepath.Join(root, ".diagnostic-old")
+	if err := os.WriteFile(orphan, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(temporary, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewArtifactStore(root, WithArtifactIDSource(func() string { return "diag-dddddddddddddddd" }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{orphan, temporary} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("startup orphan remains: %s", path)
+		}
+	}
+	artifact, err := store.Write(context.Background(), []Entry{{Name: "safe.txt", Data: []byte("x")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CleanupAll(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, artifact.ID+".tar.gz")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("CleanupAll left an artifact")
+	}
+}
+
 func readArchive(t *testing.T, path string) map[string][]byte {
 	t.Helper()
 	file, err := os.Open(path)

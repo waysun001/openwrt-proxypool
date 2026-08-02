@@ -3,6 +3,7 @@ package diagnostics
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -113,6 +114,52 @@ func TestManagerHistoryRemainsBoundedBehindLongRunningOldestJob(t *testing.T) {
 	defer manager.mu.RUnlock()
 	if len(manager.jobs) > MaxRetainedDiagnosticJobs || len(manager.order) > MaxRetainedDiagnosticJobs {
 		t.Fatalf("diagnostic history grew to jobs=%d order=%d", len(manager.jobs), len(manager.order))
+	}
+}
+
+func TestManagerWaitsForWorkersAndDeletesArtifactsOnCancellation(t *testing.T) {
+	serviceCtx, cancel := context.WithCancel(context.Background())
+	store, err := NewArtifactStore(filepath.Join(t.TempDir(), "diagnostics"), WithArtifactIDSource(func() string { return "diag-eeeeeeeeeeeeeeee" }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	manager := NewManager(serviceCtx, store, func(ctx context.Context) (Snapshot, error) {
+		close(started)
+		<-ctx.Done()
+		return Snapshot{}, ctx.Err()
+	}, func(context.Context, Snapshot) ([]Entry, error) {
+		return []Entry{{Name: "safe.txt", Data: []byte("x")}}, nil
+	})
+	if _, err := manager.Create(); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	cancel()
+	if err := manager.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	manager.mu.RLock()
+	running := manager.running
+	manager.mu.RUnlock()
+	if running != 0 {
+		t.Fatalf("running = %d", running)
+	}
+}
+
+func TestManagerReportsShutdownCleanupFailure(t *testing.T) {
+	serviceCtx, cancel := context.WithCancel(context.Background())
+	store, err := NewArtifactStore(filepath.Join(t.TempDir(), "diagnostics"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(serviceCtx, store, func(context.Context) (Snapshot, error) { return Snapshot{}, nil }, nil)
+	if err := os.Mkdir(filepath.Join(store.root, "unexpected-directory"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	if err := manager.Wait(); err == nil {
+		t.Fatal("shutdown cleanup failure was swallowed")
 	}
 }
 

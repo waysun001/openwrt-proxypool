@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-proxypool
 PKG_VERSION:=2.0.0
-PKG_RELEASE:=6
+PKG_RELEASE:=7
 
 PKG_LICENSE:=MIT
 PKG_MAINTAINER:=智联盒子
