@@ -133,3 +133,71 @@ test('tracked jobs survive refresh through bounded session storage', () => {
     ['job-b', 'newer', 'older'],
   );
 });
+
+test('import preview sends untouched raw text without browser credential parsing', () => {
+  const raw = 'vpn.example|alice|p@ss|with|pipes\nsecond.example|bob|secret';
+  assert.deepEqual(ui.buildImportPreviewRequest(raw, 17), {
+    protocol: 'l2tp', raw, expected_revision: 17,
+  });
+  assert.deepEqual(ui.buildImportPreviewRequest(raw, 17, 'socks5'), {
+    protocol: 'socks5', raw, expected_revision: 17,
+  });
+});
+
+test('server preview is rendered from sanitized fields and blocking errors disable commit', () => {
+  const preview = {
+    preview_id: 'preview-a', preview_hash: 'a'.repeat(64), base_revision: 17,
+    blocked: true, added: 1, skipped: 0,
+    rows: [{ line: 1, action: 'add', protocol: 'l2tp', server: 'vpn.example', port: 1701, secret_set: true }],
+    errors: [{ line: 2, code: 'invalid_fields', message: '字段数量错误' }],
+  };
+  const model = ui.importPreviewModel(preview);
+  assert.equal(model.can_commit, false);
+  assert.equal(model.rows[0].secret_label, '已设置（不显示）');
+  assert.match(model.summary, /1/);
+  assert.equal(JSON.stringify(model).includes('p@ss'), false);
+});
+
+test('import commit is bound to preview hash and base revision', () => {
+  const preview = { preview_id: 'preview-a', preview_hash: 'b'.repeat(64), base_revision: 23 };
+  assert.deepEqual(ui.buildImportCommitRequest(preview), {
+    preview_id: 'preview-a', preview_hash: 'b'.repeat(64), expected_revision: 23,
+  });
+});
+
+test('revision conflict invalidates preview and successful commit job remains tracked', () => {
+  let state = ui.reduceState(ui.initialState(), {
+    type: 'import.preview.received', value: { preview_id: 'preview-a', blocked: false },
+  });
+  state = ui.reduceState(state, { type: 'import.failed', error: { code: 'revision_conflict' } });
+  assert.equal(state.importPreview, null);
+  assert.equal(state.importNeedsPreview, true);
+  state = ui.reduceState(state, { type: 'job.tracked', jobId: 'job-import' });
+  assert.deepEqual(state.trackedJobIds, ['job-import']);
+});
+
+test('pending legacy IP bindings are shown as waiting for device discovery', () => {
+  const rows = ui.pendingBindingRows(
+    [{ id: 'pending-a', legacy_ipv4: '192.168.9.88', node_id: 'node-a' }],
+    [{ id: 'node-a', name: 'Node A' }],
+  );
+  assert.deepEqual(rows, [{
+    id: 'pending-a', ipv4: '192.168.9.88', node_name: 'Node A', state: '等待设备出现', error_code: '',
+  }]);
+});
+
+test('sanitized export uses an explicit allowlist and contains no credential material', () => {
+  const exported = ui.sanitizedExport({
+    config: { revision: 9 },
+    desired: {
+      enabled: true,
+      nodes: [{ id: 'node-a', name: 'A', protocol: 'l2tp', server: 'vpn.example', port: 1701, enabled: true, policy_id: 1, has_password: true, password: 'DO-NOT-EXPORT' }],
+      devices: [{ id: 'device-a', mac: '00:11:22:33:44:55', node_id: 'node-a', enabled: true }],
+      pending_bindings: [],
+    },
+  });
+  const encoded = JSON.stringify(exported);
+  assert.match(encoded, /vpn\.example/);
+  assert.equal(encoded.includes('DO-NOT-EXPORT'), false);
+  assert.equal(encoded.includes('has_password'), false);
+});

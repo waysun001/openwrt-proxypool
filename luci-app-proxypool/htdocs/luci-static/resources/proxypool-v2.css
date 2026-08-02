@@ -32,6 +32,11 @@
 .pp-v2-form-grid .pp-v2-checkbox { flex-direction: row; align-items: center; }
 .pp-v2-form-grid .pp-v2-checkbox input { width: auto; }
 .pp-v2-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+.pp-v2-import-raw { box-sizing: border-box; width: 100%; min-height: 180px; padding: 10px; font-family: monospace; resize: vertical; }
+.pp-v2-import-result { max-height: 300px; margin-top: 14px; overflow: auto; }
+.pp-v2-import-summary { margin-bottom: 8px; font-weight: 600; }
+.pp-v2-import-row, .pp-v2-import-error { padding: 6px 8px; border-bottom: 1px solid #eef1f4; font-family: monospace; }
+.pp-v2-import-error { color: #b42318; }
 @media (max-width: 760px) {
     .pp-v2-summary, .pp-v2-form-grid { grid-template-columns: 1fr; }
     .pp-v2-header, .pp-v2-toolbar, .pp-v2-job { align-items: flex-start; flex-direction: column; }

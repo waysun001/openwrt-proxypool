@@ -43,8 +43,12 @@ require "$LUCI_RPC" 'nixio.socket("unix", "stream")' 'LuCI RPC bridge does not u
 require "$LUCI_RPC" 'socket:setopt("socket", "sndtimeo", TIMEOUT_SECONDS, 0)' 'LuCI control writes can hang without a deadline'
 require "$LUCI_RPC" 'socket:setopt("socket", "rcvtimeo", TIMEOUT_SECONDS, 0)' 'LuCI control reads can hang without a deadline'
 require "$V2_JS" 'environment.setTimeout(poll, 3000)' 'LuCI does not use one bounded status poller'
+require "$V2_JS" "apiCall('import_preview', params, true)" 'LuCI does not use server-authoritative import preview'
+require "$V2_JS" "apiCall('import_commit', params, true)" 'LuCI does not use one transactional import commit'
 require "$VIEW" '无需手工输入' 'LuCI does not expose automatic device discovery'
+require "$VIEW" 'pp-v2-import-raw' 'LuCI batch import modal is missing'
 
 if grep -Fq 'function pollJob' "$V2_JS"; then fail 'LuCI still blocks mutation UI while polling a whole job'; fi
+if grep -Eq 'sequentialConnect|pending marker' "$V2_JS"; then fail 'LuCI still owns per-node import orchestration'; fi
 
 echo 'PASS: V2 live L2TP assembly and LuCI control contract'

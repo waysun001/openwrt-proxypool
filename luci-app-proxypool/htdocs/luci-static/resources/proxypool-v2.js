@@ -22,7 +22,10 @@
             devices: [],
             jobs: [],
             trackedJobIds: [],
-            pendingNodes: {}
+            pendingNodes: {},
+            pendingBindings: [],
+            importPreview: null,
+            importNeedsPreview: false
         };
     }
 
@@ -55,7 +58,13 @@
                 }
                 return copy;
             });
-            return Object.assign({}, state, { revision: revision, status: status, nodes: nodes, pendingNodes: pendingNodes });
+            return Object.assign({}, state, {
+                revision: revision,
+                status: status,
+                nodes: nodes,
+                pendingNodes: pendingNodes,
+                pendingBindings: ((status.desired && status.desired.pending_bindings) || []).slice()
+            });
         }
         if (event.type === 'devices.received') {
             var deviceResult = event.value || {};
@@ -78,6 +87,15 @@
                 return Object.assign({}, node, { state: 'queued', last_error: null, retry_at: '' });
             });
             return Object.assign({}, state, { nodes: nextNodes, pendingNodes: pending });
+        }
+        if (event.type === 'import.preview.received') {
+            return Object.assign({}, state, { importPreview: event.value || null, importNeedsPreview: false });
+        }
+        if (event.type === 'import.cleared') {
+            return Object.assign({}, state, { importPreview: null, importNeedsPreview: false });
+        }
+        if (event.type === 'import.failed' && event.error && event.error.code === 'revision_conflict') {
+            return Object.assign({}, state, { importPreview: null, importNeedsPreview: true });
         }
         return state;
     }
@@ -239,6 +257,88 @@
         }).join('&');
     }
 
+    function buildImportPreviewRequest(raw, revision, protocol) {
+        protocol = String(protocol || 'l2tp');
+        if (['l2tp', 'socks5', 'slp'].indexOf(protocol) === -1) protocol = 'l2tp';
+        return { protocol: protocol, raw: String(raw || ''), expected_revision: Number(revision) };
+    }
+
+    function importPreviewModel(preview) {
+        preview = preview || {};
+        return {
+            can_commit: !preview.blocked && !!preview.preview_id && !!preview.preview_hash,
+            summary: '新增 ' + Number(preview.added || 0) + '，跳过 ' + Number(preview.skipped || 0) + (preview.blocked ? '，存在阻断错误' : '，可以提交'),
+            rows: (preview.rows || []).map(function(row) {
+                return {
+                    line: Number(row.line || 0),
+                    action: String(row.action || ''),
+                    protocol: String(row.protocol || ''),
+                    endpoint: String(row.server || '') + ':' + String(row.port || ''),
+                    expires_at: String(row.expires_at || ''),
+                    secret_label: row.secret_set ? '已设置（不显示）' : '未设置'
+                };
+            }),
+            errors: (preview.errors || []).map(function(error) {
+                return { line: Number(error.line || 0), code: String(error.code || ''), message: String(error.message || '') };
+            })
+        };
+    }
+
+    function buildImportCommitRequest(preview) {
+        preview = preview || {};
+        return {
+            preview_id: String(preview.preview_id || ''),
+            preview_hash: String(preview.preview_hash || ''),
+            expected_revision: Number(preview.base_revision || 0)
+        };
+    }
+
+    function pendingBindingRows(bindings, nodes) {
+        var names = {};
+        (nodes || []).forEach(function(node) { names[node.id] = node.name; });
+        return (bindings || []).map(function(binding) {
+            return {
+                id: String(binding.id || ''),
+                ipv4: String(binding.legacy_ipv4 || ''),
+                node_name: String(names[binding.node_id] || binding.node_id || '-'),
+                state: '等待设备出现',
+                error_code: String(binding.error_code || '')
+            };
+        });
+    }
+
+    function sanitizedExport(status) {
+        status = status || {};
+        var desired = status.desired || {};
+        return {
+            schema_version: 2,
+            kind: 'proxypool-v2-sanitized',
+            config_revision: Number(status.config && status.config.revision || 0),
+            desired: {
+                enabled: !!desired.enabled,
+                nodes: (desired.nodes || []).map(function(node) {
+                    return {
+                        id: node.id, name: node.name, protocol: node.protocol, enabled: !!node.enabled,
+                        delete_pending: !!node.delete_pending, server: node.server, port: node.port,
+                        expires_at: node.expires_at || '', policy_id: node.policy_id, revision: node.revision
+                    };
+                }),
+                devices: (desired.devices || []).map(function(device) {
+                    return {
+                        id: device.id, mac: device.mac, hostname: device.hostname || '', fixed_ipv4: device.fixed_ipv4 || '',
+                        node_id: device.node_id || '', enabled: !!device.enabled
+                    };
+                }),
+                pending_bindings: (desired.pending_bindings || []).map(function(binding) {
+                    return {
+                        id: binding.id, legacy_ipv4: binding.legacy_ipv4, node_id: binding.node_id,
+                        error_code: binding.error_code || ''
+                    };
+                })
+            }
+        };
+    }
+
     function boot(document, environment) {
         var app = document.getElementById('pp-v2-app');
         if (!app || app.getAttribute('data-booted') === '1') return;
@@ -252,6 +352,7 @@
         var timer = null;
         var pollController = null;
         var pollGeneration = 0;
+        var importGeneration = 0;
         var stopped = false;
 
         function element(tag, className, text) {
@@ -304,6 +405,32 @@
 
         function showError(error) {
             document.getElementById('pp-v2-error').textContent = error ? formatError(error) : '';
+        }
+
+        function renderImportPreview() {
+            var target = document.getElementById('pp-v2-import-result');
+            var commit = document.getElementById('pp-v2-import-commit');
+            target.textContent = '';
+            if (state.importNeedsPreview) {
+                target.appendChild(element('div', 'pp-v2-import-error', '配置已变化，请重新点击安全预览。'));
+                commit.disabled = true;
+                return;
+            }
+            if (!state.importPreview) {
+                commit.disabled = true;
+                return;
+            }
+            var model = importPreviewModel(state.importPreview);
+            target.appendChild(element('div', 'pp-v2-import-summary', model.summary));
+            model.rows.forEach(function(row) {
+                target.appendChild(element('div', 'pp-v2-import-row',
+                    '第 ' + row.line + ' 行 · ' + row.action + ' · ' + row.protocol.toUpperCase() + ' · ' + row.endpoint + ' · 认证：' + row.secret_label));
+            });
+            model.errors.forEach(function(error) {
+                target.appendChild(element('div', 'pp-v2-import-error',
+                    (error.line ? '第 ' + error.line + ' 行 · ' : '') + error.code + '：' + error.message));
+            });
+            commit.disabled = !model.can_commit;
         }
 
         function trackMutation(result, params) {
@@ -428,7 +555,17 @@
                 row.appendChild(actions);
                 body.appendChild(row);
             });
-            if (!state.devices.length) {
+            pendingBindingRows(state.pendingBindings, state.nodes).forEach(function(pending) {
+                var row = element('tr');
+                row.appendChild(element('td', '', pending.state));
+                row.appendChild(element('td', '', pending.ipv4));
+                row.appendChild(element('td', '', pending.ipv4));
+                row.appendChild(element('td', '', '-'));
+                row.appendChild(element('td', '', pending.node_name));
+                row.appendChild(element('td', 'pp-v2-state pp-v2-state-queued', pending.error_code || pending.state));
+                body.appendChild(row);
+            });
+            if (!state.devices.length && !state.pendingBindings.length) {
                 var empty = element('tr');
                 var cell = element('td', 'pp-v2-empty', '暂未发现 LAN 或 WiFi 终端。');
                 cell.colSpan = 6;
@@ -511,6 +648,109 @@
             document.getElementById('pp-v2-node-modal').hidden = true;
             mutate('node_save', validation.params);
         });
+        document.getElementById('pp-v2-import-open').addEventListener('click', function() {
+            importGeneration++;
+            state = reduceState(state, { type: 'import.cleared' });
+            document.getElementById('pp-v2-import-raw').value = '';
+            document.getElementById('pp-v2-import-preview').disabled = false;
+            document.getElementById('pp-v2-import-cancel').disabled = false;
+            document.getElementById('pp-v2-import-raw').disabled = false;
+            document.getElementById('pp-v2-import-protocol').disabled = false;
+            renderImportPreview();
+            document.getElementById('pp-v2-import-modal').hidden = false;
+        });
+        document.getElementById('pp-v2-import-cancel').addEventListener('click', function() {
+            importGeneration++;
+            document.getElementById('pp-v2-import-raw').value = '';
+            state = reduceState(state, { type: 'import.cleared' });
+            document.getElementById('pp-v2-import-modal').hidden = true;
+        });
+        function invalidateImportPreview() {
+            importGeneration++;
+            state = reduceState(state, { type: 'import.cleared' });
+            document.getElementById('pp-v2-import-preview').disabled = false;
+            renderImportPreview();
+        }
+        document.getElementById('pp-v2-import-raw').addEventListener('input', invalidateImportPreview);
+        document.getElementById('pp-v2-import-protocol').addEventListener('change', invalidateImportPreview);
+        document.getElementById('pp-v2-import-preview').addEventListener('click', function() {
+            var rawInput = document.getElementById('pp-v2-import-raw');
+            var raw = rawInput.value;
+            if (!raw.trim()) {
+                showError({ code: 'invalid_request' });
+                return;
+            }
+            var button = document.getElementById('pp-v2-import-preview');
+            var generation = ++importGeneration;
+            var protocol = document.getElementById('pp-v2-import-protocol').value;
+            var params = buildImportPreviewRequest(raw, state.revision, protocol);
+            rawInput.value = '';
+            button.disabled = true;
+            document.getElementById('pp-v2-import-commit').disabled = true;
+            showError(null);
+            apiCall('import_preview', params, true).then(function(result) {
+                if (generation !== importGeneration) return;
+                state = reduceState(state, { type: 'import.preview.received', value: result });
+                renderImportPreview();
+            }).catch(function(error) {
+                if (generation !== importGeneration) return;
+                state = reduceState(state, { type: 'import.failed', error: error });
+                renderImportPreview();
+                showError(error);
+            }).then(function() {
+                params.raw = '';
+                raw = '';
+                if (generation === importGeneration) button.disabled = false;
+            });
+        });
+        document.getElementById('pp-v2-import-commit').addEventListener('click', function() {
+            if (!state.importPreview || !importPreviewModel(state.importPreview).can_commit) return;
+            var button = document.getElementById('pp-v2-import-commit');
+            var cancel = document.getElementById('pp-v2-import-cancel');
+            var previewButton = document.getElementById('pp-v2-import-preview');
+            var rawInput = document.getElementById('pp-v2-import-raw');
+            var protocolInput = document.getElementById('pp-v2-import-protocol');
+            var generation = ++importGeneration;
+            var params = buildImportCommitRequest(state.importPreview);
+            button.disabled = true;
+            cancel.disabled = true;
+            previewButton.disabled = true;
+            rawInput.disabled = true;
+            protocolInput.disabled = true;
+            showError(null);
+            apiCall('import_commit', params, true).then(function(result) {
+                if (generation !== importGeneration) return;
+                state = reduceState(state, { type: 'import.cleared' });
+                document.getElementById('pp-v2-import-modal').hidden = true;
+                return trackMutation(result, {});
+            }).catch(function(error) {
+                if (generation !== importGeneration) return;
+                state = reduceState(state, { type: 'import.failed', error: error });
+                renderImportPreview();
+                showError(error);
+                cancel.disabled = false;
+                previewButton.disabled = false;
+                rawInput.disabled = false;
+                protocolInput.disabled = false;
+                if (state.importPreview) button.disabled = !importPreviewModel(state.importPreview).can_commit;
+            });
+        });
+        document.getElementById('pp-v2-export-safe').addEventListener('click', function() {
+            if (!state.status) return;
+            var blob = new environment.Blob([JSON.stringify(sanitizedExport(state.status), null, 2) + '\n'], { type: 'application/json' });
+            if (environment.navigator && typeof environment.navigator.msSaveBlob === 'function') {
+                environment.navigator.msSaveBlob(blob, 'proxypool-v2-sanitized.json');
+                return;
+            }
+            var url = environment.URL.createObjectURL(blob);
+            var link = document.createElement('a');
+            link.href = url;
+            link.download = 'proxypool-v2-sanitized.json';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            environment.setTimeout(function() { environment.URL.revokeObjectURL(url); }, 0);
+        });
         environment.addEventListener('pagehide', function() {
             stopped = true;
             pollGeneration++;
@@ -537,6 +777,11 @@
         saveTrackedJobIDs: saveTrackedJobIDs,
         presentNodes: presentNodes,
         visibleJobs: visibleJobs,
+        buildImportPreviewRequest: buildImportPreviewRequest,
+        importPreviewModel: importPreviewModel,
+        buildImportCommitRequest: buildImportCommitRequest,
+        pendingBindingRows: pendingBindingRows,
+        sanitizedExport: sanitizedExport,
         boot: boot
     };
 });

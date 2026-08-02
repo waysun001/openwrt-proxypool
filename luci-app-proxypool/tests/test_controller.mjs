@@ -63,6 +63,31 @@ test('polling degrades without AbortController and resumes after bfcache restore
   assert.match(v2Script, /event\.persisted/);
 });
 
+test('transactional import UI uses daemon preview and commit without per-node browser loops', () => {
+  for (const id of ['pp-v2-import-open', 'pp-v2-import-raw', 'pp-v2-import-preview', 'pp-v2-import-commit']) {
+    assert.match(mainView, new RegExp(`id="${id}"`));
+  }
+  assert.match(v2Script, /apiCall\('import_preview', params, true\)/);
+  assert.match(v2Script, /apiCall\('import_commit', params, true\)/);
+  assert.doesNotMatch(v2Script, /sequentialConnect|pollJob|pending marker/i);
+});
+
+test('cancelled import generations cannot revive stale previews and commit cannot pretend to cancel', () => {
+  assert.match(v2Script, /var importGeneration = 0/);
+  assert.match(v2Script, /generation !== importGeneration/);
+  assert.match(v2Script, /cancel\.disabled = true/);
+  assert.match(v2Script, /rawInput\.disabled = true/);
+  assert.match(v2Script, /protocolInput\.disabled = true/);
+  assert.match(v2Script, /addEventListener\('input', invalidateImportPreview\)/);
+  assert.match(v2Script, /addEventListener\('change', invalidateImportPreview\)/);
+});
+
+test('sanitized export is local allowlisted JSON and never requests credentials', () => {
+  assert.match(mainView, /id="pp-v2-export-safe"/);
+  assert.match(v2Script, /sanitizedExport\(state\.status\)/);
+  assert.doesNotMatch(v2Script, /include_credentials|export_secret|credentials_export/);
+});
+
 test('legacy auxiliary pages remain reachable without a dead mutation form', () => {
   assert.match(source, /"locked"[^\n]+call\("locked_page"\)/);
   assert.match(source, /"lease"[^\n]+call\("lease_page"\)/);

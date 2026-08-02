@@ -30,7 +30,11 @@
     <section data-pp-panel="nodes">
         <div class="pp-v2-toolbar">
             <div><h3>节点管理</h3><p>当前可拨号协议为 L2TP；账号和密码不会回显。</p></div>
-            <button id="pp-v2-add-node" type="button" class="cbi-button cbi-button-add">新增节点</button>
+            <div class="pp-v2-actions">
+                <button id="pp-v2-export-safe" type="button" class="cbi-button">导出脱敏 JSON</button>
+                <button id="pp-v2-import-open" type="button" class="cbi-button cbi-button-apply">批量导入</button>
+                <button id="pp-v2-add-node" type="button" class="cbi-button cbi-button-add">新增节点</button>
+            </div>
         </div>
         <div class="pp-v2-table-wrap">
             <table class="table pp-v2-table">
@@ -79,6 +83,21 @@
                     <button type="submit" class="cbi-button cbi-button-save">保存</button>
                 </div>
             </form>
+        </div>
+    </div>
+
+    <div id="pp-v2-import-modal" class="pp-v2-modal" hidden>
+        <div class="pp-v2-dialog" role="dialog" aria-modal="true" aria-labelledby="pp-v2-import-title">
+            <h3 id="pp-v2-import-title">批量导入 L2TP 节点</h3>
+            <p><label>协议 <select id="pp-v2-import-protocol"><option value="l2tp">L2TP</option><option value="socks5">SOCKS5（仅迁移保存）</option><option value="slp">SLP（仅迁移保存）</option></select></label></p>
+            <p>L2TP 每行一个：<code>服务器|用户名|密码</code>，或 <code>服务器|端口|用户名|密码|到期日期</code>。SOCKS5/SLP 可保留旧配置，当前版本不会让设备通过它们上网。单次最多 60 个。</p>
+            <textarea id="pp-v2-import-raw" class="pp-v2-import-raw" maxlength="1048576" autocomplete="off" placeholder="vpn.example.com|username|password"></textarea>
+            <div id="pp-v2-import-result" class="pp-v2-import-result" aria-live="polite"></div>
+            <div class="pp-v2-dialog-actions">
+                <button id="pp-v2-import-cancel" type="button" class="cbi-button">取消</button>
+                <button id="pp-v2-import-preview" type="button" class="cbi-button cbi-button-apply">安全预览</button>
+                <button id="pp-v2-import-commit" type="button" class="cbi-button cbi-button-save" disabled>确认导入</button>
+            </div>
         </div>
     </div>
 </div>
