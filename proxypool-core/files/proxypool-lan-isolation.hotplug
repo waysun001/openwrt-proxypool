@@ -25,10 +25,18 @@ esac
 # Waking the singleton procd worker is latency optimization only.  The
 # root-only pending marker and the worker's periodic audit remain authoritative
 # if ubus is unavailable, times out, or the worker is between respawns.
-signal_number=$(kill -l USR1 2>/dev/null) || exit 0
-case "$signal_number" in
-	''|*[!0-9]*) exit 0 ;;
-esac
+# dash and BusyBox ash do not consistently accept a symbolic operand for
+# `kill -l`.  Resolve SIGUSR1 from numeric probes so this also follows Linux
+# ABIs where USR1 is not signal 10 (for example MIPS).
+signal_number=1
+while [ "$signal_number" -le 64 ]; do
+	signal_name=$(kill -l "$signal_number" 2>/dev/null) || signal_name=
+	case "$signal_name" in
+		USR1|SIGUSR1) break ;;
+	esac
+	signal_number=$((signal_number + 1))
+done
+[ "$signal_number" -le 64 ] || exit 0
 if [ -x "$UBUS" ]; then
 	"$UBUS" -t 1 call service signal \
 		"{\"name\":\"proxypool-guard\",\"instance\":\"lan-reconciler\",\"signal\":$signal_number}" \
