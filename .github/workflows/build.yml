@@ -41,7 +41,9 @@ jobs:
             echo "PROXYPOOL_TARGET_NFT=$GITHUB_WORKSPACE/scripts/openwrt-target-nft.sh"
           } >> "$GITHUB_ENV"
       - name: Run host gates first
-        run: ./scripts/test-host.sh
+        run: |
+          sh ./scripts/test-status-readonly.sh
+          ./scripts/test-host.sh
       - name: Check pushed commit range
         env:
           EVENT_BASE_SHA: ${{ github.event.before }}
