@@ -2406,13 +2406,21 @@ for install_probe_case in active unknown; do
 		fail "defaults accepted $install_probe_case flowtable result before live install"
 	fi
 	assert_clamped_baseline "$trace.clamped" "$config_dir"
-	[ "$(grep -c '^guardian:reset-empty$' "$trace" 2>/dev/null || true)" -ge 1 ] ||
+	if [ "$(grep -c '^guardian:reset-empty$' "$trace" 2>/dev/null || true)" -lt 1 ]; then
+		cat "$trace" >&2
+		cat "$TEST_TMP/pre-install-probe-$install_probe_case.log" >&2
 		fail "pre-install $install_probe_case did not retain an empty guardian"
+	fi
 	[ "$(grep -c '^config:install:' "$trace" 2>/dev/null || true)" -eq 0 ] ||
 		fail "pre-install $install_probe_case still replaced live configuration"
 	[ "$(grep -c '^firewall:reload$' "$trace" 2>/dev/null || true)" -eq 0 ] ||
 		fail "pre-install $install_probe_case still activated firewall"
 done
+
+if [ "${PROXYPOOL_TEST_FOCUS_PREFLIGHT:-0}" = 1 ]; then
+	echo 'ProxyPool focused preflight flowtable boundaries: PASS'
+	exit 0
+fi
 
 # The empty guardian is the first conversion mutation.  If it fails, every
 # managed byte remains untouched.  If its atomic nft child succeeds but kills
