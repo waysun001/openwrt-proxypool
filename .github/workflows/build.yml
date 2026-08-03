@@ -155,23 +155,17 @@ jobs:
             exit 1
           fi
 
-      - name: Compile and verify the custom target kernel
+      - name: Compile complete firmware and verify the custom target kernel
         run: |
           set -o pipefail
           mkdir -p build-evidence
           cd openwrt
-          make -j"$(nproc)" target/linux/compile V=s 2>&1 | tee ../build-evidence/target-linux-compile.log
+          make -j"$(nproc)" V=s 2>&1 | tee ../build-evidence/firmware-build.log
           sh ../scripts/verify-openwrt-kernel-isolation.sh . ../openwrt-patches/23.05.3 2>&1 |
             tee ../build-evidence/kernel-isolation-verification.log
           sha256sum ../openwrt-patches/23.05.3/*.patch > ../build-evidence/kernel-patches.sha256
           cp .config ../build-evidence/openwrt.config
           cp ../openwrt-commit.txt ../build-evidence/
-
-      - name: Compile complete firmware
-        run: |
-          set -o pipefail
-          cd openwrt
-          make -j"$(nproc)" V=s 2>&1 | tee ../build-evidence/firmware-build.log
 
       - name: Inspect unique packages and collect GL-MT6000 evidence
         run: |

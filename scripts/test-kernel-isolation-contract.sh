@@ -68,7 +68,7 @@ require_fixed "$FULL_WORKFLOW" '[ "$(git rev-parse HEAD)" = "$OPENWRT_COMMIT" ]'
 require_fixed "$FULL_WORKFLOW" 'openwrt-patches/23.05.3/998-net-bridge-offload-br-isolated.patch'
 require_fixed "$FULL_WORKFLOW" 'openwrt-patches/23.05.3/999-net-dsa-mt7530-bridge-port-isolation.patch'
 require_fixed "$FULL_WORKFLOW" 'target/linux/generic/backport-5.15/'
-require_fixed "$FULL_WORKFLOW" 'make -j"$(nproc)" target/linux/compile V=s'
+require_fixed "$FULL_WORKFLOW" 'make -j"$(nproc)" V=s'
 require_fixed "$FULL_WORKFLOW" 'sh ../scripts/verify-openwrt-kernel-isolation.sh .'
 if grep -Eq 'make[^#\n]*\|\|[[:space:]]*make' "$FULL_WORKFLOW"; then
 	echo 'full-source kernel or firmware build failure is swallowed by fallback make' >&2
