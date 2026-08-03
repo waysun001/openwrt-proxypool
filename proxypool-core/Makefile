@@ -42,7 +42,10 @@ define Build/Compile/Ip2Region
 		$(PKG_BUILD_DIR)/csrc/ip2region_searcher.c
 endef
 
-Hooks/Compile/Post+=Build/Compile/Ip2Region
+define Build/Compile
+	$(call GoPackage/Build/Compile)
+	$(call Build/Compile/Ip2Region)
+endef
 
 define Build/Prepare
 	$(call Build/Prepare/Default)

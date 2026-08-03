@@ -48,10 +48,10 @@ workflow_jobs() {
 	' "$1"
 }
 
-if grep -Eq '^define[[:space:]]+Build/Compile[[:space:]]*$' "$MAKEFILE"; then
-	echo 'proxypool-core must not override Go-owned Build/Compile' >&2
+[ "$(grep -Ec '^define[[:space:]]+Build/Compile[[:space:]]*$' "$MAKEFILE" || true)" -eq 1 ] || {
+	echo 'proxypool-core must define exactly one combined Go and C compiler path' >&2
 	exit 1
-fi
+}
 
 require_fixed "$MAKEFILE" 'PKG_BUILD_DEPENDS:=golang/host'
 require_fixed "$MAKEFILE" 'PKG_VERSION:=2.0.0'
@@ -60,7 +60,8 @@ require_fixed "$MAKEFILE" 'GO_PKG:=proxypoold'
 require_fixed "$MAKEFILE" 'GO_PKG_BUILD_PKG:=$(GO_PKG)/cmd/proxypoold $(GO_PKG)/cmd/proxypoolctl'
 require_fixed "$MAKEFILE" 'GO_PKG_LDFLAGS_X:=$(GO_PKG)/internal/buildinfo.Version=$(PKG_VERSION)'
 require_fixed "$MAKEFILE" 'include $(TOPDIR)/feeds/packages/lang/golang/golang-package.mk'
-require_fixed "$MAKEFILE" 'Hooks/Compile/Post+=Build/Compile/Ip2Region'
+require_fixed "$MAKEFILE" '$(call GoPackage/Build/Compile)'
+require_fixed "$MAKEFILE" '$(call Build/Compile/Ip2Region)'
 require_fixed "$MAKEFILE" '$(CP) ./src/proxypoold/. $(PKG_BUILD_DIR)/'
 require_fixed "$MAKEFILE" '$(GO_PKG_BUILD_BIN_DIR)/proxypoold $(1)/usr/sbin/proxypoold'
 require_fixed "$MAKEFILE" '$(GO_PKG_BUILD_BIN_DIR)/proxypoolctl $(1)/usr/bin/proxypoolctl'
