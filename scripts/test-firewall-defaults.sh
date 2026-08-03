@@ -1356,8 +1356,8 @@ set -eu
 [ "${1:-}" = -x ] || exit 2
 fd=${2:-}
 case "$fd" in
-	999) kind=transaction ;;
-	1000) kind=fw4 ;;
+	8) kind=transaction ;;
+	9) kind=fw4 ;;
 	*) kind="fd-$fd" ;;
 esac
 printf 'lock:%s:acquire\n' "$kind" >>"$PROXYPOOL_TEST_TRACE"

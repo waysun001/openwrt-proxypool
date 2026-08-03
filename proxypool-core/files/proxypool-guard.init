@@ -172,9 +172,9 @@ establish_quarantine() {
 	state_was_absent=0
 	command -v "$FLOCK" >/dev/null 2>&1 || return 1
 	command -v "$SYNC" >/dev/null 2>&1 || return 1
-	exec 1000>"$FW4_LOCK" || return 1
-	"$FLOCK" -x 1000 || {
-		exec 1000>&-
+	exec 9>"$FW4_LOCK" || return 1
+	"$FLOCK" -x 9 || {
+		exec 9>&-
 		return 1
 	}
 	if [ ! -e "$FW4_STATE" ] && [ ! -L "$FW4_STATE" ]; then
@@ -188,7 +188,7 @@ establish_quarantine() {
 	# On an unknown/mismatched probe, an emergency sentinel still blocks
 	# independent S19.  It is never removed because mode_proven remains 0.
 	ensure_s19_inhibitor || hold_fw4_inhibited
-	exec 1000>&-
+	exec 9>&-
 	[ "$mode_proven" -eq 1 ]
 }
 
@@ -240,34 +240,34 @@ release_quarantine() {
 	command -v "$FLOCK" >/dev/null 2>&1 || return 1
 	command -v "$SYNC" >/dev/null 2>&1 || return 1
 	[ -x "$LS_PROG" ] || return 1
-	exec 1000>"$FW4_LOCK" || return 1
-	"$FLOCK" -x 1000 || {
-		exec 1000>&-
+	exec 9>"$FW4_LOCK" || return 1
+	"$FLOCK" -x 9 || {
+		exec 9>&-
 		return 1
 	}
 	quarantine_metadata_valid || {
-		exec 1000>&-
+		exec 9>&-
 		return 1
 	}
 	# State is intentionally the sentinel here, so prove table absence directly.
 	tables=$("$NFT" list tables 2>/dev/null) || {
-		exec 1000>&-
+		exec 9>&-
 		return 1
 	}
 	if printf '%s\n' "$tables" |
 		grep -Eq '^[[:space:]]*table[[:space:]]+inet[[:space:]]+fw4[[:space:]]*$'; then
-		exec 1000>&-
+		exec 9>&-
 		return 1
 	fi
 	rm -f "$FW4_STATE" || {
-		exec 1000>&-
+		exec 9>&-
 		return 1
 	}
 	"$SYNC" || {
-		exec 1000>&-
+		exec 9>&-
 		return 1
 	}
-	exec 1000>&-
+	exec 9>&-
 }
 
 boot() {

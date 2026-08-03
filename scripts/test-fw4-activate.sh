@@ -31,7 +31,7 @@ EOF_LS
 
 cat >"$BIN/flock" <<'EOF_FLOCK'
 #!/bin/sh
-[ "$#" -eq 2 ] && [ "$1" = -x ] && [ "$2" = 1000 ] || exit 2
+[ "$#" -eq 2 ] && [ "$1" = -x ] && [ "$2" = 9 ] || exit 2
 printf 'lock:fw4\n' >>"$PROXYPOOL_TEST_TRACE"
 EOF_FLOCK
 

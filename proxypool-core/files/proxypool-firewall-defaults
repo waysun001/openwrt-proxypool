@@ -179,18 +179,18 @@ require_empty_user_nft_dir() {
 TX_LOCK_HELD=0
 FW4_LOCK_HELD=0
 acquire_transaction_lock() {
-	exec 999>"$TRANSACTION_LOCK" || return 1
-	"$FLOCK" -x 999 || {
-		exec 999>&-
+	exec 8>"$TRANSACTION_LOCK" || return 1
+	"$FLOCK" -x 8 || {
+		exec 8>&-
 		return 1
 	}
 	TX_LOCK_HELD=1
 }
 
 acquire_fw4_lock() {
-	exec 1000>"$FW4_LOCK" || return 1
-	"$FLOCK" -x 1000 || {
-		exec 1000>&-
+	exec 9>"$FW4_LOCK" || return 1
+	"$FLOCK" -x 9 || {
+		exec 9>&-
 		return 1
 	}
 	FW4_LOCK_HELD=1
@@ -198,11 +198,11 @@ acquire_fw4_lock() {
 
 release_locks() {
 	if [ "$FW4_LOCK_HELD" -eq 1 ]; then
-		exec 1000>&-
+		exec 9>&-
 		FW4_LOCK_HELD=0
 	fi
 	if [ "$TX_LOCK_HELD" -eq 1 ]; then
-		exec 999>&-
+		exec 8>&-
 		TX_LOCK_HELD=0
 	fi
 }
@@ -223,7 +223,7 @@ export PROXYPOOL_FW4_STATE PROXYPOOL_BOOT_ID_FILE PROXYPOOL_NFTABLES_USER_DIR
 export PROXYPOOL_COLD_BOOT PROXYPOOL_FW4_LOCK_HELD
 
 # Lock order is global and fixed: ProxyPool transaction, then official fw4.
-# fd1000 remains inherited and locked through config swap and both candidate
+# fd9 remains inherited and locked through config swap and both candidate
 # and compensating activation, so no normal fw4 operation can interleave.
 acquire_transaction_lock || fail "cannot acquire transaction lock: $TRANSACTION_LOCK"
 acquire_fw4_lock || fail "cannot acquire fw4 lock: $FW4_LOCK"
@@ -333,7 +333,7 @@ run_live_activation() {
 	else
 		activation_result=$?
 		# A signal-shaped status cannot prove that a grandchild which inherited
-		# fd1000 has terminated.  Keep the in-flight flag set so signal/EXIT
+		# fd9 has terminated.  Keep the in-flight flag set so signal/EXIT
 		# paths are forbidden from starting rollback activation.
 		if [ "$activation_result" -lt 128 ]; then
 			ACTIVATION_IN_FLIGHT=0
@@ -393,7 +393,7 @@ terminate() {
 	trap - EXIT HUP INT TERM
 	if [ "$ACTIVATION_IN_FLIGHT" -eq 1 ]; then
 		# A signalled parent cannot prove whether the activator or one of its
-		# children is still committing under inherited fd1000.  Preserve WAL.
+		# children is still committing under inherited fd9.  Preserve WAL.
 		HANDOFF=1
 	fi
 	if [ "$HANDOFF" -eq 0 ] && [ "$WAL_PUBLISHED" -eq 1 ]; then

@@ -1094,10 +1094,10 @@ case "$command" in
 	recover-only)
 		[ "$#" -eq 0 ] || fail 'recover-only takes no arguments'
 		command -v "$FLOCK" >/dev/null 2>&1 || fail "flock is unavailable: $FLOCK"
-		exec 999>"$TRANSACTION_LOCK" || fail "cannot open transaction lock: $TRANSACTION_LOCK"
-		"$FLOCK" -x 999 || fail 'cannot acquire transaction lock'
-		exec 1000>"$FW4_LOCK" || fail "cannot open fw4 lock: $FW4_LOCK"
-		"$FLOCK" -x 1000 || fail 'cannot acquire fw4 lock'
+		exec 8>"$TRANSACTION_LOCK" || fail "cannot open transaction lock: $TRANSACTION_LOCK"
+		"$FLOCK" -x 8 || fail 'cannot acquire transaction lock'
+		exec 9>"$FW4_LOCK" || fail "cannot open fw4 lock: $FW4_LOCK"
+		"$FLOCK" -x 9 || fail 'cannot acquire fw4 lock'
 		recover_policy_locked boot
 	;;
 	*) fail "unsupported transaction command: $command" ;;

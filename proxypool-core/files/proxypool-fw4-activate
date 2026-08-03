@@ -208,11 +208,11 @@ trap 'terminate 130' INT
 trap 'terminate 143' TERM
 
 if [ "$INHERITED_FW4_LOCK" -eq 1 ]; then
-	[ -e "/proc/$$/fd/1000" ] || fail 'inherited fw4 lock descriptor is missing'
+	[ -e "/proc/$$/fd/9" ] || fail 'inherited fw4 lock descriptor is missing'
 else
-	exec 1000>"$FW4_LOCK" || fail "cannot open fw4 lock: $FW4_LOCK"
+	exec 9>"$FW4_LOCK" || fail "cannot open fw4 lock: $FW4_LOCK"
 fi
-"$FLOCK" -x 1000 || fail 'cannot acquire inherited fw4 lock'
+"$FLOCK" -x 9 || fail 'cannot acquire inherited fw4 lock'
 probe_fw4_mode "$MODE" || fail "fw4 runtime does not match requested $MODE activation mode"
 
 # Revalidate the exact installed candidate while the official fw4 lock is
