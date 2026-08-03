@@ -832,6 +832,9 @@ PROXYPOOL_TEST_MODE=readiness run_helper || fail 'cleared wireless reboot bounda
 # One execution covers both failure backoff after an early net event and the
 # idle periodic audit that repairs a completely missed event.
 [ -f "$WORKER" ] || fail 'missing serialized LAN convergence worker'
+WORKER_HELPER="$BIN/lan-isolation-worker-helper"
+cp "$HELPER" "$WORKER_HELPER"
+chmod 755 "$WORKER_HELPER"
 WORKER_SLEEP="$BIN/worker-sleep"
 WORKER_SLEEP_COUNT="$TEST_TMP/worker-sleep.count"
 cat >"$WORKER_SLEEP" <<'EOF_WORKER_SLEEP'
@@ -861,7 +864,7 @@ chmod 755 "$WORKER_SLEEP"
 
 run_worker() {
 	env \
-		PROXYPOOL_LAN_ISOLATION="$HELPER" \
+		PROXYPOOL_LAN_ISOLATION="$WORKER_HELPER" \
 		PROXYPOOL_WORKER_SLEEP="$WORKER_SLEEP" \
 		PROXYPOOL_UCI="$BIN/uci" \
 		PROXYPOOL_STAT="$BIN/stat" \
@@ -893,6 +896,10 @@ rm -f "$WORKER_SLEEP_COUNT"
 if run_worker >"$TEST_TMP/worker.log" 2>&1; then
 	fail 'LAN convergence worker ignored a failed sleep primitive'
 fi
+[ -f "$WORKER_SLEEP_COUNT" ] || {
+	cat "$TEST_TMP/worker.log" >&2
+	fail 'LAN convergence worker exited before its first retry sleep'
+}
 [ "$(cat "$WORKER_SLEEP_COUNT")" -eq 3 ] || fail 'worker did not execute the bounded retry and periodic audit sequence'
 expected_worker_sleeps='worker:sleep:1
 worker:sleep:30
