@@ -28,6 +28,12 @@ for source in "$OPENWRT_ROOT"/package/*; do
 	cp -a "$source" "$SDK_ROOT/package/"
 done
 
+for source in "$OPENWRT_ROOT"/package/kernel/*; do
+	name=${source##*/}
+	[ "$name" = 'linux' ] && continue
+	cp -a "$source" "$SDK_ROOT/package/kernel/"
+done
+
 [ -f "$SDK_ROOT/package/libs/libmnl/Makefile" ] || {
 	echo 'failed to add libmnl sources to SDK' >&2
 	exit 1
