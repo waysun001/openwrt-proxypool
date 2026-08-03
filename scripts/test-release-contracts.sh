@@ -307,7 +307,7 @@ require_fixed "$LUCI_IPK_INSPECTOR" 'Architecture: all'
 require_fixed "$LUCI_IPK_INSPECTOR" 'etc/uci-defaults/luci-proxypool'
 require_fixed "$LUCI_IPK_INSPECTOR" 'www/luci-static/resources/proxypool-global.css'
 require_fixed "$LUCI_IPK_INSPECTOR" 'www/luci-static/resources/proxypool-global.js'
-require_fixed "$LUCI_MAKEFILE" 'FILE_MODES:=/etc/uci-defaults/luci-proxypool:root:root:0755'
+require_fixed "$LUCI_MAKEFILE" 'PKG_FILE_MODES:=/etc/uci-defaults/luci-proxypool:root:root:0755'
 if grep -Fq 'luci-proxypool-menu' "$LUCI_MAKEFILE"; then
 	echo 'LuCI package still installs the legacy global-menu mutator' >&2
 	exit 1

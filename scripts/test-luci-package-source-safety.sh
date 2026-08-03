@@ -34,7 +34,7 @@ fi
 if grep -Fq 'luci-proxypool-menu' "$MAKEFILE"; then
 	fail 'legacy global-menu mutator must not be packaged'
 fi
-[ "$(grep -Fxc 'FILE_MODES:=/etc/uci-defaults/luci-proxypool:root:root:0755' "$MAKEFILE" || true)" -eq 1 ] ||
+[ "$(grep -Fxc 'PKG_FILE_MODES:=/etc/uci-defaults/luci-proxypool:root:root:0755' "$MAKEFILE" || true)" -eq 1 ] ||
 	fail 'LuCI package must pin its uci-default mode through the OpenWrt IPK builder'
 [ "$(grep -Fxc '# call BuildPackage - OpenWrt buildroot signature' "$MAKEFILE" || true)" -eq 1 ] ||
 	fail 'LuCI package must expose the standard buildroot scanner signature exactly once'
