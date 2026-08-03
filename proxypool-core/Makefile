@@ -20,7 +20,7 @@ define Package/proxypool-core
   SECTION:=net
   CATEGORY:=Network
   TITLE:=ProxyPool control plane and legacy runtime
-  DEPENDS:=$(GO_ARCH_DEPENDS) +xl2tpd +ppp +ppp-mod-pppol2tp +redsocks +firewall4 +kmod-nft-bridge +uci +ucode +ucode-mod-ubus +ubus +jshn +nftables +ip-full +ip-bridge +coreutils-stat +coreutils-timeout +conntrack +curl
+  DEPENDS:=$(GO_ARCH_DEPENDS) +xl2tpd +ppp-mod-pppol2tp +redsocks +firewall4 +kmod-nft-bridge +uci +ucode +ucode-mod-ubus +ubus +jshn +nftables +ip-full +ip-bridge +coreutils-stat +coreutils-timeout +conntrack +curl
 endef
 
 define Package/proxypool-core/description

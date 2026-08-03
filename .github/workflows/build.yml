@@ -119,7 +119,8 @@ jobs:
             "telephony $TELEPHONY_FEED_COMMIT" \
             > ../build-evidence/feed-commits.txt
           ./scripts/feeds install -a
-          ./scripts/feeds install -p proxypool proxypool-core luci-app-proxypool
+          ./scripts/feeds install -p proxypool proxypool-core
+          ln -s "$GITHUB_WORKSPACE/local-feed/luci-app-proxypool" package/luci-app-proxypool
 
       - name: Stage image overlay and build configuration
         run: |
@@ -129,6 +130,8 @@ jobs:
           cp config/gl-mt6000.config openwrt/.config
           cd openwrt
           make defconfig
+          grep -Fqx 'CONFIG_PACKAGE_proxypool-core=y' .config
+          grep -Fqx 'CONFIG_PACKAGE_luci-app-proxypool=y' .config
 
       - name: Install the two MT7531 isolation patches
         run: |
@@ -139,7 +142,10 @@ jobs:
           [ ! -L ../openwrt-patches/23.05.3/998-net-bridge-offload-br-isolated.patch ]
           [ -f ../openwrt-patches/23.05.3/999-net-dsa-mt7530-bridge-port-isolation.patch ]
           [ ! -L ../openwrt-patches/23.05.3/999-net-dsa-mt7530-bridge-port-isolation.patch ]
-          cp ../openwrt-patches/23.05.3/. target/linux/generic/backport-5.15/
+          cp \
+            ../openwrt-patches/23.05.3/998-net-bridge-offload-br-isolated.patch \
+            ../openwrt-patches/23.05.3/999-net-dsa-mt7530-bridge-port-isolation.patch \
+            target/linux/generic/backport-5.15/
 
       - name: Download source archives
         run: |

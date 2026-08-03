@@ -241,8 +241,12 @@ require_fixed "$FULL_WORKFLOW" 'git -C feeds/luci rev-parse HEAD)" = "$LUCI_FEED
 require_fixed "$FULL_WORKFLOW" 'git -C feeds/routing rev-parse HEAD)" = "$ROUTING_FEED_COMMIT"'
 require_fixed "$FULL_WORKFLOW" 'git -C feeds/telephony rev-parse HEAD)" = "$TELEPHONY_FEED_COMMIT"'
 require_fixed "$FULL_WORKFLOW" 'sh ./scripts/prepare-image-files.sh files image-files'
-require_fixed "$FULL_WORKFLOW" 'openwrt-patches/23.05.3/.'
+require_fixed "$FULL_WORKFLOW" 'openwrt-patches/23.05.3/998-net-bridge-offload-br-isolated.patch'
+require_fixed "$FULL_WORKFLOW" 'openwrt-patches/23.05.3/999-net-dsa-mt7530-bridge-port-isolation.patch'
 require_fixed "$FULL_WORKFLOW" 'target/linux/generic/backport-5.15/'
+require_fixed "$FULL_WORKFLOW" 'ln -s "$GITHUB_WORKSPACE/local-feed/luci-app-proxypool" package/luci-app-proxypool'
+require_fixed "$FULL_WORKFLOW" "grep -Fqx 'CONFIG_PACKAGE_proxypool-core=y' .config"
+require_fixed "$FULL_WORKFLOW" "grep -Fqx 'CONFIG_PACKAGE_luci-app-proxypool=y' .config"
 require_fixed "$FULL_WORKFLOW" 'make target/linux/prepare V=s'
 require_fixed "$FULL_WORKFLOW" 'sh ../scripts/verify-openwrt-kernel-isolation.sh . ../openwrt-patches/23.05.3'
 require_fixed "$FULL_WORKFLOW" 'make -j"$(nproc)" V=s'
@@ -366,7 +370,7 @@ full_build=$(job_block "$FULL_WORKFLOW" build)
 printf '%s\n' "$full_build" | grep -Fq 'needs: host' || { echo 'full-source build does not depend on host gates' >&2; exit 1; }
 printf '%s\n' "$full_build" | grep -Fq 'contents: read' || { echo 'full-source build is not read-only' >&2; exit 1; }
 normalized_full_build=$(printf '%s\n' "$full_build" | sed 's/^[[:space:]]*//')
-patch_line=$(printf '%s\n' "$normalized_full_build" | grep -nF 'cp ../openwrt-patches/23.05.3/. target/linux/generic/backport-5.15/' | cut -d: -f1)
+patch_line=$(printf '%s\n' "$normalized_full_build" | grep -nF '../openwrt-patches/23.05.3/998-net-bridge-offload-br-isolated.patch \' | cut -d: -f1)
 prepare_line=$(printf '%s\n' "$normalized_full_build" | grep -nF 'make target/linux/prepare V=s' | cut -d: -f1)
 verify_line=$(printf '%s\n' "$normalized_full_build" | grep -nF 'sh ../scripts/verify-openwrt-kernel-isolation.sh . ../openwrt-patches/23.05.3' | cut -d: -f1)
 compile_line=$(printf '%s\n' "$normalized_full_build" | grep -nF 'make -j"$(nproc)" V=s' | cut -d: -f1)
