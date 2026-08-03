@@ -279,7 +279,11 @@ boot() {
 	# guardian.  The existing state or emergency sentinel keeps S19 inhibited.
 	reset_guardian || exit 1
 	if ! reconcile_lan_isolation boot; then
-		hold_lan_boot_inhibited
+		# The independent guardian is already active and the regular fw4
+		# sentinel remains installed, so forwarding and local-WAN access stay
+		# fail-closed.  Return to rcS instead of sleeping forever: netifd,
+		# dnsmasq, and uhttpd must still start to provide wired recovery access.
+		echo 'ProxyPool guardian: wireless/LAN cold proof failed; retaining fail-closed wired management recovery' >&2
 		exit 1
 	fi
 	# S18 cannot wait for netifd (S20).  Publish work and register one procd

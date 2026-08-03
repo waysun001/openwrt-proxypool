@@ -686,8 +686,14 @@ for failure_case in reset isolation recovery pending pending_unknown check bad_m
 		fail "S18 $failure_case failure did not retain the S19 sentinel"
 	[ "$(cat "$BOOT_STATE")" = proxypool-fw4-quarantine-v1 ] ||
 		fail "S18 $failure_case failure retained the wrong sentinel bytes"
-	if [ "$failure_case" = isolation ] || [ "$failure_case" = pending ] ||
-		[ "$failure_case" = pending_unknown ]; then
+	if [ "$failure_case" = isolation ]; then
+		if grep -Fxq quarantine-hold "$BOOT_TRACE"; then
+			fail 'isolation cold-proof failure blocked rcS before wired management could start'
+		fi
+		if grep -Eq '^recover$|^pending$|^check$|^nft-list-tables$' "$BOOT_TRACE"; then
+			fail 'isolation cold-proof failure continued into firewall recovery or release gates'
+		fi
+	elif [ "$failure_case" = pending ] || [ "$failure_case" = pending_unknown ]; then
 		grep -Fxq quarantine-hold "$BOOT_TRACE" ||
 			fail "$failure_case cold proof returned without entering the S20 boot hold"
 	fi
