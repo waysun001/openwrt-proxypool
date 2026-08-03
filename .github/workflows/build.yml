@@ -155,12 +155,12 @@ jobs:
             exit 1
           fi
 
-      - name: Prepare and verify the custom target kernel
+      - name: Compile and verify the custom target kernel
         run: |
           set -o pipefail
           mkdir -p build-evidence
           cd openwrt
-          make target/linux/prepare V=s 2>&1 | tee ../build-evidence/target-linux-prepare.log
+          make -j"$(nproc)" target/linux/compile V=s 2>&1 | tee ../build-evidence/target-linux-compile.log
           sh ../scripts/verify-openwrt-kernel-isolation.sh . ../openwrt-patches/23.05.3 2>&1 |
             tee ../build-evidence/kernel-isolation-verification.log
           sha256sum ../openwrt-patches/23.05.3/*.patch > ../build-evidence/kernel-patches.sha256

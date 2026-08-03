@@ -247,7 +247,7 @@ require_fixed "$FULL_WORKFLOW" 'target/linux/generic/backport-5.15/'
 require_fixed "$FULL_WORKFLOW" './scripts/feeds install -p proxypool proxypool-core luci-app-proxypool'
 require_fixed "$FULL_WORKFLOW" "grep -Fqx 'CONFIG_PACKAGE_proxypool-core=y' .config"
 require_fixed "$FULL_WORKFLOW" "grep -Fqx 'CONFIG_PACKAGE_luci-app-proxypool=y' .config"
-require_fixed "$FULL_WORKFLOW" 'make target/linux/prepare V=s'
+require_fixed "$FULL_WORKFLOW" 'make -j"$(nproc)" target/linux/compile V=s'
 require_fixed "$FULL_WORKFLOW" 'sh ../scripts/verify-openwrt-kernel-isolation.sh . ../openwrt-patches/23.05.3'
 require_fixed "$FULL_WORKFLOW" 'make -j"$(nproc)" V=s'
 require_fixed "$FULL_WORKFLOW" "find bin -type f -name 'proxypool-core_*.ipk'"
@@ -371,13 +371,13 @@ printf '%s\n' "$full_build" | grep -Fq 'needs: host' || { echo 'full-source buil
 printf '%s\n' "$full_build" | grep -Fq 'contents: read' || { echo 'full-source build is not read-only' >&2; exit 1; }
 normalized_full_build=$(printf '%s\n' "$full_build" | sed 's/^[[:space:]]*//')
 patch_line=$(printf '%s\n' "$normalized_full_build" | grep -nF '../openwrt-patches/23.05.3/998-net-bridge-offload-br-isolated.patch \' | cut -d: -f1)
-prepare_line=$(printf '%s\n' "$normalized_full_build" | grep -nF 'make target/linux/prepare V=s' | cut -d: -f1)
+kernel_compile_line=$(printf '%s\n' "$normalized_full_build" | grep -nF 'make -j"$(nproc)" target/linux/compile V=s' | cut -d: -f1)
 verify_line=$(printf '%s\n' "$normalized_full_build" | grep -nF 'sh ../scripts/verify-openwrt-kernel-isolation.sh . ../openwrt-patches/23.05.3' | cut -d: -f1)
 compile_line=$(printf '%s\n' "$normalized_full_build" | grep -nF 'make -j"$(nproc)" V=s' | cut -d: -f1)
-[ -n "$patch_line" ] && [ -n "$prepare_line" ] && [ -n "$verify_line" ] && [ -n "$compile_line" ] &&
-	[ "$patch_line" -lt "$prepare_line" ] && [ "$prepare_line" -lt "$verify_line" ] &&
+[ -n "$patch_line" ] && [ -n "$kernel_compile_line" ] && [ -n "$verify_line" ] && [ -n "$compile_line" ] &&
+	[ "$patch_line" -lt "$kernel_compile_line" ] && [ "$kernel_compile_line" -lt "$verify_line" ] &&
 	[ "$verify_line" -lt "$compile_line" ] || {
-	echo 'full-source patch, kernel prepare, verifier, and firmware compile gates are missing or out of order' >&2
+	echo 'full-source patch, kernel compile, verifier, and firmware compile gates are missing or out of order' >&2
 	exit 1
 }
 for package_prefix in packages luci_packages; do
