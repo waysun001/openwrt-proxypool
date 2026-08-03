@@ -3,7 +3,7 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 DEFAULTS="$ROOT/proxypool-core/files/proxypool-firewall-defaults"
-TRANSACTION_HELPER="$ROOT/proxypool-core/files/proxypool-firewall-transaction"
+TRANSACTION_HELPER_SOURCE="$ROOT/proxypool-core/files/proxypool-firewall-transaction"
 STAGED_UC="$ROOT/proxypool-core/files/proxypool-uci-staged.uc"
 TEST_TMP=$(mktemp -d)
 cleanup_test_tmp() {
@@ -21,6 +21,7 @@ fail() {
 }
 
 [ -f "$DEFAULTS" ] || fail "missing production file: $DEFAULTS"
+[ -f "$TRANSACTION_HELPER_SOURCE" ] || fail "missing production file: $TRANSACTION_HELPER_SOURCE"
 [ -f "$STAGED_UC" ] || fail "missing production file: $STAGED_UC"
 if grep -Fq 'recreate_named("firewall", "proxypool_allow_dns"' "$STAGED_UC"; then
 	fail 'phase-1 staged UCI publishes router DNS without an owned DNS data plane'
@@ -35,6 +36,9 @@ clamp_source_line=$(grep -n -F 'run_uci_action clamp-offload' "$DEFAULTS" | sed 
 
 BIN="$TEST_TMP/bin"
 mkdir -p "$BIN"
+TRANSACTION_HELPER="$BIN/proxypool-firewall-transaction"
+cp "$TRANSACTION_HELPER_SOURCE" "$TRANSACTION_HELPER"
+chmod 755 "$TRANSACTION_HELPER"
 
 # Execute the real staged UCI source through a small Node-hosted compatibility
 # layer.  The compatibility layer models the pinned ucode cursor API at the
