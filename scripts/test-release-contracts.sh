@@ -231,6 +231,8 @@ require_fixed "$FULL_WORKFLOW" 'PACKAGES_FEED_COMMIT: 063b2393cbc3e5aab9d2b40b29
 require_fixed "$FULL_WORKFLOW" 'LUCI_FEED_COMMIT: b07cf9dcfc37e021e5619a41c847e63afbd5d34a'
 require_fixed "$FULL_WORKFLOW" 'ROUTING_FEED_COMMIT: 648753932d5a7deff7f2bdb33c000018a709ad84'
 require_fixed "$FULL_WORKFLOW" 'TELEPHONY_FEED_COMMIT: 86af194d03592121f5321474ec9918dd109d3057'
+require_fixed "$FULL_WORKFLOW" 'git -C openwrt fetch --filter=blob:none --depth 1 origin "$OPENWRT_COMMIT"'
+require_fixed "$FULL_WORKFLOW" '[ "$source_fetched" = "1" ]'
 require_fixed "$FULL_WORKFLOW" 'git checkout --detach "$OPENWRT_COMMIT"'
 require_fixed "$FULL_WORKFLOW" '[ "$(git rev-parse HEAD)" = "$OPENWRT_COMMIT" ]'
 require_fixed "$FULL_WORKFLOW" 'mkdir -p local-feed'

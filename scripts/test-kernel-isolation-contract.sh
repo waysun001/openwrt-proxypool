@@ -63,6 +63,7 @@ if grep -Eq 'IMAGEBUILDER|imagebuilder|make[[:space:]]+image|sysupgrade' "$FAST_
 fi
 
 require_fixed "$FULL_WORKFLOW" 'OPENWRT_COMMIT: 01170d518da1c8ade9d26e56d0135d12cda8e781'
+require_fixed "$FULL_WORKFLOW" 'git -C openwrt fetch --filter=blob:none --depth 1 origin "$OPENWRT_COMMIT"'
 require_fixed "$FULL_WORKFLOW" 'git checkout --detach "$OPENWRT_COMMIT"'
 require_fixed "$FULL_WORKFLOW" '[ "$(git rev-parse HEAD)" = "$OPENWRT_COMMIT" ]'
 require_fixed "$FULL_WORKFLOW" 'openwrt-patches/23.05.3/998-net-bridge-offload-br-isolated.patch'

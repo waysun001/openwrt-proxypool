@@ -76,9 +76,22 @@ jobs:
 
       - name: Checkout pinned OpenWrt source
         run: |
-          git clone --filter=blob:none --no-checkout "$REPO_URL" openwrt
+          mkdir openwrt
+          git -C openwrt init
+          git -C openwrt remote add origin "$REPO_URL"
+          source_fetched=0
+          for attempt in 1 2 3; do
+            if git -C openwrt fetch --filter=blob:none --depth 1 origin "$OPENWRT_COMMIT"; then
+              source_fetched=1
+              break
+            fi
+            [ "$attempt" -eq 3 ] || sleep 15
+          done
+          [ "$source_fetched" = "1" ] || {
+            echo 'pinned OpenWrt source fetch failed after 3 attempts' >&2
+            exit 1
+          }
           cd openwrt
-          git fetch --depth 1 origin "$OPENWRT_COMMIT"
           git checkout --detach "$OPENWRT_COMMIT"
           [ "$(git rev-parse HEAD)" = "$OPENWRT_COMMIT" ]
           git rev-parse HEAD > ../openwrt-commit.txt
