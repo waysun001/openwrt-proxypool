@@ -189,6 +189,7 @@ if (get.clients[0].location !== "Existing cache place") throw new Error("existin
 if (get.clients[0].name !== "Cached \"client\"") throw new Error("JSON control characters were not removed");
 if (get.clients[1].location !== "Fresh \"read-only\" place") throw new Error("cache miss did not use the read-only lookup result");
 if (get.clients[1].enabled !== 0) throw new Error("invalid client enabled value was not normalized closed");
+if (get.clients[1].bind_ips[1] !== "bad\"value\\path") throw new Error("JSON quote/backslash escaping did not round-trip");
 if (get.clients[2].status !== "connected" || get.clients[2].ip_addr !== "10.77.0.2") {
     throw new Error("status did not derive L2TP state through the read-only runtime path");
 }

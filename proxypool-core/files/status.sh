@@ -12,7 +12,7 @@ set -f
 # JSON 字符串转义：处理双引号、反斜杠、换行符、制表符等特殊字符
 json_escape() {
     printf '%s' "$1" |
-        sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/	/\\t/g' |
+        sed -e 's/["\\]/\\&/g' -e 's/	/\\t/g' |
         LC_ALL=C tr -d '\000-\037\177'
 }
 
