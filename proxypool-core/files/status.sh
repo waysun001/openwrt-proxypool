@@ -62,9 +62,9 @@ get_config() {
     local val
     val=$(uci -q get "proxypool.$1.$2" 2>/dev/null)
     if [ -z "$val" ]; then
-        echo "$3"
+        printf '%s\n' "$3"
     else
-        echo "$val"
+        printf '%s\n' "$val"
     fi
 }
 
@@ -361,7 +361,7 @@ get_bound_devices() {
     done
 
     devices="$devices]"
-    echo "$devices"
+    printf '%s\n' "$devices"
 }
 
 get_full_status() {
@@ -434,7 +434,7 @@ case "$1" in
         if [ -z "$_output" ]; then
             echo '{"timestamp":0,"datetime":"","global_enabled":0,"dns_path_status":"dns_path_unavailable","internet_ready":false,"summary":{"total":0,"enabled":0,"connected":0,"disconnected":0},"clients":[],"devices":[],"error":"get_full_status returned empty"}'
         else
-            echo "$_output"
+            printf '%s\n' "$_output"
         fi
         ;;
     client)
