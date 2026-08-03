@@ -72,6 +72,7 @@ PENDING_TEMPLATE="$TEST_TMP/pending-safety-template"
 PENDING_HELPER="$TEST_TMP/pending-transaction"
 PENDING_LAN_HELPER="$TEST_TMP/pending-lan-isolation"
 PENDING_LS="$TEST_TMP/pending-ls"
+PENDING_DEFERRED_START="$TEST_TMP/pending-start-deferred"
 cp "$COLD_WRAPPER" "$PENDING_TEMPLATE"
 chmod 755 "$PENDING_TEMPLATE"
 printf '%s\n' \
@@ -99,6 +100,7 @@ PROXYPOOL_FIREWALL_SAFETY_TEMPLATE="$PENDING_TEMPLATE" \
 	PROXYPOOL_FIREWALL_TRANSACTION_HELPER="$PENDING_HELPER" \
 	PROXYPOOL_LAN_ISOLATION="$PENDING_LAN_HELPER" \
 	PROXYPOOL_LS_PROG="$PENDING_LS" \
+	PROXYPOOL_DEFERRED_START_MARKER="$PENDING_DEFERRED_START" \
 	sh -c '. "$1"; start_service; printf "%s\n" unsafe-after-gate >>"$2"' \
 		sh "$MAIN_INIT" "$TEST_TMP/events" || {
 	echo 'main init returned failure instead of safely deferring default_postinst start' >&2
@@ -111,6 +113,11 @@ cmp -s "$TEST_TMP/expected-events" "$TEST_TMP/events" || {
 	cat "$TEST_TMP/events" >&2
 	exit 1
 }
+[ -f "$PENDING_DEFERRED_START" ] && [ ! -L "$PENDING_DEFERRED_START" ] &&
+	[ "$(cat "$PENDING_DEFERRED_START")" = pending ] || {
+	echo 'deferred default_postinst start did not publish an isolated retry request' >&2
+	exit 1
+}
 
 # Even a still-current old hash marker must not outrank an in-flight durable
 # transaction.  The init gate must stop after journal detection and never ask
@@ -121,6 +128,7 @@ PROXYPOOL_TEST_JOURNAL_PRESENT=1 \
 	PROXYPOOL_FIREWALL_TRANSACTION_HELPER="$PENDING_HELPER" \
 	PROXYPOOL_LAN_ISOLATION="$PENDING_LAN_HELPER" \
 	PROXYPOOL_LS_PROG="$PENDING_LS" \
+	PROXYPOOL_DEFERRED_START_MARKER="$PENDING_DEFERRED_START" \
 	sh -c '. "$1"; start_service; printf "%s\n" unsafe-after-gate >>"$2"' \
 		sh "$MAIN_INIT" "$TEST_TMP/events" || {
 	echo 'main init returned failure instead of deferring a journal-pending start' >&2

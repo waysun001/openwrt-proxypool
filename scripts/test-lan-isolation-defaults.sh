@@ -390,12 +390,20 @@ cat >"$BIN/ubus" <<'EOF_UBUS'
 #!/bin/sh
 set -eu
 case "$*" in
-	'-S list hostapd.*')
-		printf 'ubus:list:hostapd\n' >>"$PROXYPOOL_TEST_TRACE"
+	'-S list')
+		printf 'ubus:list:all\n' >>"$PROXYPOOL_TEST_TRACE"
 		[ "${PROXYPOOL_TEST_UBUS_LIST_RC:-0}" -eq 0 ] ||
 			exit "$PROXYPOOL_TEST_UBUS_LIST_RC"
+		printf '%s\n' system
 		[ -z "${PROXYPOOL_TEST_HOSTAPD_OBJECTS:-}" ] ||
 			printf '%s\n' "$PROXYPOOL_TEST_HOSTAPD_OBJECTS"
+		;;
+	'-S list hostapd.*')
+		printf 'ubus:list:hostapd-pattern\n' >>"$PROXYPOOL_TEST_TRACE"
+		[ "${PROXYPOOL_TEST_UBUS_LIST_RC:-0}" -eq 0 ] ||
+			exit "$PROXYPOOL_TEST_UBUS_LIST_RC"
+		[ -n "${PROXYPOOL_TEST_HOSTAPD_OBJECTS:-}" ] || exit 4
+		printf '%s\n' "$PROXYPOOL_TEST_HOSTAPD_OBJECTS"
 		;;
 	'-S call network.wireless status')
 		printf 'ubus:wireless:status\n' >>"$PROXYPOOL_TEST_TRACE"
@@ -866,6 +874,7 @@ run_worker() {
 	env \
 		PROXYPOOL_LAN_ISOLATION="$WORKER_HELPER" \
 		PROXYPOOL_WORKER_SLEEP="$WORKER_SLEEP" \
+		PROXYPOOL_DEFERRED_START_MARKER="$TEST_TMP/worker-start-deferred" \
 		PROXYPOOL_UCI="$BIN/uci" \
 		PROXYPOOL_STAT="$BIN/stat" \
 		PROXYPOOL_ID="$BIN/id" \
@@ -945,12 +954,59 @@ EOF_WAKE_SLEEP
 chmod 755 "$WAKE_HELPER" "$WAKE_SLEEP"
 rm -f "$WAKE_SLEEP_COUNT"
 if PROXYPOOL_LAN_ISOLATION="$WAKE_HELPER" PROXYPOOL_WORKER_SLEEP="$WAKE_SLEEP" \
+	PROXYPOOL_DEFERRED_START_MARKER="$TEST_TMP/worker-wake-start-deferred" \
 	PROXYPOOL_TEST_WAKE_SLEEP_COUNT="$WAKE_SLEEP_COUNT" sh "$WORKER" \
 	>"$TEST_TMP/worker-wake.log" 2>&1; then
 	fail 'LAN worker accepted the terminal wake-sleep fixture failure'
 fi
 [ "$(cat "$WAKE_SLEEP_COUNT")" -eq 2 ] ||
 	fail 'USR1 wakeup terminated the LAN worker instead of starting another audit'
+
+# S99 can observe the fail-closed boundary while the singleton worker is still
+# converging.  Its durable request must be retried by that same worker after
+# readiness becomes true; otherwise the daemon stays absent until a manual
+# reconnect/restart even though every safety proof has recovered.
+DEFERRED_HELPER="$BIN/worker-deferred-helper"
+DEFERRED_INIT="$BIN/worker-deferred-init"
+DEFERRED_SLEEP="$BIN/worker-deferred-sleep"
+DEFERRED_MARKER="$TEST_TMP/start-deferred"
+DEFERRED_TRACE="$TEST_TMP/start-deferred.trace"
+cat >"$DEFERRED_HELPER" <<'EOF_DEFERRED_HELPER'
+#!/bin/sh
+set -eu
+case "${1:-}" in
+	request|readiness|verify) exit 0 ;;
+	*) exit 2 ;;
+esac
+EOF_DEFERRED_HELPER
+cat >"$DEFERRED_INIT" <<'EOF_DEFERRED_INIT'
+#!/bin/sh
+set -eu
+[ "$#" -eq 1 ] && [ "$1" = start ] || exit 2
+printf 'init:start\n' >>"$PROXYPOOL_TEST_DEFERRED_TRACE"
+rm -f "$PROXYPOOL_DEFERRED_START_MARKER"
+EOF_DEFERRED_INIT
+cat >"$DEFERRED_SLEEP" <<'EOF_DEFERRED_SLEEP'
+#!/bin/sh
+set -eu
+[ "$#" -eq 1 ] && [ "$1" = 30 ] || exit 2
+exit 93
+EOF_DEFERRED_SLEEP
+chmod 755 "$DEFERRED_HELPER" "$DEFERRED_INIT" "$DEFERRED_SLEEP"
+: >"$DEFERRED_MARKER"
+: >"$DEFERRED_TRACE"
+if PROXYPOOL_LAN_ISOLATION="$DEFERRED_HELPER" \
+	PROXYPOOL_WORKER_SLEEP="$DEFERRED_SLEEP" \
+	PROXYPOOL_INIT="$DEFERRED_INIT" \
+	PROXYPOOL_DEFERRED_START_MARKER="$DEFERRED_MARKER" \
+	PROXYPOOL_TEST_DEFERRED_TRACE="$DEFERRED_TRACE" \
+	sh "$WORKER" >"$TEST_TMP/worker-deferred.log" 2>&1; then
+	fail 'deferred-start worker ignored the terminal sleep fixture failure'
+fi
+[ "$(cat "$DEFERRED_TRACE")" = 'init:start' ] ||
+	fail 'ready LAN worker did not retry the deferred ProxyPool start'
+[ ! -e "$DEFERRED_MARKER" ] && [ ! -L "$DEFERRED_MARKER" ] ||
+	fail 'deferred-start retry did not consume its request marker'
 
 # Hotplug only publishes durable work and makes a one-second best-effort wake
 # call.  It never waits for topology, retries bridge operations, or treats a
@@ -1315,16 +1371,20 @@ reset_wireless_config
 if run_helper PROXYPOOL_WIRELESS_DOWN_PROBE= >/dev/null 2>&1; then
 	fail 'production-probed wireless install crossed its reboot boundary'
 fi
-grep -Fxq 'ubus:list:hostapd' "$TRACE" || fail 'production probe skipped hostapd object enumeration'
+grep -Fxq 'ubus:list:all' "$TRACE" || fail 'production probe did not enumerate ubus before checking hostapd objects'
+if grep -Fxq 'ubus:list:hostapd-pattern' "$TRACE"; then
+	fail 'production probe used a wildcard lookup that reports no hostapd objects as Not found'
+fi
 grep -Fxq 'ubus:wireless:status' "$TRACE" || fail 'production probe skipped netifd radio status'
 grep -Fxq 'wireless:install' "$TRACE" || fail 'safe production wireless proof was rejected'
 rm -rf "$REBOOT_MARKER"
 
-for unsafe_probe in hostapd up pending autostart missing_up string_up object_absent_runtime; do
+for unsafe_probe in hostapd list_failure up pending autostart missing_up string_up object_absent_runtime; do
 	reset_wireless_config
 	: >"$TRACE"
 	case "$unsafe_probe" in
 		hostapd) probe_knob='PROXYPOOL_TEST_HOSTAPD_OBJECTS=hostapd.phy0-ap0' ;;
+		list_failure) probe_knob=PROXYPOOL_TEST_UBUS_LIST_RC=7 ;;
 		up) probe_knob=PROXYPOOL_TEST_RADIO_UP=1 ;;
 		pending) probe_knob=PROXYPOOL_TEST_RADIO_PENDING=1 ;;
 		autostart) probe_knob=PROXYPOOL_TEST_RADIO_AUTOSTART=1 ;;

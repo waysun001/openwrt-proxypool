@@ -22,6 +22,7 @@ PERSISTENT_STATE_DIR="${PROXYPOOL_PERSISTENT_STATE_DIR:-/etc/proxypool}"
 ACTIVATED_BACKEND_MARKER="${PROXYPOOL_ACTIVATED_BACKEND_MARKER:-$PERSISTENT_STATE_DIR/activated-backend}"
 CLEANUP_REQUIRED_MARKER="${PROXYPOOL_CLEANUP_REQUIRED_MARKER:-$PERSISTENT_STATE_DIR/cleanup-required}"
 V2_RUNTIME_STATE="${PROXYPOOL_V2_RUNTIME_STATE:-$PERSISTENT_STATE_DIR/runtime-v2.json}"
+DEFERRED_START_MARKER="${PROXYPOOL_DEFERRED_START_MARKER:-/var/run/proxypool.start-deferred}"
 
 LEGACY_CONFIG_FILE="${PROXYPOOL_LEGACY_CONFIG_FILE:-${PROXYPOOL_CONFIG_FILE:-/etc/config/proxypool}}"
 V2_CONFIG_FILE="${PROXYPOOL_V2_CONFIG_FILE:-/etc/config/proxypool_v2}"
@@ -298,6 +299,30 @@ write_line_atomically() {
 		rm -f "$temporary"
 		return 1
 	}
+}
+
+publish_deferred_start() {
+	case "$DEFERRED_START_MARKER" in
+		/*) : ;;
+		*) return 1 ;;
+	esac
+	[ "$DEFERRED_START_MARKER" != / ] || return 1
+	write_line_atomically "$DEFERRED_START_MARKER" pending || return 1
+	chmod 600 "$DEFERRED_START_MARKER" || return 1
+}
+
+clear_deferred_start() {
+	case "$DEFERRED_START_MARKER" in
+		/*) : ;;
+		*) return 1 ;;
+	esac
+	[ "$DEFERRED_START_MARKER" != / ] || return 1
+	if [ ! -e "$DEFERRED_START_MARKER" ] && [ ! -L "$DEFERRED_START_MARKER" ]; then
+		return 0
+	fi
+	[ -f "$DEFERRED_START_MARKER" ] && [ ! -L "$DEFERRED_START_MARKER" ] || return 1
+	rm -f "$DEFERRED_START_MARKER" || return 1
+	[ ! -e "$DEFERRED_START_MARKER" ] && [ ! -L "$DEFERRED_START_MARKER" ]
 }
 
 ensure_persistent_state_dir() {
@@ -783,6 +808,7 @@ start_service() {
 	local previous result instance preflight_state backend admission
 	if ! firewall_activation_precheck; then
 		echo 'ProxyPool start deferred: firewall safety activation is not current' >&2
+		publish_deferred_start || exit 1
 		exit 0
 	fi
 	require_nonlegacy_lifecycle 'init:start'
@@ -793,6 +819,7 @@ start_service() {
 		# rc.common would otherwise close/send an empty procd service-set after a
 		# normal return.  Exit the one-shot action before any backend or procd
 		# mutation; S19/runtime finalization makes a later start admissible.
+		publish_deferred_start || exit 1
 		exit 0
 	fi
 	PROXYPOOL_PENDING_ACTION=
@@ -1012,11 +1039,15 @@ service_started() {
 			return 1
 			;;
 	esac
+	clear_deferred_start || return 1
 	return 0
 }
 
 stop_service() {
 	local activated cleanup runtime backend result state recovery=0 admission
+	# An explicit stop/disable cancels an earlier boot-time retry request before
+	# inspecting backend state, so the LAN worker cannot resurrect the service.
+	clear_deferred_start || exit 1
 	require_nonlegacy_lifecycle 'init:stop'
 	admission=$?
 	[ "$admission" -eq 0 ] || exit "$admission"

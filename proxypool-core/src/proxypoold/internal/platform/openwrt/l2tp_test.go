@@ -71,6 +71,37 @@ func TestL2TPStartUsesSharedNetifdAndReturnsOnlyVerifiedPPP(t *testing.T) {
 	}
 }
 
+func TestL2TPStartDoesNotTreatAnUnmatchedUbusLookupAsInventoryFailure(t *testing.T) {
+	runner := newL2TPRunner()
+	runner.ready = true
+	// OpenWrt ubus exits with UBUS_STATUS_NOT_FOUND when an exact `list`
+	// pattern matches no object.  A first connection must still reach
+	// add_dynamic when the interface is correctly absent.
+	runner.exactMissingIsNotFound = true
+	adapter := newTestL2TPAdapter(t, runner, &l2tpResolver{address: netip.MustParseAddr("203.0.113.17")})
+
+	if _, err := adapter.Start(context.Background(), validL2TPRequest()); err != nil {
+		t.Fatalf("absent interface was misclassified as an inventory failure: %v", err)
+	}
+	if runner.adds != 1 {
+		t.Fatalf("add_dynamic calls = %d, want 1", runner.adds)
+	}
+}
+
+func TestL2TPStartFailsClosedWhenCompleteUbusInventoryFails(t *testing.T) {
+	runner := newL2TPRunner()
+	runner.ready = true
+	runner.listAllErr = errors.New("ubus unavailable")
+	adapter := newTestL2TPAdapter(t, runner, &l2tpResolver{address: netip.MustParseAddr("203.0.113.17")})
+
+	if _, err := adapter.Start(context.Background(), validL2TPRequest()); err == nil || !strings.Contains(err.Error(), "inventory") {
+		t.Fatalf("ubus inventory failure was accepted: %v", err)
+	}
+	if runner.adds != 0 {
+		t.Fatalf("failed inventory reached add_dynamic %d times", runner.adds)
+	}
+}
+
 func TestL2TPRejectsUnsafeCredentialsAndForeignInterfaceBeforeMutation(t *testing.T) {
 	for _, mutate := range []func(*platform.NodeRequest){
 		func(request *platform.NodeRequest) { request.Node.Protocol = model.ProtocolSOCKS5 },
@@ -326,19 +357,21 @@ func (resolver *l2tpResolver) ResolveIPv4(_ context.Context, host string) (netip
 }
 
 type l2tpRunner struct {
-	mu           sync.Mutex
-	exists       bool
-	ready        bool
-	daemonAlive  bool
-	l3Device     string
-	address      string
-	adds         int
-	removes      int
-	inputName    string
-	inputArgs    []string
-	input        []byte
-	calls        []string
-	removeSticks bool
+	mu                     sync.Mutex
+	exists                 bool
+	ready                  bool
+	daemonAlive            bool
+	l3Device               string
+	address                string
+	adds                   int
+	removes                int
+	inputName              string
+	inputArgs              []string
+	input                  []byte
+	calls                  []string
+	removeSticks           bool
+	exactMissingIsNotFound bool
+	listAllErr             error
 }
 
 func newL2TPRunner() *l2tpRunner {
@@ -356,9 +389,22 @@ func (runner *l2tpRunner) Run(_ context.Context, name string, args ...string) ([
 		}
 		return nil, errors.New("not running")
 	}
+	if name == "/bin/ubus" && len(args) == 2 && args[0] == "-S" && args[1] == "list" {
+		if runner.listAllErr != nil {
+			return nil, runner.listAllErr
+		}
+		objects := "system\nnetwork\n"
+		if runner.exists {
+			objects += "network.interface.ppv20042\n"
+		}
+		return []byte(objects), nil
+	}
 	if name == "/bin/ubus" && len(args) == 3 && args[0] == "-S" && args[1] == "list" && args[2] == "network.interface.ppv20042" {
 		if runner.exists {
 			return []byte("network.interface.ppv20042\n"), nil
+		}
+		if runner.exactMissingIsNotFound {
+			return nil, errors.New("Command failed: Not found")
 		}
 		return nil, nil
 	}

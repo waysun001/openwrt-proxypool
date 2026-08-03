@@ -663,8 +663,10 @@ wireless_is_down() {
 	fi
 
 	[ -x "$UBUS" ] || return 1
-	hostapd_objects=$("$UBUS" -S list 'hostapd.*' 2>/dev/null) || return 1
-	[ -z "$hostapd_objects" ] || return 1
+	ubus_objects=$("$UBUS" -S list 2>/dev/null) || return 1
+	if printf '%s\n' "$ubus_objects" | grep -Eq '^hostapd\.'; then
+		return 1
+	fi
 
 	wireless_status=$("$UBUS" -S call network.wireless status 2>/dev/null) || {
 		# S18 precedes netifd on the pinned OpenWrt image.  At that cold-boot

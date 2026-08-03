@@ -288,16 +288,22 @@ func (status l2tpStatus) ready(l3Device string) bool {
 
 func (adapter *L2TPAdapter) inspectStatus(ctx context.Context, logical string) (l2tpStatus, error) {
 	object := "network.interface." + logical
-	listed, err := adapter.runner.Run(ctx, "/bin/ubus", "-S", "list", object)
+	listed, err := adapter.runner.Run(ctx, "/bin/ubus", "-S", "list")
 	if err != nil {
 		return l2tpStatus{}, l2tpContextError(ctx, "L2TP interface inventory failed")
 	}
-	listing := strings.TrimSpace(string(listed))
-	if listing == "" {
-		return l2tpStatus{}, nil
+	found := false
+	for _, listedObject := range strings.Split(string(listed), "\n") {
+		if listedObject != object {
+			continue
+		}
+		if found {
+			return l2tpStatus{}, errors.New("L2TP interface inventory is invalid")
+		}
+		found = true
 	}
-	if listing != object {
-		return l2tpStatus{}, errors.New("L2TP interface inventory is invalid")
+	if !found {
+		return l2tpStatus{}, nil
 	}
 	contents, err := adapter.runner.Run(ctx, "/bin/ubus", "call", object, "status")
 	if err != nil {

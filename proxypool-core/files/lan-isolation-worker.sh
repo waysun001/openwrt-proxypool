@@ -3,6 +3,8 @@ set -u
 
 LAN_ISOLATION="${PROXYPOOL_LAN_ISOLATION:-/usr/lib/proxypool/lan-isolation.sh}"
 SLEEP="${PROXYPOOL_WORKER_SLEEP:-/bin/sleep}"
+PROXYPOOL_INIT="${PROXYPOOL_INIT:-/etc/init.d/proxypool}"
+DEFERRED_START_MARKER="${PROXYPOOL_DEFERRED_START_MARKER:-/var/run/proxypool.start-deferred}"
 SLEEP_PID=
 WAKE_PENDING=0
 
@@ -52,6 +54,20 @@ wait_delay() {
 	return "$wait_status"
 }
 
+retry_deferred_start() {
+	case "$DEFERRED_START_MARKER" in
+		/*) : ;;
+		*) return 1 ;;
+	esac
+	[ "$DEFERRED_START_MARKER" != / ] || return 1
+	if [ ! -e "$DEFERRED_START_MARKER" ] && [ ! -L "$DEFERRED_START_MARKER" ]; then
+		return 0
+	fi
+	[ -f "$DEFERRED_START_MARKER" ] && [ ! -L "$DEFERRED_START_MARKER" ] || return 1
+	[ -f "$PROXYPOOL_INIT" ] && [ ! -L "$PROXYPOOL_INIT" ] && [ -x "$PROXYPOOL_INIT" ] || return 1
+	"$PROXYPOOL_INIT" start
+}
+
 trap publish_pending_on_exit EXIT
 trap 'terminate_worker 129' HUP
 trap 'terminate_worker 130' INT
@@ -71,6 +87,14 @@ trap wake_worker USR1
 backoff=1
 while :; do
 	if "$LAN_ISOLATION" readiness; then
+		if ! retry_deferred_start; then
+			log_failure "deferred ProxyPool start failed; retrying in $backoff seconds"
+			wait_delay "$backoff" || exit 1
+			[ "$backoff" -ge 30 ] || backoff=$((backoff * 2))
+			[ "$backoff" -le 30 ] || backoff=30
+			continue
+		fi
+		backoff=1
 		if "$LAN_ISOLATION" verify; then
 			wait_delay 30 || {
 				log_failure 'periodic audit sleep failed'

@@ -31,11 +31,13 @@ FIREWALL_SAFETY_TEMPLATE_FILE="$TEST_TMP/proxypool-safety-uci-default"
 FIREWALL_TRANSACTION_HELPER_FILE="$TEST_TMP/proxypool-firewall-transaction"
 FIREWALL_TRANSACTION_DIR="$TEST_TMP/firewall-transaction"
 LAN_ISOLATION_HELPER_FILE="$TEST_TMP/lan-isolation"
+DEFERRED_START_FILE="$TEST_TMP/start-deferred"
 LEGACY_GATE_FILE="$TEST_TMP/legacy-gate"
 export TRACE_FILE MARKER_FILE QUARANTINE_FILE TRANSITION_FILE ACTIVE_SNAPSHOT_FILE
 export SNAPSHOT_ROOT LEGACY_CONFIG_FILE V2_CONFIG_FILE SELECTOR_FILE
 export PROCD_RUNNING_FILE PROCD_STAGED_FILE PROCD_TRANSACTION_FILE LEGACY_RUNNING_FILE
 export QUERY_COUNT_FILE SED_COUNT_FILE PERSISTENT_STATE_DIR ACTIVATED_BACKEND_FILE CLEANUP_REQUIRED_FILE
+export DEFERRED_START_FILE
 
 make_fake() {
 	path=$1
@@ -359,6 +361,7 @@ reset_case() {
 	rm -f "$MARKER_FILE" "$TRANSITION_FILE" "$ACTIVE_SNAPSHOT_FILE"
 	rm -rf "$QUARANTINE_FILE"
 	rm -f "$PID_FILE" "$PROCD_RUNNING_FILE" "$PROCD_STAGED_FILE" "$PROCD_TRANSACTION_FILE" "$LEGACY_RUNNING_FILE" "$QUERY_COUNT_FILE" "$SED_COUNT_FILE"
+	rm -f "$DEFERRED_START_FILE"
 	rm -rf "$SNAPSHOT_ROOT" "$PERSISTENT_STATE_DIR" "$TEST_TMP/legacy-run" "$SELECTOR_FILE"
 	rm -rf "$FIREWALL_TRANSACTION_DIR"
 	printf '%s\n' '# safety template fixture' >"$FIREWALL_SAFETY_TEMPLATE_FILE"
@@ -395,6 +398,7 @@ run_action() (
 	export PROXYPOOL_FIREWALL_TRANSACTION_HELPER="$FIREWALL_TRANSACTION_HELPER_FILE"
 	export PROXYPOOL_FIREWALL_TRANSACTION_DIR="$FIREWALL_TRANSACTION_DIR"
 	export PROXYPOOL_LAN_ISOLATION="$LAN_ISOLATION_HELPER_FILE"
+	export PROXYPOOL_DEFERRED_START_MARKER="$DEFERRED_START_FILE"
 	export PROXYPOOL_LEGACY_GATE="$LEGACY_GATE_FILE"
 
 	procd_open_service() {
@@ -642,6 +646,16 @@ assert_contains 'safety:activation-current'
 assert_contains 'l2:readiness'
 assert_not_contains_fragment 'safety:activation-runtime-current'
 assert_no_backend_mutation
+[ -f "$DEFERRED_START_FILE" ] ||
+	fail 'temporarily blocked S99 start did not publish a deferred retry request'
+
+# Once the worker makes the safety boundary current, its retry must be able to
+# complete the original start and consume the request.  A successful retry may
+# never leave a marker that would restart an already-running backend forever.
+PROXYPOOL_TEST_LAN_ISOLATION=ready expect_success run_start
+assert_contains 'legacy:start'
+[ ! -e "$DEFERRED_START_FILE" ] && [ ! -L "$DEFERRED_START_FILE" ] ||
+	fail 'successful deferred start did not consume its retry request'
 
 reset_case
 printf 'v1\n' >"$MARKER_FILE"
