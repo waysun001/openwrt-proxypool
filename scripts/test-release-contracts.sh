@@ -234,7 +234,7 @@ require_fixed "$FULL_WORKFLOW" 'TELEPHONY_FEED_COMMIT: 86af194d03592121f5321474e
 require_fixed "$FULL_WORKFLOW" 'git checkout --detach "$OPENWRT_COMMIT"'
 require_fixed "$FULL_WORKFLOW" '[ "$(git rev-parse HEAD)" = "$OPENWRT_COMMIT" ]'
 require_fixed "$FULL_WORKFLOW" 'mkdir -p local-feed'
-require_fixed "$FULL_WORKFLOW" 'cp -a proxypool-core luci-app-proxypool local-feed/'
+require_fixed "$FULL_WORKFLOW" 'cp -a proxypool-core local-feed/'
 require_fixed "$FULL_WORKFLOW" 'src-link proxypool $GITHUB_WORKSPACE/local-feed'
 require_fixed "$FULL_WORKFLOW" 'git -C feeds/packages rev-parse HEAD)" = "$PACKAGES_FEED_COMMIT"'
 require_fixed "$FULL_WORKFLOW" 'git -C feeds/luci rev-parse HEAD)" = "$LUCI_FEED_COMMIT"'
@@ -244,7 +244,10 @@ require_fixed "$FULL_WORKFLOW" 'sh ./scripts/prepare-image-files.sh files image-
 require_fixed "$FULL_WORKFLOW" 'openwrt-patches/23.05.3/998-net-bridge-offload-br-isolated.patch'
 require_fixed "$FULL_WORKFLOW" 'openwrt-patches/23.05.3/999-net-dsa-mt7530-bridge-port-isolation.patch'
 require_fixed "$FULL_WORKFLOW" 'target/linux/generic/backport-5.15/'
-require_fixed "$FULL_WORKFLOW" 'ln -s "$GITHUB_WORKSPACE/local-feed/luci-app-proxypool" package/luci-app-proxypool'
+require_fixed "$FULL_WORKFLOW" 'cp -a "$GITHUB_WORKSPACE/luci-app-proxypool" feeds/luci/applications/'
+require_fixed "$FULL_WORKFLOW" './scripts/feeds update -i luci'
+require_fixed "$FULL_WORKFLOW" "grep -Fq 'Package: luci-app-proxypool' feeds/luci.index"
+require_fixed "$FULL_WORKFLOW" './scripts/feeds install -p luci luci-app-proxypool'
 require_fixed "$FULL_WORKFLOW" "grep -Fqx 'CONFIG_PACKAGE_proxypool-core=y' .config"
 require_fixed "$FULL_WORKFLOW" "grep -Fqx 'CONFIG_PACKAGE_luci-app-proxypool=y' .config"
 require_fixed "$FULL_WORKFLOW" 'make target/linux/prepare V=s'
@@ -370,10 +373,12 @@ full_build=$(job_block "$FULL_WORKFLOW" build)
 printf '%s\n' "$full_build" | grep -Fq 'needs: host' || { echo 'full-source build does not depend on host gates' >&2; exit 1; }
 printf '%s\n' "$full_build" | grep -Fq 'contents: read' || { echo 'full-source build is not read-only' >&2; exit 1; }
 normalized_full_build=$(printf '%s\n' "$full_build" | sed 's/^[[:space:]]*//')
-luci_link_line=$(printf '%s\n' "$normalized_full_build" | grep -nFx 'ln -s "$GITHUB_WORKSPACE/local-feed/luci-app-proxypool" package/luci-app-proxypool' | cut -d: -f1)
+luci_stage_line=$(printf '%s\n' "$normalized_full_build" | grep -nFx 'cp -a "$GITHUB_WORKSPACE/luci-app-proxypool" feeds/luci/applications/' | cut -d: -f1)
+luci_index_line=$(printf '%s\n' "$normalized_full_build" | grep -nFx './scripts/feeds update -i luci' | cut -d: -f1)
 feeds_install_line=$(printf '%s\n' "$normalized_full_build" | grep -nFx './scripts/feeds install -a' | cut -d: -f1)
-[ -n "$luci_link_line" ] && [ -n "$feeds_install_line" ] && [ "$luci_link_line" -lt "$feeds_install_line" ] || {
-	echo 'full-source build must expose the local LuCI package before feeds generate package metadata' >&2
+[ -n "$luci_stage_line" ] && [ -n "$luci_index_line" ] && [ -n "$feeds_install_line" ] &&
+	[ "$luci_stage_line" -lt "$luci_index_line" ] && [ "$luci_index_line" -lt "$feeds_install_line" ] || {
+	echo 'full-source build must stage the local LuCI package and rebuild its feed index before installation' >&2
 	exit 1
 }
 patch_line=$(printf '%s\n' "$normalized_full_build" | grep -nF '../openwrt-patches/23.05.3/998-net-bridge-offload-br-isolated.patch \' | cut -d: -f1)
