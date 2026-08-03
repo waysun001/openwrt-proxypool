@@ -86,7 +86,7 @@ jobs:
       - name: Configure pinned source feeds
         run: |
           mkdir -p local-feed
-          cp -a proxypool-core local-feed/
+          cp -a proxypool-core luci-app-proxypool local-feed/
           printf '%s\n' \
             "src-git packages https://git.openwrt.org/feed/packages.git^$PACKAGES_FEED_COMMIT" \
             "src-git luci https://git.openwrt.org/project/luci.git^$LUCI_FEED_COMMIT" \
@@ -111,9 +111,6 @@ jobs:
           [ "$(git -C feeds/luci rev-parse HEAD)" = "$LUCI_FEED_COMMIT" ]
           [ "$(git -C feeds/routing rev-parse HEAD)" = "$ROUTING_FEED_COMMIT" ]
           [ "$(git -C feeds/telephony rev-parse HEAD)" = "$TELEPHONY_FEED_COMMIT" ]
-          cp -a "$GITHUB_WORKSPACE/luci-app-proxypool" feeds/luci/applications/
-          ./scripts/feeds update -i luci
-          grep -Fq 'Package: luci-app-proxypool' feeds/luci.index
           mkdir -p ../build-evidence
           printf '%s\n' \
             "packages $PACKAGES_FEED_COMMIT" \
@@ -122,8 +119,7 @@ jobs:
             "telephony $TELEPHONY_FEED_COMMIT" \
             > ../build-evidence/feed-commits.txt
           ./scripts/feeds install -a
-          ./scripts/feeds install -p proxypool proxypool-core
-          ./scripts/feeds install -p luci luci-app-proxypool
+          ./scripts/feeds install -p proxypool proxypool-core luci-app-proxypool
 
       - name: Stage image overlay and build configuration
         run: |

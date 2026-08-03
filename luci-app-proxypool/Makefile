@@ -14,3 +14,5 @@ LUCI_PKGARCH:=all
 FILE_MODES:=/etc/uci-defaults/luci-proxypool:root:root:0755
 
 include $(TOPDIR)/feeds/luci/luci.mk
+
+# call BuildPackage - OpenWrt buildroot signature
