@@ -11,6 +11,7 @@ permissions:
 
 env:
   OPENWRT_VERSION: '23.05.3'
+  OPENWRT_COMMIT: 01170d518da1c8ade9d26e56d0135d12cda8e781
   TARGET: mediatek
   SUBTARGET: filogic
   SDK_FILE: openwrt-sdk-23.05.3-mediatek-filogic_gcc-12.3.0_musl.Linux-x86_64.tar.xz
@@ -79,6 +80,27 @@ jobs:
           printf '%s  %s\n' "$SDK_SHA256" "$SDK_FILE" | sha256sum -c -
           tar -xf "$SDK_FILE"
           mv "${SDK_FILE%.tar.xz}" sdk
+
+      - name: Restore pinned OpenWrt base package sources omitted by SDK
+        run: |
+          mkdir openwrt-base
+          git -C openwrt-base init
+          git -C openwrt-base remote add origin https://git.openwrt.org/openwrt/openwrt.git
+          fetched=0
+          for attempt in 1 2 3; do
+            if git -C openwrt-base fetch --filter=blob:none --depth 1 origin "$OPENWRT_COMMIT"; then
+              fetched=1
+              break
+            fi
+            [ "$attempt" -eq 3 ] || sleep 10
+          done
+          [ "$fetched" = "1" ] || {
+            echo 'OpenWrt base source fetch failed after 3 attempts' >&2
+            exit 1
+          }
+          git -C openwrt-base checkout --detach FETCH_HEAD
+          [ "$(git -C openwrt-base rev-parse HEAD)" = "$OPENWRT_COMMIT" ]
+          sh ./scripts/prepare-sdk-base-packages.sh sdk openwrt-base
 
       - name: Prepare package feeds and local sources
         run: |

@@ -52,6 +52,7 @@ for shell_file in \
 	scripts/inspect-ipk.sh \
 	scripts/inspect-luci-ipk.sh \
 	scripts/prepare-image-files.sh \
+	scripts/test-prepare-sdk-base-packages.sh \
 	scripts/regenerate-sha256sums.sh \
 	scripts/test-artifact-sha256sums.sh \
 	scripts/test-backup-contract.sh \
@@ -94,6 +95,7 @@ sh scripts/test-legacy-quarantine.sh
 sh scripts/test-lan-isolation-defaults.sh
 sh scripts/test-luci-package-source-safety.sh
 sh scripts/test-package-safety-integration.sh
+sh scripts/test-prepare-sdk-base-packages.sh
 sh scripts/test-proxypool-dns-admission.sh
 sh scripts/test-proxypool-guard.sh
 sh scripts/test-proxypool-init.sh
