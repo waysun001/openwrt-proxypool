@@ -7,7 +7,7 @@ INPUT_GATE="$ROOT/proxypool-core/files/proxypool-fw4-input-gate.nft"
 FORWARD_GATE="$ROOT/proxypool-core/files/proxypool-fw4-forward-gate.nft"
 GUARD_INIT="$ROOT/proxypool-core/files/proxypool-guard.init"
 GUARD_RESYNC="$ROOT/proxypool-core/files/guard-resync.sh"
-LAN_WORKER="$ROOT/proxypool-core/files/lan-isolation-worker.sh"
+LAN_WORKER_SOURCE="$ROOT/proxypool-core/files/lan-isolation-worker.sh"
 STAGED_CHECKER="$ROOT/proxypool-core/files/proxypool-fw4-check-staged"
 TEST_TMP=$(mktemp -d)
 trap 'rm -rf "$TEST_TMP"' EXIT HUP INT TERM
@@ -167,7 +167,7 @@ require_file "$INPUT_GATE"
 require_file "$FORWARD_GATE"
 require_file "$GUARD_INIT"
 require_file "$GUARD_RESYNC"
-require_file "$LAN_WORKER"
+require_file "$LAN_WORKER_SOURCE"
 require_file "$STAGED_CHECKER"
 
 GUARD_NORM="$TEST_TMP/guard.norm"
@@ -453,6 +453,9 @@ FAKE_ID="$BOOT_BIN/id"
 FAKE_HOLD="$BOOT_BIN/quarantine-hold"
 FAKE_ISOLATION="$BOOT_BIN/lan-isolation"
 mkdir -p "$BOOT_BIN" "$BOOT_CONFIG" "$BOOT_NFTABLES"
+LAN_WORKER="$BOOT_BIN/lan-isolation-worker"
+cp "$LAN_WORKER_SOURCE" "$LAN_WORKER"
+chmod 755 "$LAN_WORKER"
 for package in firewall dhcp network; do
 	printf 'boot fixture %s\n' "$package" >"$BOOT_CONFIG/$package"
 done
