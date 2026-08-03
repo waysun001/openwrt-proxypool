@@ -118,9 +118,9 @@ jobs:
             "routing $ROUTING_FEED_COMMIT" \
             "telephony $TELEPHONY_FEED_COMMIT" \
             > ../build-evidence/feed-commits.txt
+          ln -s "$GITHUB_WORKSPACE/local-feed/luci-app-proxypool" package/luci-app-proxypool
           ./scripts/feeds install -a
           ./scripts/feeds install -p proxypool proxypool-core
-          ln -s "$GITHUB_WORKSPACE/local-feed/luci-app-proxypool" package/luci-app-proxypool
 
       - name: Stage image overlay and build configuration
         run: |

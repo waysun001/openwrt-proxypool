@@ -370,6 +370,12 @@ full_build=$(job_block "$FULL_WORKFLOW" build)
 printf '%s\n' "$full_build" | grep -Fq 'needs: host' || { echo 'full-source build does not depend on host gates' >&2; exit 1; }
 printf '%s\n' "$full_build" | grep -Fq 'contents: read' || { echo 'full-source build is not read-only' >&2; exit 1; }
 normalized_full_build=$(printf '%s\n' "$full_build" | sed 's/^[[:space:]]*//')
+luci_link_line=$(printf '%s\n' "$normalized_full_build" | grep -nFx 'ln -s "$GITHUB_WORKSPACE/local-feed/luci-app-proxypool" package/luci-app-proxypool' | cut -d: -f1)
+feeds_install_line=$(printf '%s\n' "$normalized_full_build" | grep -nFx './scripts/feeds install -a' | cut -d: -f1)
+[ -n "$luci_link_line" ] && [ -n "$feeds_install_line" ] && [ "$luci_link_line" -lt "$feeds_install_line" ] || {
+	echo 'full-source build must expose the local LuCI package before feeds generate package metadata' >&2
+	exit 1
+}
 patch_line=$(printf '%s\n' "$normalized_full_build" | grep -nF '../openwrt-patches/23.05.3/998-net-bridge-offload-br-isolated.patch \' | cut -d: -f1)
 prepare_line=$(printf '%s\n' "$normalized_full_build" | grep -nF 'make target/linux/prepare V=s' | cut -d: -f1)
 verify_line=$(printf '%s\n' "$normalized_full_build" | grep -nF 'sh ../scripts/verify-openwrt-kernel-isolation.sh . ../openwrt-patches/23.05.3' | cut -d: -f1)
