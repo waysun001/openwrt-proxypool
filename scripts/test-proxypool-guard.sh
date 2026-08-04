@@ -473,6 +473,7 @@ cat >"$FAKE_TRANSACTION" <<'FAKE_TRANSACTION_EOF'
 set -eu
 [ "${1:-}" = recover-only ] || exit 2
 [ "$(cat "$PROXYPOOL_FW4_STATE" 2>/dev/null)" = proxypool-fw4-quarantine-v1 ] || exit 3
+[ ! -e "$PROXYPOOL_TEST_STOCK_NFT_INCLUDE" ] && [ ! -L "$PROXYPOOL_TEST_STOCK_NFT_INCLUDE" ] || exit 4
 printf 'recover\n' >>"$PROXYPOOL_TEST_BOOT_TRACE"
 exit "${PROXYPOOL_TEST_RECOVERY_RC:-0}"
 FAKE_TRANSACTION_EOF
@@ -522,9 +523,18 @@ cat >"$FAKE_LS" <<'FAKE_LS_EOF'
 #!/bin/sh
 set -eu
 [ "$#" -eq 2 ] && [ "$1" = -nd ] || exit 2
-printf '%s %s 0 0 28 Jan 1 00:00 %s\n' \
-	"${PROXYPOOL_TEST_STATE_PERMISSIONS:--rw-------}" \
-	"${PROXYPOOL_TEST_STATE_LINKS:-1}" "$2"
+case "$2" in
+	*/10-custom-filter-chains.nft)
+		printf '%s %s 0 0 1139 Jan 1 00:00 %s\n' \
+			"${PROXYPOOL_TEST_STOCK_PERMISSIONS:--rw-r--r--}" \
+			"${PROXYPOOL_TEST_STOCK_LINKS:-1}" "$2"
+		;;
+	*)
+		printf '%s %s 0 0 28 Jan 1 00:00 %s\n' \
+			"${PROXYPOOL_TEST_STATE_PERMISSIONS:--rw-------}" \
+			"${PROXYPOOL_TEST_STATE_LINKS:-1}" "$2"
+		;;
+esac
 FAKE_LS_EOF
 cat >"$FAKE_ID" <<'FAKE_ID_EOF'
 #!/bin/sh
@@ -577,6 +587,7 @@ run_guard_boot() {
 		PROXYPOOL_LS_PROG="$FAKE_LS" \
 		PROXYPOOL_QUARANTINE_HOLD="${PROXYPOOL_TEST_QUARANTINE_HOLD:-}" \
 		PROXYPOOL_TEST_BOOT_TRACE="$BOOT_TRACE" \
+		PROXYPOOL_TEST_STOCK_NFT_INCLUDE="$BOOT_NFTABLES/10-custom-filter-chains.nft" \
 		PROXYPOOL_TEST_RESET_RC="${PROXYPOOL_TEST_RESET_RC:-0}" \
 		PROXYPOOL_TEST_RECOVERY_RC="${PROXYPOOL_TEST_RECOVERY_RC:-0}" \
 		PROXYPOOL_TEST_CHECK_RC="${PROXYPOOL_TEST_CHECK_RC:-0}" \
@@ -591,6 +602,8 @@ run_guard_boot() {
 		PROXYPOOL_TEST_CONFIGURE_RC="${PROXYPOOL_TEST_CONFIGURE_RC:-0}" \
 		PROXYPOOL_TEST_STATE_PERMISSIONS="${PROXYPOOL_TEST_STATE_PERMISSIONS:--rw-------}" \
 		PROXYPOOL_TEST_STATE_LINKS="${PROXYPOOL_TEST_STATE_LINKS:-1}" \
+		PROXYPOOL_TEST_STOCK_PERMISSIONS="${PROXYPOOL_TEST_STOCK_PERMISSIONS:--rw-r--r--}" \
+		PROXYPOOL_TEST_STOCK_LINKS="${PROXYPOOL_TEST_STOCK_LINKS:-1}" \
 		sh -c '
 			procd_open_instance() { printf "procd:open:%s\n" "$1" >>"$PROXYPOOL_TEST_BOOT_TRACE"; }
 			procd_set_param() { printf "procd:param:%s" "$1" >>"$PROXYPOOL_TEST_BOOT_TRACE"; shift; for value in "$@"; do printf ":%s" "$value" >>"$PROXYPOOL_TEST_BOOT_TRACE"; done; printf "\n" >>"$PROXYPOOL_TEST_BOOT_TRACE"; }
@@ -655,6 +668,61 @@ nft_line=$(first_line "$BOOT_TRACE" nft-list-tables)
 	[ "$recover_line" -lt "$pending_line" ] &&
 	[ "$pending_line" -lt "$check_line" ] && [ "$check_line" -lt "$nft_line" ] ||
 	fail 'S18 validation gates ran out of fail-closed order'
+
+# Pinned OpenWrt 23.05.3 firewall4 installs one comment-only template into the
+# otherwise forbidden user nftables include directory.  S18 already owns both
+# the independent empty guardian and the pre-S19 quarantine, so it must retire
+# that exact stock template before enforcing the empty-directory boundary.
+STOCK_NFT_INCLUDE="$BOOT_NFTABLES/10-custom-filter-chains.nft"
+printf '%s' 'IyMgVGhlIGZpcmV3YWxsNCBpbnB1dCwgZm9yd2FyZCBhbmQgb3V0cHV0IGNoYWlucyBhcmUgcmVnaXN0ZXJlZCB3aXRoCiMjIHByaW9yaXR5IGBmaWx0ZXJgICgwKS4KCgojIyBVbmNvbW1lbnQgdGhlIGNoYWlucyBiZWxvdyBpZiB5b3Ugd2FudCB0byBzdGFnZSBydWxlcyAqYmVmb3JlKiB0aGUKIyMgZGVmYXVsdCBmaXJld2FsbCBpbnB1dCwgZm9yd2FyZCBhbmQgb3V0cHV0IGNoYWlucy4KCiMgY2hhaW4gdXNlcl9wcmVfaW5wdXQgewojICAgICB0eXBlIGZpbHRlciBob29rIGlucHV0IHByaW9yaXR5IC0xOyBwb2xpY3kgYWNjZXB0OwojICAgICB0Y3AgZHBvcnQgc3NoIGN0IHN0YXRlIG5ldyBsb2cgcHJlZml4ICJTU0ggY29ubmVjdGlvbiBhdHRlbXB0OiAiCiMgfQojCiMgY2hhaW4gdXNlcl9wcmVfZm9yd2FyZCB7CiMgICAgIHR5cGUgZmlsdGVyIGhvb2sgZm9yd2FyZCBwcmlvcml0eSAtMTsgcG9saWN5IGFjY2VwdDsKIyB9CiMKIyBjaGFpbiB1c2VyX3ByZV9vdXRwdXQgewojICAgICB0eXBlIGZpbHRlciBob29rIG91dHB1dCBwcmlvcml0eSAtMTsgcG9saWN5IGFjY2VwdDsKIyB9CgoKIyMgVW5jb21tZW50IHRoZSBjaGFpbnMgYmVsb3cgaWYgeW91IHdhbnQgdG8gc3RhZ2UgcnVsZXMgKmFmdGVyKiB0aGUKIyMgZGVmYXVsdCBmaXJld2FsbCBpbnB1dCwgZm9yd2FyZCBhbmQgb3V0cHV0IGNoYWlucy4KCiMgY2hhaW4gdXNlcl9wb3N0X2lucHV0IHsKIyAgICAgdHlwZSBmaWx0ZXIgaG9vayBpbnB1dCBwcmlvcml0eSAxOyBwb2xpY3kgYWNjZXB0OwojICAgICBjdCBzdGF0ZSBuZXcgbG9nIHByZWZpeCAiRmlyZXdhbGw0IGFjY2VwdGVkIGluZ3Jlc3M6ICIKIyB9CiMKIyBjaGFpbiB1c2VyX3Bvc3RfZm9yd2FyZCB7CiMgICAgIHR5cGUgZmlsdGVyIGhvb2sgZm9yd2FyZCBwcmlvcml0eSAxOyBwb2xpY3kgYWNjZXB0OwojICAgICBjdCBzdGF0ZSBuZXcgbG9nIHByZWZpeCAiRmlyZXdhbGw0IGFjY2VwdGVkIGZvcndhcmQ6ICIKIyB9CiMKIyBjaGFpbiB1c2VyX3Bvc3Rfb3V0cHV0IHsKIyAgICAgdHlwZSBmaWx0ZXIgaG9vayBvdXRwdXQgcHJpb3JpdHkgMTsgcG9saWN5IGFjY2VwdDsKIyAgICAgY3Qgc3RhdGUgbmV3IGxvZyBwcmVmaXggIkZpcmV3YWxsNCBhY2NlcHRlZCBlZ3Jlc3M6ICIKIyB9Cgo=' |
+	base64 -d >"$STOCK_NFT_INCLUDE"
+chmod 644 "$STOCK_NFT_INCLUDE"
+[ "$(sha256sum "$STOCK_NFT_INCLUDE" | cut -d' ' -f1)" = af5cbfeb3e3b61d32ce134ae33d15330ee27da838e6f4fb9c717f034923b8b16 ] ||
+	fail 'stock firewall4 fixture does not match the pinned source digest'
+STOCK_NFT_FIXTURE="$TEST_TMP/10-custom-filter-chains.stock"
+cp "$STOCK_NFT_INCLUDE" "$STOCK_NFT_FIXTURE"
+rm -f "$BOOT_STATE" "$BOOT_TRACE"
+run_guard_boot || fail 'S18 rejected the pinned comment-only firewall4 template'
+[ ! -e "$STOCK_NFT_INCLUDE" ] && [ ! -L "$STOCK_NFT_INCLUDE" ] ||
+	fail 'S18 did not retire the pinned comment-only firewall4 template'
+[ ! -e "$BOOT_STATE" ] ||
+	fail 'S18 retained its quarantine after retiring the stock firewall4 template'
+
+printf '%s\n' 'chain modified_by_user { type filter hook forward priority 1; }' >"$STOCK_NFT_INCLUDE"
+chmod 644 "$STOCK_NFT_INCLUDE"
+rm -f "$BOOT_STATE" "$BOOT_TRACE"
+if run_guard_boot; then
+	fail 'S18 accepted a modified firewall4 user include as the stock template'
+fi
+[ -f "$STOCK_NFT_INCLUDE" ] && [ ! -L "$STOCK_NFT_INCLUDE" ] ||
+	fail 'S18 deleted a modified firewall4 user include'
+[ -f "$BOOT_STATE" ] && [ ! -L "$BOOT_STATE" ] ||
+	fail 'S18 did not retain its quarantine for a modified firewall4 user include'
+rm -f "$STOCK_NFT_INCLUDE"
+
+cp "$STOCK_NFT_FIXTURE" "$STOCK_NFT_INCLUDE"
+chmod 600 "$STOCK_NFT_INCLUDE"
+rm -f "$BOOT_STATE" "$BOOT_TRACE"
+if PROXYPOOL_TEST_STOCK_PERMISSIONS=-rw------- run_guard_boot; then
+	fail 'S18 accepted unsafe metadata on the stock firewall4 template'
+fi
+[ -f "$STOCK_NFT_INCLUDE" ] && [ ! -L "$STOCK_NFT_INCLUDE" ] ||
+	fail 'S18 deleted a stock firewall4 template with unsafe metadata'
+[ -f "$BOOT_STATE" ] && [ ! -L "$BOOT_STATE" ] ||
+	fail 'S18 did not retain its quarantine for unsafe stock-template metadata'
+rm -f "$STOCK_NFT_INCLUDE"
+
+cp "$STOCK_NFT_FIXTURE" "$STOCK_NFT_INCLUDE"
+chmod 644 "$STOCK_NFT_INCLUDE"
+rm -f "$BOOT_STATE" "$BOOT_TRACE"
+if PROXYPOOL_TEST_STOCK_LINKS=2 run_guard_boot; then
+	fail 'S18 accepted a hard-linked stock firewall4 template'
+fi
+[ -f "$STOCK_NFT_INCLUDE" ] && [ ! -L "$STOCK_NFT_INCLUDE" ] ||
+	fail 'S18 deleted a hard-linked stock firewall4 template'
+[ -f "$BOOT_STATE" ] && [ ! -L "$BOOT_STATE" ] ||
+	fail 'S18 did not retain its quarantine for a hard-linked stock template'
+rm -f "$STOCK_NFT_INCLUDE"
 
 # Invoke the shell function directly so assignment prefixes remain visible to
 # run_guard_boot and are forwarded into its explicit env block.

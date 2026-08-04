@@ -55,7 +55,7 @@ workflow_jobs() {
 
 require_fixed "$MAKEFILE" 'PKG_BUILD_DEPENDS:=golang/host'
 require_fixed "$MAKEFILE" 'PKG_VERSION:=2.0.0'
-require_fixed "$MAKEFILE" 'PKG_RELEASE:=4'
+require_fixed "$MAKEFILE" 'PKG_RELEASE:=5'
 require_fixed "$MAKEFILE" 'GO_PKG:=proxypoold'
 require_fixed "$MAKEFILE" 'GO_PKG_BUILD_PKG:=$(GO_PKG)/cmd/proxypoold $(GO_PKG)/cmd/proxypoolctl'
 require_fixed "$MAKEFILE" 'GO_PKG_LDFLAGS_X:=$(GO_PKG)/internal/buildinfo.Version=$(PKG_VERSION)'

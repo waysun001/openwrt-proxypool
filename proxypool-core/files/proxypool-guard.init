@@ -19,9 +19,13 @@ UCI="${PROXYPOOL_UCI:-/sbin/uci}"
 NFT="${PROXYPOOL_NFT:-/usr/sbin/nft}"
 FLOCK="${PROXYPOOL_FLOCK:-flock}"
 SYNC="${PROXYPOOL_SYNC:-sync}"
+SHA256SUM="${PROXYPOOL_SHA256SUM:-sha256sum}"
 LS_PROG="${PROXYPOOL_LS_PROG:-/bin/ls}"
 QUARANTINE_HOLD="${PROXYPOOL_QUARANTINE_HOLD:-}"
 QUARANTINE_VALUE=proxypool-fw4-quarantine-v1
+# Comment-only 0644 template shipped by pinned firewall4 commit
+# 598d9fbb5179667aa0c525040eaa41bc7f2dc015.  No other user include is owned.
+STOCK_NFT_INCLUDE_SHA256=af5cbfeb3e3b61d32ce134ae33d15330ee27da838e6f4fb9c717f034923b8b16
 
 validate_guard_environment() {
 	for guarded_path in "$CONFIG_DIR" "$FW4_STATE" "$FW4_LOCK" "$NFTABLES_USER_DIR"; do
@@ -219,6 +223,35 @@ empty_user_nft_dir() {
 	done
 }
 
+retire_stock_nft_include() {
+	stock_include="$NFTABLES_USER_DIR/10-custom-filter-chains.nft"
+	stock_hash=
+	stock_metadata=
+	if [ -e "$NFTABLES_USER_DIR" ] || [ -L "$NFTABLES_USER_DIR" ]; then
+		[ -d "$NFTABLES_USER_DIR" ] && [ ! -L "$NFTABLES_USER_DIR" ] || return 1
+	fi
+	if [ ! -e "$stock_include" ] && [ ! -L "$stock_include" ]; then
+		return 0
+	fi
+	[ -f "$stock_include" ] && [ ! -L "$stock_include" ] || return 1
+	stock_metadata=$("$LS_PROG" -nd "$stock_include" 2>/dev/null) || return 1
+	case "$stock_metadata" in
+		""|*'
+') return 1 ;;
+	esac
+	IFS=' 	' read -r permissions links owner group remainder <<EOF
+$stock_metadata
+EOF
+	[ "$permissions" = '-rw-r--r--' ] && [ "$links" = 1 ] &&
+		[ "$owner" = 0 ] && [ "$group" = 0 ] || return 1
+	stock_hash_output=$("$SHA256SUM" "$stock_include" 2>/dev/null) || return 1
+	stock_hash=${stock_hash_output%%[[:space:]]*}
+	[ "$stock_hash" = "$STOCK_NFT_INCLUDE_SHA256" ] || return 1
+	rm -f "$stock_include" || return 1
+	"$SYNC" || return 1
+	[ ! -e "$stock_include" ] && [ ! -L "$stock_include" ]
+}
+
 quarantine_metadata_valid() {
 	[ -f "$FW4_STATE" ] && [ ! -L "$FW4_STATE" ] || return 1
 	metadata=$("$LS_PROG" -nd "$FW4_STATE" 2>/dev/null) || return 1
@@ -278,6 +311,7 @@ boot() {
 	# Even a failed/unknown cold-mode proof must install the independent empty
 	# guardian.  The existing state or emergency sentinel keeps S19 inhibited.
 	reset_guardian || exit 1
+	retire_stock_nft_include || exit 1
 	if ! reconcile_lan_isolation boot; then
 		# The independent guardian is already active and the regular fw4
 		# sentinel remains installed, so forwarding and local-WAN access stay
