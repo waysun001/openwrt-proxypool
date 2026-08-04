@@ -66,6 +66,7 @@ for shell_file in \
 	scripts/test-kernel-isolation-contract.sh \
 	scripts/test-legacy-quarantine.sh \
 	scripts/test-lan-isolation-defaults.sh \
+	scripts/test-lan-isolation-worker.sh \
 	scripts/test-luci-package-source-safety.sh \
 	scripts/test-package-safety-integration.sh \
 	scripts/test-proxypool-dns-admission.sh \
@@ -93,6 +94,7 @@ sh scripts/test-inspect-luci-ipk.sh
 sh scripts/test-kernel-isolation-contract.sh
 sh scripts/test-legacy-quarantine.sh
 sh scripts/test-lan-isolation-defaults.sh
+sh scripts/test-lan-isolation-worker.sh
 sh scripts/test-luci-package-source-safety.sh
 sh scripts/test-package-safety-integration.sh
 sh scripts/test-prepare-sdk-base-packages.sh

@@ -968,9 +968,13 @@ fi
 # reconnect/restart even though every safety proof has recovered.
 DEFERRED_HELPER="$BIN/worker-deferred-helper"
 DEFERRED_INIT="$BIN/worker-deferred-init"
+DEFERRED_TRANSACTION="$BIN/worker-deferred-transaction"
+DEFERRED_DEFAULTS="$BIN/worker-deferred-defaults"
 DEFERRED_SLEEP="$BIN/worker-deferred-sleep"
 DEFERRED_MARKER="$TEST_TMP/start-deferred"
 DEFERRED_TRACE="$TEST_TMP/start-deferred.trace"
+DEFERRED_AUTH_STATE="$TEST_TMP/start-deferred.auth"
+DEFERRED_TRANSACTION_DIR="$TEST_TMP/start-deferred.transaction"
 cat >"$DEFERRED_HELPER" <<'EOF_DEFERRED_HELPER'
 #!/bin/sh
 set -eu
@@ -983,28 +987,69 @@ cat >"$DEFERRED_INIT" <<'EOF_DEFERRED_INIT'
 #!/bin/sh
 set -eu
 [ "$#" -eq 1 ] && [ "$1" = start ] || exit 2
+[ "$(cat "$PROXYPOOL_TEST_DEFERRED_AUTH_STATE" 2>/dev/null)" = current ] || exit 3
 printf 'init:start\n' >>"$PROXYPOOL_TEST_DEFERRED_TRACE"
 rm -f "$PROXYPOOL_DEFERRED_START_MARKER"
 EOF_DEFERRED_INIT
+cat >"$DEFERRED_TRANSACTION" <<'EOF_DEFERRED_TRANSACTION'
+#!/bin/sh
+set -eu
+case "${1:-}" in
+	journal-present)
+		if [ -e "$PROXYPOOL_FIREWALL_TRANSACTION_DIR" ] || [ -L "$PROXYPOOL_FIREWALL_TRANSACTION_DIR" ]; then
+			printf 'safety:journal-present\n' >>"$PROXYPOOL_TEST_DEFERRED_TRACE"
+			exit 0
+		fi
+		printf 'safety:journal-absent\n' >>"$PROXYPOOL_TEST_DEFERRED_TRACE"
+		exit 1
+		;;
+	activation-current)
+		printf 'safety:activation-current\n' >>"$PROXYPOOL_TEST_DEFERRED_TRACE"
+		[ "$(cat "$PROXYPOOL_TEST_DEFERRED_AUTH_STATE" 2>/dev/null)" = current ]
+		;;
+	*) exit 2 ;;
+esac
+EOF_DEFERRED_TRANSACTION
+cat >"$DEFERRED_DEFAULTS" <<'EOF_DEFERRED_DEFAULTS'
+#!/bin/sh
+set -eu
+[ "${PROXYPOOL_COLD_BOOT:-}" = 0 ] || exit 2
+[ ! -e "$PROXYPOOL_FIREWALL_TRANSACTION_DIR" ] && [ ! -L "$PROXYPOOL_FIREWALL_TRANSACTION_DIR" ] || exit 3
+printf 'defaults:live\n' >>"$PROXYPOOL_TEST_DEFERRED_TRACE"
+printf 'current\n' >"$PROXYPOOL_TEST_DEFERRED_AUTH_STATE"
+EOF_DEFERRED_DEFAULTS
 cat >"$DEFERRED_SLEEP" <<'EOF_DEFERRED_SLEEP'
 #!/bin/sh
 set -eu
 [ "$#" -eq 1 ] && [ "$1" = 30 ] || exit 2
 exit 93
 EOF_DEFERRED_SLEEP
-chmod 755 "$DEFERRED_HELPER" "$DEFERRED_INIT" "$DEFERRED_SLEEP"
+chmod 755 "$DEFERRED_HELPER" "$DEFERRED_INIT" "$DEFERRED_TRANSACTION" "$DEFERRED_DEFAULTS" "$DEFERRED_SLEEP"
 : >"$DEFERRED_MARKER"
 : >"$DEFERRED_TRACE"
+printf 'absent\n' >"$DEFERRED_AUTH_STATE"
+[ ! -e "$DEFERRED_TRANSACTION_DIR" ] && [ ! -L "$DEFERRED_TRANSACTION_DIR" ] ||
+	fail 'deferred-start transaction fixture unexpectedly exists'
 if PROXYPOOL_LAN_ISOLATION="$DEFERRED_HELPER" \
 	PROXYPOOL_WORKER_SLEEP="$DEFERRED_SLEEP" \
 	PROXYPOOL_INIT="$DEFERRED_INIT" \
+	PROXYPOOL_TRANSACTION_HELPER="$DEFERRED_TRANSACTION" \
+	PROXYPOOL_FIREWALL_DEFAULTS="$DEFERRED_DEFAULTS" \
+	PROXYPOOL_FIREWALL_TRANSACTION_DIR="$DEFERRED_TRANSACTION_DIR" \
 	PROXYPOOL_DEFERRED_START_MARKER="$DEFERRED_MARKER" \
 	PROXYPOOL_TEST_DEFERRED_TRACE="$DEFERRED_TRACE" \
+	PROXYPOOL_TEST_DEFERRED_AUTH_STATE="$DEFERRED_AUTH_STATE" \
 	sh "$WORKER" >"$TEST_TMP/worker-deferred.log" 2>&1; then
 	fail 'deferred-start worker ignored the terminal sleep fixture failure'
 fi
-[ "$(cat "$DEFERRED_TRACE")" = 'init:start' ] ||
-	fail 'ready LAN worker did not retry the deferred ProxyPool start'
+expected_deferred_trace='safety:journal-absent
+safety:activation-current
+defaults:live
+safety:journal-absent
+safety:activation-current
+init:start'
+[ "$(cat "$DEFERRED_TRACE")" = "$expected_deferred_trace" ] ||
+	fail 'ready LAN worker did not repair firewall activation before retrying ProxyPool start'
 [ ! -e "$DEFERRED_MARKER" ] && [ ! -L "$DEFERRED_MARKER" ] ||
 	fail 'deferred-start retry did not consume its request marker'
 

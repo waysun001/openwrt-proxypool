@@ -5,6 +5,9 @@ LAN_ISOLATION="${PROXYPOOL_LAN_ISOLATION:-/usr/lib/proxypool/lan-isolation.sh}"
 SLEEP="${PROXYPOOL_WORKER_SLEEP:-/bin/sleep}"
 PROXYPOOL_INIT="${PROXYPOOL_INIT:-/etc/init.d/proxypool}"
 DEFERRED_START_MARKER="${PROXYPOOL_DEFERRED_START_MARKER:-/var/run/proxypool.start-deferred}"
+TRANSACTION_HELPER="${PROXYPOOL_TRANSACTION_HELPER:-/usr/lib/proxypool/proxypool-firewall-transaction}"
+FIREWALL_DEFAULTS="${PROXYPOOL_FIREWALL_DEFAULTS:-/usr/lib/proxypool/proxypool-firewall-defaults}"
+TRANSACTION_DIR="${PROXYPOOL_FIREWALL_TRANSACTION_DIR:-/etc/proxypool/firewall-transaction}"
 SLEEP_PID=
 WAKE_PENDING=0
 
@@ -54,6 +57,39 @@ wait_delay() {
 	return "$wait_status"
 }
 
+firewall_journal_is_absent() {
+	local journal_status
+	if "$TRANSACTION_HELPER" journal-present; then
+		return 1
+	else
+		journal_status=$?
+	fi
+	# journal-present uses status 1 for both exact absence and validation
+	# failure.  Only an absent authority path permits a new live transaction.
+	[ "$journal_status" -eq 1 ] || return 1
+	[ ! -e "$TRANSACTION_DIR" ] && [ ! -L "$TRANSACTION_DIR" ]
+}
+
+ensure_firewall_activation() {
+	case "$TRANSACTION_DIR" in
+		/*) : ;;
+		*) return 1 ;;
+	esac
+	[ "$TRANSACTION_DIR" != / ] || return 1
+	[ -f "$TRANSACTION_HELPER" ] && [ ! -L "$TRANSACTION_HELPER" ] &&
+		[ -x "$TRANSACTION_HELPER" ] || return 1
+	firewall_journal_is_absent || return 1
+	if "$TRANSACTION_HELPER" activation-current; then
+		return 0
+	fi
+	[ -f "$FIREWALL_DEFAULTS" ] && [ ! -L "$FIREWALL_DEFAULTS" ] &&
+		[ -x "$FIREWALL_DEFAULTS" ] || return 1
+	PROXYPOOL_COLD_BOOT=0 "$FIREWALL_DEFAULTS" || return 1
+	# Do not trust the activator's exit status alone.  Recheck both durable WAL
+	# absence and the hash-bound runtime acknowledgement before daemon start.
+	firewall_journal_is_absent && "$TRANSACTION_HELPER" activation-current
+}
+
 retry_deferred_start() {
 	case "$DEFERRED_START_MARKER" in
 		/*) : ;;
@@ -64,8 +100,10 @@ retry_deferred_start() {
 		return 0
 	fi
 	[ -f "$DEFERRED_START_MARKER" ] && [ ! -L "$DEFERRED_START_MARKER" ] || return 1
+	ensure_firewall_activation || return 1
 	[ -f "$PROXYPOOL_INIT" ] && [ ! -L "$PROXYPOOL_INIT" ] && [ -x "$PROXYPOOL_INIT" ] || return 1
-	"$PROXYPOOL_INIT" start
+	"$PROXYPOOL_INIT" start || return 1
+	[ ! -e "$DEFERRED_START_MARKER" ] && [ ! -L "$DEFERRED_START_MARKER" ]
 }
 
 trap publish_pending_on_exit EXIT
