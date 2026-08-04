@@ -987,6 +987,7 @@ case "${PROXYPOOL_TEST_RENDER_MODE:-valid}" in
 esac
 case "${PROXYPOOL_TEST_RENDER_MODE:-valid}" in
 	input_late) printf '%s\n' '  ct state vmap { established : accept, related : accept, invalid : drop }' "$input_line" ;;
+	legacy_established) printf '%s\n' '  ct state established,related accept comment "!fw4: Allow inbound established and related flows"' ;;
 	missing_input_anchor) : ;;
 	duplicate_input_anchor) printf '%s\n' \
 		'  ct state vmap { established : accept, related : accept, invalid : drop }' \
@@ -1002,6 +1003,7 @@ esac
 [ "${PROXYPOOL_TEST_RENDER_MODE:-valid}" = flow_add ] && printf '%s\n' '  ip protocol tcp flow add @ft'
 case "${PROXYPOOL_TEST_RENDER_MODE:-valid}" in
 	missing_forward_anchor) : ;;
+	legacy_established) printf '%s\n' '  ct state established,related accept comment "!fw4: Allow forwarded established and related flows"' ;;
 	duplicate_forward_anchor) printf '%s\n' \
 		'  ct state vmap { established : accept, related : accept, invalid : drop }' \
 		'  ct state vmap { established : accept, related : accept, invalid : drop }' ;;
@@ -1043,6 +1045,11 @@ run_real_staged_check() {
 run_real_staged_check valid || fail 'real staged checker rejected an isolated valid render'
 [ "$(grep -c '^nft-check$' "$CHECK_TRACE")" -eq 1 ] ||
 	fail 'real staged checker did not invoke nft exactly once for a valid render'
+: >"$CHECK_TRACE"
+run_real_staged_check legacy_established ||
+	fail 'real staged checker rejected the pinned firewall4 established/related syntax'
+[ "$(grep -c '^nft-check$' "$CHECK_TRACE")" -eq 1 ] ||
+	fail 'real staged checker did not invoke nft exactly once for the pinned firewall4 render'
 for invalid_render in \
 	wrong_chain guardian_late missing_input input_late forward_late \
 	missing_input_anchor duplicate_input_anchor \

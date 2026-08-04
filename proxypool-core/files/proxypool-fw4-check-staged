@@ -168,7 +168,8 @@ require_chain_signature_before_established() {
 				matches++
 				gate_line = NR
 			}
-			if (index(normalized, "ct state vmap { established : accept, related : accept") == 1) {
+			if (index(normalized, "ct state established,related accept") == 1 ||
+			    index(normalized, "ct state vmap { established : accept, related : accept") == 1) {
 				established++
 				established_line = NR
 			}
