@@ -27,7 +27,7 @@ printf '%s\n' \
 	'case "$target" in' \
 	'  */etc/config/proxypool) printf "600\\n" ;;' \
 	'  */usr/lib/proxypool/ubus-call-stdin.uc) printf "755\\n" ;;' \
-	'  */lib/upgrade/keep.d/proxypool|*.nft|*.uc) printf "644\\n" ;;' \
+	'  */lib/upgrade/keep.d/proxypool|*/usr/lib/proxypool/proxypool-v2-default|*.nft|*.uc) printf "644\\n" ;;' \
 	'  *) printf "755\\n" ;;' \
 	'esac' \
 	>"$TEST_TMP/bin/stat"
@@ -89,7 +89,7 @@ make_ipk() {
 	esac
 
 	cp "$ROOT/proxypool-core/files/proxypool.config" "$data/etc/config/proxypool"
-	printf '/etc/config/proxypool_v2\n/etc/config/proxypool_runtime\n/etc/proxypool/activated-backend\n/etc/proxypool/cleanup-required\n/etc/proxypool/firewall-transaction\n/etc/proxypool/wireless-quarantine\n/etc/proxypool/migration-v1.json\n/etc/proxypool/backups/\n' \
+	printf '/etc/config/proxypool_v2\n/etc/config/proxypool_runtime\n/etc/proxypool/activated-backend\n/etc/proxypool/cleanup-required\n/etc/proxypool/v2-activation-request\n/etc/proxypool/firewall-transaction\n/etc/proxypool/wireless-quarantine\n/etc/proxypool/migration-v1.json\n/etc/proxypool/backups/\n' \
 		>"$data/lib/upgrade/keep.d/proxypool"
 	case "$fixture_kind" in
 		payload_v2) printf "config global 'global'\n" >"$data/etc/config/proxypool_v2" ;;
@@ -137,6 +137,7 @@ make_ipk() {
 
 	printf '%s\n' '#!/bin/sh' 'exit 0' >"$data/etc/init.d/proxypool"
 	printf '%s\n' '#!/bin/sh' 'exit 0' >"$data/etc/init.d/proxypool-guard"
+	printf '%s\n' '#!/bin/sh' 'exit 0' >"$data/etc/init.d/proxypool-activate"
 	for binary in \
 		"$data/usr/sbin/proxypoold" \
 		"$data/usr/bin/proxypoolctl" \
@@ -156,11 +157,15 @@ make_ipk() {
 		proxypool-fw4-check-staged \
 		proxypool-postinst \
 		proxypool-migrate.sh \
+		proxypool-backend-activate \
 		proxypool-safety-uci-default \
 		ubus-call-stdin.uc; do
 		printf '%s\n' '#!/bin/sh' 'exit 0' >"$data/usr/lib/proxypool/$helper"
 		chmod 755 "$data/usr/lib/proxypool/$helper"
 	done
+	printf '%s\n' "config global 'global'" "\toption schema_version '2'" "\toption runtime_backend 'v2_shadow'" \
+		>"$data/usr/lib/proxypool/proxypool-v2-default"
+	chmod 644 "$data/usr/lib/proxypool/proxypool-v2-default"
 	printf '%s\n' '#!/bin/sh' 'exit 0' >"$data/etc/hotplug.d/net/99-proxypool-lan-isolation"
 	chmod 755 "$data/etc/hotplug.d/net/99-proxypool-lan-isolation"
 	cp "$data/etc/hotplug.d/net/99-proxypool-lan-isolation" \
@@ -178,6 +183,9 @@ make_ipk() {
 	chmod 644 "$data/usr/lib/proxypool/proxypool-uci-staged.uc"
 	case "$fixture_kind" in
 		missing_guard) rm -f "$data/etc/init.d/proxypool-guard" ;;
+		missing_activate_init) rm -f "$data/etc/init.d/proxypool-activate" ;;
+		missing_backend_activator) rm -f "$data/usr/lib/proxypool/proxypool-backend-activate" ;;
+		missing_v2_default) rm -f "$data/usr/lib/proxypool/proxypool-v2-default" ;;
 		missing_legacy_gate) rm -f "$data/usr/lib/proxypool/legacy-gate.sh" ;;
 		missing_template) rm -f "$data/usr/lib/proxypool/proxypool-safety-uci-default" ;;
 		missing_lan_isolation) rm -f "$data/usr/lib/proxypool/lan-isolation.sh" ;;
@@ -191,6 +199,7 @@ make_ipk() {
 	chmod 600 "$data/etc/config/proxypool"
 	chmod 755 "$data/etc/init.d/proxypool"
 	[ ! -e "$data/etc/init.d/proxypool-guard" ] || chmod 755 "$data/etc/init.d/proxypool-guard"
+	[ ! -e "$data/etc/init.d/proxypool-activate" ] || chmod 755 "$data/etc/init.d/proxypool-activate"
 	printf '2.0\n' >"$outer/debian-binary"
 	tar -czf "$outer/control.tar.gz" -C "$control" .
 	tar -czf "$outer/data.tar.gz" -C "$data" .
@@ -219,7 +228,7 @@ for invalid_kind in \
 	payload_journal payload_wireless_quarantine payload_activation_marker payload_uci_default bad_keep \
 	missing_firewall4_dep missing_bridge_dep missing_uci_dep missing_ucode_dep missing_ucode_ubus_dep missing_ubus_dep missing_jshn_dep \
 	missing_ip_bridge_dep missing_coreutils_stat_dep missing_coreutils_timeout_dep \
-	missing_postinst bad_postinst missing_guard missing_template \
+	missing_postinst bad_postinst missing_guard missing_activate_init missing_backend_activator missing_v2_default missing_template \
 	missing_legacy_gate missing_lan_isolation missing_lan_worker missing_lan_hotplug missing_lan_iface_hotplug \
 	missing_v2_iface_hotplug missing_ubus_stdin_helper; do
 	make_ipk "$invalid_kind" "$invalid_kind"
@@ -284,6 +293,9 @@ grep -Fq 'missing required dependency: coreutils-timeout' "$TEST_TMP/missing_cor
 grep -Fq 'missing executable control/postinst-pkg' "$TEST_TMP/missing_postinst.log"
 grep -Fq 'invalid control/postinst-pkg' "$TEST_TMP/bad_postinst.log"
 grep -Fq 'missing executable /etc/init.d/proxypool-guard' "$TEST_TMP/missing_guard.log"
+grep -Fq 'missing executable /etc/init.d/proxypool-activate' "$TEST_TMP/missing_activate_init.log"
+grep -Fq 'missing executable /usr/lib/proxypool/proxypool-backend-activate' "$TEST_TMP/missing_backend_activator.log"
+grep -Fq 'missing /usr/lib/proxypool/proxypool-v2-default' "$TEST_TMP/missing_v2_default.log"
 grep -Fq 'missing executable /usr/lib/proxypool/legacy-gate.sh' "$TEST_TMP/missing_legacy_gate.log"
 grep -Fq 'missing executable /usr/lib/proxypool/proxypool-safety-uci-default' "$TEST_TMP/missing_template.log"
 grep -Fq 'unexpected mode for /usr/lib/proxypool/guard-resync.sh' "$TEST_TMP/wrong_mode.log"

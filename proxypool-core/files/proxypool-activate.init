@@ -1,0 +1,20 @@
+#!/bin/sh /etc/rc.common
+
+START=98
+STOP=11
+
+ACTIVATOR="${PROXYPOOL_BACKEND_ACTIVATOR:-/usr/lib/proxypool/proxypool-backend-activate}"
+
+start() {
+	"$ACTIVATOR"
+	result=$?
+	if [ "$result" -eq 0 ]; then
+		return 0
+	fi
+	echo 'ProxyPool V2 activation deferred; backend service will remain fail-closed' >&2
+	return "$result"
+}
+
+stop() {
+	return 0
+}

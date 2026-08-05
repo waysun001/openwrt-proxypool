@@ -14,7 +14,13 @@ PACKAGE_DEFAULT="$ROOT/proxypool-core/files/proxypool.config"
 IMAGE_OVERLAY_DEFAULT="$ROOT/files/etc/config/proxypool"
 IMAGE_OVERLAY_V2="$ROOT/files/etc/config/proxypool_v2"
 IMAGE_OVERLAY_SELECTOR="$ROOT/files/etc/config/proxypool_runtime"
+IMAGE_ACTIVATION_REQUEST="$ROOT/files/etc/proxypool/v2-activation-request"
+BACKEND_ACTIVATE_INIT="$ROOT/proxypool-core/files/proxypool-activate.init"
+MAIN_INIT="$ROOT/proxypool-core/files/proxypool.init"
+PACKAGED_V2_DEFAULT="$ROOT/proxypool-core/files/proxypool-v2-default"
 UPGRADE_KEEP="$ROOT/proxypool-core/files/proxypool.keep"
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 
 require_fixed() {
 	file=$1
@@ -55,7 +61,7 @@ workflow_jobs() {
 
 require_fixed "$MAKEFILE" 'PKG_BUILD_DEPENDS:=golang/host'
 require_fixed "$MAKEFILE" 'PKG_VERSION:=2.0.0'
-require_fixed "$MAKEFILE" 'PKG_RELEASE:=7'
+require_fixed "$MAKEFILE" 'PKG_RELEASE:=8'
 require_fixed "$MAKEFILE" 'GO_PKG:=proxypoold'
 require_fixed "$MAKEFILE" 'GO_PKG_BUILD_PKG:=$(GO_PKG)/cmd/proxypoold $(GO_PKG)/cmd/proxypoolctl'
 require_fixed "$MAKEFILE" 'GO_PKG_LDFLAGS_X:=$(GO_PKG)/internal/buildinfo.Version=$(PKG_VERSION)'
@@ -78,6 +84,7 @@ require_fixed "$MAKEFILE" 'define Package/proxypool-core/postinst'
 require_fixed "$MAKEFILE" '"$${IPKG_INSTROOT}/usr/lib/proxypool/proxypool-postinst"'
 for install_contract in \
 	'$(INSTALL_BIN) ./files/proxypool-guard.init $(1)/etc/init.d/proxypool-guard' \
+	'$(INSTALL_BIN) ./files/proxypool-activate.init $(1)/etc/init.d/proxypool-activate' \
 	'$(INSTALL_BIN) ./files/guard-resync.sh $(1)/usr/lib/proxypool/guard-resync.sh' \
 	'$(INSTALL_BIN) ./files/legacy-gate.sh $(1)/usr/lib/proxypool/legacy-gate.sh' \
 	'$(INSTALL_BIN) ./files/lan-isolation.sh $(1)/usr/lib/proxypool/lan-isolation.sh' \
@@ -91,7 +98,9 @@ for install_contract in \
 	'$(INSTALL_BIN) ./files/proxypool-fw4-check-staged $(1)/usr/lib/proxypool/proxypool-fw4-check-staged' \
 	'$(INSTALL_BIN) ./files/proxypool-postinst $(1)/usr/lib/proxypool/proxypool-postinst' \
 	'$(INSTALL_BIN) ./files/proxypool-migrate.sh $(1)/usr/lib/proxypool/proxypool-migrate.sh' \
+	'$(INSTALL_BIN) ./files/proxypool-backend-activate $(1)/usr/lib/proxypool/proxypool-backend-activate' \
 	'$(INSTALL_BIN) ./files/proxypool-safety-uci-default $(1)/usr/lib/proxypool/proxypool-safety-uci-default' \
+	'$(INSTALL_DATA) ./files/proxypool-v2-default $(1)/usr/lib/proxypool/proxypool-v2-default' \
 	'$(INSTALL_DATA) ./files/proxypool-guard.nft $(1)/usr/lib/proxypool/proxypool-guard.nft' \
 	'$(INSTALL_DATA) ./files/proxypool-fw4-input-gate.nft $(1)/usr/lib/proxypool/proxypool-fw4-input-gate.nft' \
 	'$(INSTALL_DATA) ./files/proxypool-fw4-forward-gate.nft $(1)/usr/lib/proxypool/proxypool-fw4-forward-gate.nft' \
@@ -122,7 +131,7 @@ if grep -Eq 'INSTALL_(CONF|DATA).*proxypool_(v2|runtime).*etc/config' "$MAKEFILE
 	exit 1
 fi
 [ -f "$UPGRADE_KEEP" ] || { echo 'missing sysupgrade keep list for overlay-only configs' >&2; exit 1; }
-expected_keep=$(printf '/etc/config/proxypool_v2\n/etc/config/proxypool_runtime\n/etc/proxypool/activated-backend\n/etc/proxypool/cleanup-required\n/etc/proxypool/firewall-transaction\n/etc/proxypool/wireless-quarantine\n/etc/proxypool/migration-v1.json\n/etc/proxypool/backups/\n')
+expected_keep=$(printf '/etc/config/proxypool_v2\n/etc/config/proxypool_runtime\n/etc/proxypool/activated-backend\n/etc/proxypool/cleanup-required\n/etc/proxypool/v2-activation-request\n/etc/proxypool/firewall-transaction\n/etc/proxypool/wireless-quarantine\n/etc/proxypool/migration-v1.json\n/etc/proxypool/backups/\n')
 [ "$(cat "$UPGRADE_KEEP")" = "$expected_keep" ] || { echo 'unexpected ProxyPool sysupgrade keep list' >&2; exit 1; }
 require_fixed "$IPK_INSPECTOR" '/etc/proxypool/wireless-quarantine'
 require_fixed "$IPK_INSPECTOR" '/etc/proxypool/migration-v1.json'
@@ -140,6 +149,7 @@ require_fixed "$HOST_RUNNER" 'test-legacy-quarantine.sh'
 require_fixed "$HOST_RUNNER" 'test-status-readonly.sh'
 require_fixed "$HOST_RUNNER" 'test-dns-fail-closed.sh'
 require_fixed "$HOST_RUNNER" 'test-backup-contract.sh'
+require_fixed "$HOST_RUNNER" 'test-backend-activation-integration.sh'
 require_fixed "$HOST_RUNNER" 'test-proxypool-guard.sh'
 require_fixed "$HOST_RUNNER" 'test-guardian-terminal-policy.sh'
 require_fixed "$HOST_RUNNER" 'test-firewall-defaults.sh'
@@ -284,9 +294,22 @@ done
 [ -f "$IMAGE_OVERLAY_DEFAULT" ] || { echo 'missing legacy rollback ImageBuilder default' >&2; exit 1; }
 [ -f "$IMAGE_OVERLAY_V2" ] || { echo 'missing strict V2 ImageBuilder default' >&2; exit 1; }
 [ -f "$IMAGE_OVERLAY_SELECTOR" ] || { echo 'missing ImageBuilder runtime selector' >&2; exit 1; }
+[ -f "$IMAGE_ACTIVATION_REQUEST" ] || { echo 'missing ImageBuilder V2 activation request' >&2; exit 1; }
+[ -f "$BACKEND_ACTIVATE_INIT" ] || { echo 'missing backend activation init script' >&2; exit 1; }
+[ -f "$MAIN_INIT" ] || { echo 'missing main init script' >&2; exit 1; }
+[ -f "$PACKAGED_V2_DEFAULT" ] || { echo 'missing packaged V2 migration target' >&2; exit 1; }
 cmp -s "$PACKAGE_DEFAULT" "$IMAGE_OVERLAY_DEFAULT" || { echo 'ImageBuilder legacy rollback config differs from the package V1 baseline' >&2; exit 1; }
 require_fixed "$IMAGE_OVERLAY_V2" "option runtime_backend 'v2_shadow'"
 require_fixed "$IMAGE_OVERLAY_SELECTOR" "option runtime_backend 'v1'"
+[ "$(cat "$IMAGE_ACTIVATION_REQUEST")" = image ] || { echo 'ImageBuilder V2 activation request is invalid' >&2; exit 1; }
+require_fixed "$BACKEND_ACTIVATE_INIT" 'START=98'
+require_fixed "$MAIN_INIT" 'START=99'
+sed '/^#/d' "$PACKAGED_V2_DEFAULT" >"$TMP/packaged-v2.normalized"
+sed '/^#/d' "$IMAGE_OVERLAY_V2" >"$TMP/image-v2.normalized"
+cmp -s "$TMP/packaged-v2.normalized" "$TMP/image-v2.normalized" || {
+	echo 'packaged and ImageBuilder V2 defaults differ semantically' >&2
+	exit 1
+}
 if grep -Fq "option runtime_backend 'v2_shadow'" "$IMAGE_OVERLAY_SELECTOR"; then
 	echo 'phase-1 ImageBuilder selector would silently switch a legacy V1 sysupgrade to V2' >&2
 	exit 1

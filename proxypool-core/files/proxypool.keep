@@ -2,6 +2,7 @@
 /etc/config/proxypool_runtime
 /etc/proxypool/activated-backend
 /etc/proxypool/cleanup-required
+/etc/proxypool/v2-activation-request
 /etc/proxypool/firewall-transaction
 /etc/proxypool/wireless-quarantine
 /etc/proxypool/migration-v1.json

@@ -47,6 +47,7 @@ make_probe "$IMAGE_ROOT/etc/init.d/proxypool-guard" image-guard 99
 : >"$TEST_TMP/events"
 IPKG_INSTROOT="$IMAGE_ROOT" PROXYPOOL_SYNC="$SYNC" sh "$POSTINST"
 IMAGE_SCHEDULED="$IMAGE_ROOT/etc/uci-defaults/99-proxypool-safety"
+IMAGE_ACTIVATION_REQUEST="$IMAGE_ROOT/etc/proxypool/v2-activation-request"
 [ -f "$IMAGE_SCHEDULED" ] && [ ! -L "$IMAGE_SCHEDULED" ] || {
 	echo 'root-prefix post-install did not schedule the cold wrapper' >&2
 	exit 1
@@ -57,6 +58,12 @@ cmp -s "$COLD_WRAPPER" "$IMAGE_SCHEDULED" || {
 }
 [ "$(stat -c '%a' "$IMAGE_SCHEDULED")" = 755 ] || {
 	echo 'root-prefix post-install used the wrong wrapper mode' >&2
+	exit 1
+}
+[ -f "$IMAGE_ACTIVATION_REQUEST" ] && [ ! -L "$IMAGE_ACTIVATION_REQUEST" ] &&
+	[ "$(cat "$IMAGE_ACTIVATION_REQUEST")" = image ] &&
+	[ "$(stat -c '%a' "$IMAGE_ACTIVATION_REQUEST")" = 600 ] || {
+	echo 'root-prefix post-install did not queue exact cold V2 activation' >&2
 	exit 1
 }
 [ ! -s "$TEST_TMP/events" ] || {
@@ -143,7 +150,8 @@ cmp -s "$TEST_TMP/expected-events" "$TEST_TMP/events" || {
 # A successful live conversion explicitly enables S18, runs in live mode, and
 # retires any queued reboot fallback.
 LIVE_DIR="$TEST_TMP/live"
-mkdir -p "$LIVE_DIR/uci-defaults"
+mkdir -p "$LIVE_DIR/uci-defaults" "$LIVE_DIR/state"
+printf '%s\n' '11111111-1111-4111-8111-111111111111' >"$LIVE_DIR/boot-id"
 printf '%s\n' \
 	'#!/usr/bin/env sh' \
 	'[ "$#" -eq 1 ] && [ "$1" = enable ] || exit 97' \
@@ -164,6 +172,8 @@ PROXYPOOL_GUARD_INIT="$LIVE_DIR/guard" \
 	PROXYPOOL_FIREWALL_DEFAULTS="$LIVE_DIR/defaults-ok" \
 	PROXYPOOL_COLD_WRAPPER_TEMPLATE="$COLD_WRAPPER" \
 	PROXYPOOL_UCI_DEFAULTS_DIR="$LIVE_DIR/uci-defaults" \
+	PROXYPOOL_STATE_DIR="$LIVE_DIR/state" \
+	PROXYPOOL_BOOT_ID_FILE="$LIVE_DIR/boot-id" \
 	PROXYPOOL_SYNC="$SYNC" \
 	sh "$POSTINST"
 printf '%s\n' 'lan-request' 'guard-enable:unset' 'defaults:0' >"$TEST_TMP/expected-events"
@@ -173,6 +183,10 @@ cmp -s "$TEST_TMP/expected-events" "$TEST_TMP/events" || {
 }
 [ ! -e "$LIVE_DIR/uci-defaults/99-proxypool-safety" ] || {
 	echo 'successful live post-install retained a stale cold wrapper' >&2
+	exit 1
+}
+[ "$(cat "$LIVE_DIR/state/v2-activation-request")" = 'boot:11111111-1111-4111-8111-111111111111' ] || {
+	echo 'live post-install did not bind V2 activation to the current boot' >&2
 	exit 1
 }
 
@@ -185,6 +199,8 @@ PROXYPOOL_LAN_ISOLATION="$LIVE_DIR/lan-isolation" \
 PROXYPOOL_FIREWALL_DEFAULTS="$LIVE_DIR/defaults-fail" \
 	PROXYPOOL_COLD_WRAPPER_TEMPLATE="$COLD_WRAPPER" \
 	PROXYPOOL_UCI_DEFAULTS_DIR="$LIVE_DIR/uci-defaults" \
+	PROXYPOOL_STATE_DIR="$LIVE_DIR/state" \
+	PROXYPOOL_BOOT_ID_FILE="$LIVE_DIR/boot-id" \
 	PROXYPOOL_SYNC="$SYNC" \
 	sh "$POSTINST" 2>"$TEST_TMP/live-deferred.err"
 grep -Fq 'reboot immediately' "$TEST_TMP/live-deferred.err" || {

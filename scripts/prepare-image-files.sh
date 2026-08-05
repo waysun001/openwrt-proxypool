@@ -25,6 +25,12 @@ for config_name in proxypool proxypool_v2 proxypool_runtime; do
 		exit 1
 	}
 done
+source_activation_request="$source_dir/etc/proxypool/v2-activation-request"
+[ -f "$source_activation_request" ] && [ ! -L "$source_activation_request" ] &&
+	[ "$(cat "$source_activation_request")" = image ] || {
+	printf 'source V2 activation request is missing or invalid: %s\n' "$source_activation_request" >&2
+	exit 1
+}
 
 mkdir -p "$destination_dir"
 cp -a "$source_dir/." "$destination_dir/"
@@ -37,3 +43,16 @@ for config_name in proxypool proxypool_v2 proxypool_runtime; do
 	}
 	chmod 600 "$config_file"
 done
+
+state_dir="$destination_dir/etc/proxypool"
+activation_request="$state_dir/v2-activation-request"
+[ -d "$state_dir" ] && [ ! -L "$state_dir" ] || {
+	printf 'staged ProxyPool state directory is missing or unsafe: %s\n' "$state_dir" >&2
+	exit 1
+}
+[ -f "$activation_request" ] && [ ! -L "$activation_request" ] || {
+	printf 'staged V2 activation request is missing or unsafe: %s\n' "$activation_request" >&2
+	exit 1
+}
+chmod 700 "$state_dir"
+chmod 600 "$activation_request"

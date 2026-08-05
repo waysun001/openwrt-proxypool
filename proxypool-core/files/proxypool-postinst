@@ -46,6 +46,51 @@ require_executable() {
 		fail "$description is missing or unsafe: $path"
 }
 
+read_exact_line() {
+	path=$1
+	line=
+	bytes=
+	[ -f "$path" ] && [ ! -L "$path" ] && [ -r "$path" ] || return 1
+	bytes=$(wc -c <"$path" 2>/dev/null) || return 1
+	IFS= read -r line <"$path" || return 1
+	[ "$bytes" -eq $((${#line} + 1)) ] || return 1
+	printf '%s' "$line"
+}
+
+schedule_backend_activation() {
+	state_dir=$1
+	request_value=$2
+	require_absolute_nonroot "$state_dir" 'backend state directory'
+	if [ -e "$state_dir" ] || [ -L "$state_dir" ]; then
+		[ -d "$state_dir" ] && [ ! -L "$state_dir" ] ||
+			fail "backend state directory is unsafe: $state_dir"
+	else
+		mkdir -m 700 "$state_dir" || fail 'cannot create backend state directory'
+	fi
+	chmod 700 "$state_dir" || fail 'cannot protect backend state directory'
+	destination="$state_dir/v2-activation-request"
+	if [ -e "$destination" ] || [ -L "$destination" ]; then
+		existing=$(read_exact_line "$destination") || fail 'existing backend activation request is unsafe'
+		case "$existing" in
+			image) : ;;
+			boot:*)
+				printf '%s\n' "${existing#boot:}" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' ||
+					fail 'existing backend activation request is invalid'
+				;;
+			*) fail 'existing backend activation request is invalid' ;;
+		esac
+	fi
+	TEMPORARY="$destination.tmp.$$"
+	[ ! -e "$TEMPORARY" ] && [ ! -L "$TEMPORARY" ] ||
+		fail "temporary backend activation request already exists: $TEMPORARY"
+	printf '%s\n' "$request_value" >"$TEMPORARY" || fail 'cannot stage backend activation request'
+	chmod 600 "$TEMPORARY" || fail 'cannot protect backend activation request'
+	"$SYNC" || fail 'cannot sync backend activation request'
+	mv -f "$TEMPORARY" "$destination" || fail 'cannot publish backend activation request'
+	TEMPORARY=
+	"$SYNC" || fail 'cannot sync published backend activation request'
+}
+
 schedule_cold_wrapper() {
 	require_absolute_nonroot "$COLD_TEMPLATE" 'cold-wrapper template'
 	require_absolute_nonroot "$UCI_DEFAULTS_DIR" 'uci-defaults directory'
@@ -92,6 +137,7 @@ if [ -n "$INSTALL_ROOT" ]; then
 	root_prefix=${INSTALL_ROOT%/}
 	COLD_TEMPLATE="$root_prefix/usr/lib/proxypool/proxypool-safety-uci-default"
 	UCI_DEFAULTS_DIR="$root_prefix/etc/uci-defaults"
+	schedule_backend_activation "$root_prefix/etc/proxypool" image
 	schedule_cold_wrapper
 	exit 0
 fi
@@ -101,14 +147,21 @@ LAN_ISOLATION="${PROXYPOOL_LAN_ISOLATION:-/usr/lib/proxypool/lan-isolation.sh}"
 FIREWALL_DEFAULTS="${PROXYPOOL_FIREWALL_DEFAULTS:-/usr/lib/proxypool/proxypool-firewall-defaults}"
 COLD_TEMPLATE="${PROXYPOOL_COLD_WRAPPER_TEMPLATE:-/usr/lib/proxypool/proxypool-safety-uci-default}"
 UCI_DEFAULTS_DIR="${PROXYPOOL_UCI_DEFAULTS_DIR:-/etc/uci-defaults}"
+STATE_DIR="${PROXYPOOL_STATE_DIR:-/etc/proxypool}"
+BOOT_ID_FILE="${PROXYPOOL_BOOT_ID_FILE:-/proc/sys/kernel/random/boot_id}"
 
 require_executable "$GUARD_INIT" 'guardian init script'
 require_executable "$LAN_ISOLATION" 'LAN isolation helper'
+require_absolute_nonroot "$BOOT_ID_FILE" 'boot ID file'
+boot_id=$(read_exact_line "$BOOT_ID_FILE") || fail 'boot ID is missing or unsafe'
+printf '%s\n' "$boot_id" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' ||
+	fail 'boot ID is malformed'
 # Publish the fail-closed evidence before any target action which can fail.
 # OpenWrt 23.05 default_postinst continues on to `start` packaged init scripts
 # after this helper; proxypool.init independently requires the runtime-bound
 # activation marker, while this wrapper guarantees a cold retry is queued.
 schedule_cold_wrapper
+schedule_backend_activation "$STATE_DIR" "boot:$boot_id"
 # Publish durable L2 work before enabling or invoking any packaged service.
 # default_postinst subsequently starts the guardian's singleton worker; if it
 # never reaches that step, the pending marker survives for S18 on reboot.

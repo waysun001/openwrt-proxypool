@@ -1,0 +1,289 @@
+#!/bin/sh
+set -eu
+
+umask 077
+
+CTL="${PROXYPOOL_CTL:-/usr/bin/proxypoolctl}"
+MIGRATE="${PROXYPOOL_MIGRATE:-/usr/lib/proxypool/proxypool-migrate.sh}"
+FLOCK="${PROXYPOOL_FLOCK:-flock}"
+SYNC="${PROXYPOOL_SYNC:-sync}"
+ID="${PROXYPOOL_ID:-id}"
+LEGACY_CONFIG="${PROXYPOOL_LEGACY_CONFIG:-/etc/config/proxypool}"
+V2_CONFIG="${PROXYPOOL_V2_CONFIG:-/etc/config/proxypool_v2}"
+DEFAULT_V2="${PROXYPOOL_DEFAULT_V2:-/usr/lib/proxypool/proxypool-v2-default}"
+SELECTOR_FILE="${PROXYPOOL_SELECTOR_FILE:-/etc/config/proxypool_runtime}"
+STATE_DIR="${PROXYPOOL_STATE_DIR:-/etc/proxypool}"
+ACTIVATED_BACKEND="${PROXYPOOL_ACTIVATED_BACKEND:-$STATE_DIR/activated-backend}"
+CLEANUP_REQUIRED="${PROXYPOOL_CLEANUP_REQUIRED:-$STATE_DIR/cleanup-required}"
+ACTIVATION_REQUEST="${PROXYPOOL_ACTIVATION_REQUEST:-$STATE_DIR/v2-activation-request}"
+RUNTIME_MARKER="${PROXYPOOL_RUNTIME_MARKER:-/var/run/proxypool.backend}"
+QUARANTINE_MARKER="${PROXYPOOL_QUARANTINE_MARKER:-/var/run/proxypool.backend.cleanup-required}"
+TRANSITION_MARKER="${PROXYPOOL_TRANSITION_MARKER:-/var/run/proxypool.transition}"
+ACTIVE_SNAPSHOT_MARKER="${PROXYPOOL_ACTIVE_SNAPSHOT_MARKER:-/var/run/proxypool.config-snapshot}"
+LEGACY_RUN_DIR="${PROXYPOOL_LEGACY_RUN_DIR:-/var/run/proxypool}"
+SOCKET="${PROXYPOOL_SOCKET:-/var/run/proxypoold.sock}"
+BOOT_ID_FILE="${PROXYPOOL_BOOT_ID_FILE:-/proc/sys/kernel/random/boot_id}"
+ACTIVATION_LOCK="${PROXYPOOL_ACTIVATION_LOCK:-/var/lock/proxypool-backend-activation.lock}"
+TEMPORARY=
+
+fail() {
+	echo "ProxyPool backend activation: $*" >&2
+	exit 1
+}
+
+cleanup() {
+	if [ -n "$TEMPORARY" ] && { [ -e "$TEMPORARY" ] || [ -L "$TEMPORARY" ]; }; then
+		rm -f "$TEMPORARY" >/dev/null 2>&1 || true
+	fi
+}
+
+terminate() {
+	status=$1
+	trap - EXIT HUP INT TERM
+	cleanup
+	exit "$status"
+}
+
+trap cleanup EXIT
+trap 'terminate 129' HUP
+trap 'terminate 130' INT
+trap 'terminate 143' TERM
+
+require_absolute_nonroot() {
+	path=$1
+	description=$2
+	case "$path" in
+		/*) : ;;
+		*) fail "$description must be an absolute path" ;;
+	esac
+	[ "$path" != / ] || fail "$description must not be the filesystem root"
+}
+
+require_regular() {
+	path=$1
+	description=$2
+	[ -f "$path" ] && [ ! -L "$path" ] && [ -r "$path" ] ||
+		fail "$description is missing or unsafe: $path"
+}
+
+read_exact_line() {
+	path=$1
+	line=
+	bytes=
+	[ -f "$path" ] && [ ! -L "$path" ] && [ -r "$path" ] || return 1
+	bytes=$(wc -c <"$path" 2>/dev/null) || return 1
+	IFS= read -r line <"$path" || return 1
+	[ "$bytes" -eq $((${#line} + 1)) ] || return 1
+	printf '%s' "$line"
+}
+
+read_backend_marker() {
+	path=$1
+	if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+		return 0
+	fi
+	value=$(read_exact_line "$path") || fail "backend marker is unsafe: $path"
+	case "$value" in
+		v1|v2_shadow) printf '%s' "$value" ;;
+		*) fail "backend marker is invalid: $path" ;;
+	esac
+}
+
+capture_ctl() {
+	wanted=$1
+	shift
+	output=$(
+		"$CTL" "$@"
+		result=$?
+		[ "$result" -eq 0 ] || exit "$result"
+		printf '%s' ':proxypool-activation-end'
+	) || return 1
+	[ "$output" = "$wanted
+:proxypool-activation-end" ]
+}
+
+write_line_atomically() {
+	destination=$1
+	value=$2
+	if [ -e "$destination" ] || [ -L "$destination" ]; then
+		[ -f "$destination" ] && [ ! -L "$destination" ] || return 1
+	fi
+	TEMPORARY="$destination.tmp.$$"
+	[ ! -e "$TEMPORARY" ] && [ ! -L "$TEMPORARY" ] || return 1
+	printf '%s\n' "$value" >"$TEMPORARY" || return 1
+	chmod 600 "$TEMPORARY" || return 1
+	"$SYNC" || return 1
+	mv -f "$TEMPORARY" "$destination" || return 1
+	TEMPORARY=
+	"$SYNC"
+}
+
+write_selector_atomically() {
+	destination=$1
+	if [ -e "$destination" ] || [ -L "$destination" ]; then
+		[ -f "$destination" ] && [ ! -L "$destination" ] || return 1
+	fi
+	TEMPORARY="$destination.tmp.$$"
+	[ ! -e "$TEMPORARY" ] && [ ! -L "$TEMPORARY" ] || return 1
+	printf '%s\n' \
+		"config global 'global'" \
+		"\toption runtime_backend 'v2_shadow'" >"$TEMPORARY" || return 1
+	chmod 600 "$TEMPORARY" || return 1
+	"$SYNC" || return 1
+	mv -f "$TEMPORARY" "$destination" || return 1
+	TEMPORARY=
+	"$SYNC"
+}
+
+ensure_v2_target() {
+	if [ -e "$V2_CONFIG" ] || [ -L "$V2_CONFIG" ]; then
+		require_regular "$V2_CONFIG" 'V2 configuration'
+		return 0
+	fi
+	require_regular "$DEFAULT_V2" 'packaged V2 default'
+	TEMPORARY="$V2_CONFIG.tmp.$$"
+	[ ! -e "$TEMPORARY" ] && [ ! -L "$TEMPORARY" ] || return 1
+	cp "$DEFAULT_V2" "$TEMPORARY" || return 1
+	chmod 600 "$TEMPORARY" || return 1
+	"$SYNC" || return 1
+	mv -f "$TEMPORARY" "$V2_CONFIG" || return 1
+	TEMPORARY=
+	"$SYNC"
+}
+
+[ "$#" -eq 0 ] || fail 'expected no arguments'
+[ "$("$ID" -u)" -eq 0 ] || fail 'must run as root'
+
+for path_description in \
+	"$LEGACY_CONFIG:legacy configuration" \
+	"$V2_CONFIG:V2 configuration" \
+	"$DEFAULT_V2:packaged V2 default" \
+	"$SELECTOR_FILE:runtime selector" \
+	"$STATE_DIR:persistent state directory" \
+	"$ACTIVATED_BACKEND:activated backend marker" \
+	"$CLEANUP_REQUIRED:cleanup marker" \
+	"$ACTIVATION_REQUEST:activation request" \
+	"$RUNTIME_MARKER:runtime marker" \
+	"$QUARANTINE_MARKER:quarantine marker" \
+	"$TRANSITION_MARKER:transition marker" \
+	"$ACTIVE_SNAPSHOT_MARKER:active snapshot marker" \
+	"$LEGACY_RUN_DIR:legacy runtime directory" \
+	"$SOCKET:daemon socket" \
+	"$BOOT_ID_FILE:boot ID file" \
+	"$ACTIVATION_LOCK:activation lock"; do
+	path=${path_description%%:*}
+	description=${path_description#*:}
+	require_absolute_nonroot "$path" "$description"
+done
+
+[ "${ACTIVATED_BACKEND%/*}" = "$STATE_DIR" ] || fail 'activated marker must be inside the state directory'
+[ "${CLEANUP_REQUIRED%/*}" = "$STATE_DIR" ] || fail 'cleanup marker must be inside the state directory'
+[ "${ACTIVATION_REQUEST%/*}" = "$STATE_DIR" ] || fail 'activation request must be inside the state directory'
+require_regular "$CTL" 'control tool'
+[ -x "$CTL" ] || fail "control tool is not executable: $CTL"
+require_regular "$MIGRATE" 'migration helper'
+[ -x "$MIGRATE" ] || fail "migration helper is not executable: $MIGRATE"
+command -v "$FLOCK" >/dev/null 2>&1 || fail "flock is unavailable: $FLOCK"
+command -v "$SYNC" >/dev/null 2>&1 || fail "sync is unavailable: $SYNC"
+
+if [ -e "$STATE_DIR" ] || [ -L "$STATE_DIR" ]; then
+	[ -d "$STATE_DIR" ] && [ ! -L "$STATE_DIR" ] || fail 'persistent state directory is unsafe'
+else
+	mkdir -m 700 "$STATE_DIR" || fail 'cannot create persistent state directory'
+fi
+chmod 700 "$STATE_DIR" || fail 'cannot protect persistent state directory'
+
+lock_parent=${ACTIVATION_LOCK%/*}
+[ -d "$lock_parent" ] && [ ! -L "$lock_parent" ] || fail 'activation lock directory is unsafe'
+[ ! -L "$ACTIVATION_LOCK" ] || fail 'activation lock is unsafe'
+exec 9>"$ACTIVATION_LOCK" || fail 'cannot open activation lock'
+"$FLOCK" -x 9 || fail 'cannot acquire activation lock'
+
+selector=missing
+if [ -e "$SELECTOR_FILE" ] || [ -L "$SELECTOR_FILE" ]; then
+	require_regular "$SELECTOR_FILE" 'runtime selector'
+	if capture_ctl v1 select-backend --config "$SELECTOR_FILE"; then
+		selector=v1
+	elif capture_ctl v2_shadow select-backend --config "$SELECTOR_FILE"; then
+		selector=v2_shadow
+	else
+		fail 'runtime selector is invalid'
+	fi
+fi
+activated=$(read_backend_marker "$ACTIVATED_BACKEND")
+cleanup_required=$(read_backend_marker "$CLEANUP_REQUIRED")
+
+# A committed V2 installation is already safe.  This early no-op deliberately
+# permits procd to be running; package upgrades must not tear down a healthy V2
+# service merely because they queue the same one-time activation request.
+if [ "$selector" = v2_shadow ] && [ "$activated" = v2_shadow ] && [ -z "$cleanup_required" ]; then
+	require_regular "$V2_CONFIG" 'committed V2 configuration'
+	capture_ctl v2_shadow classify --config "$V2_CONFIG" || fail 'committed V2 configuration is invalid'
+	if [ -e "$ACTIVATION_REQUEST" ] || [ -L "$ACTIVATION_REQUEST" ]; then
+		request=$(read_exact_line "$ACTIVATION_REQUEST") || fail 'activation request is unsafe'
+		case "$request" in
+			image) : ;;
+			boot:*)
+				printf '%s\n' "${request#boot:}" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' ||
+					fail 'activation request is invalid'
+				;;
+			*) fail 'activation request is invalid' ;;
+		esac
+		rm -f "$ACTIVATION_REQUEST" || fail 'cannot retire completed activation request'
+		"$SYNC" || fail 'cannot sync completed activation request retirement'
+	fi
+	exit 0
+fi
+
+request=$(read_exact_line "$ACTIVATION_REQUEST") || fail 'a safe V2 activation request is required'
+require_regular "$BOOT_ID_FILE" 'boot ID file'
+current_boot=$(read_exact_line "$BOOT_ID_FILE") || fail 'boot ID is invalid'
+printf '%s\n' "$current_boot" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' ||
+	fail 'boot ID is malformed'
+case "$request" in
+	image) : ;;
+	boot:*)
+		requested_boot=${request#boot:}
+		printf '%s\n' "$requested_boot" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' ||
+			fail 'activation request boot ID is malformed'
+		[ "$requested_boot" != "$current_boot" ] || fail 'reboot_required: activation cannot run in the package-install boot'
+		;;
+	*) fail 'activation request is invalid' ;;
+esac
+
+case "$selector:$activated:$cleanup_required" in
+	missing::|v1::|missing:v1:|v1:v1:|missing:v1:v1|v1:v1:v1|missing:v2_shadow:|v1:v2_shadow:)
+		: ;;
+	*) fail 'selector and persistent backend ownership are inconsistent' ;;
+esac
+
+for boot_evidence in "$RUNTIME_MARKER" "$QUARANTINE_MARKER" "$TRANSITION_MARKER" "$ACTIVE_SNAPSHOT_MARKER" "$LEGACY_RUN_DIR" "$SOCKET"; do
+	[ ! -e "$boot_evidence" ] && [ ! -L "$boot_evidence" ] ||
+		fail "boot-local runtime evidence blocks activation: $boot_evidence"
+done
+capture_ctl absent procd-state --service proxypool || fail 'procd service state is not proven absent'
+require_regular "$LEGACY_CONFIG" 'legacy configuration'
+ensure_v2_target || fail 'cannot establish the V2 target'
+
+PROXYPOOL_LEGACY_CONFIG="$LEGACY_CONFIG"
+PROXYPOOL_V2_CONFIG="$V2_CONFIG"
+PROXYPOOL_STATE_DIR="$STATE_DIR"
+PROXYPOOL_SOCKET="$SOCKET"
+export PROXYPOOL_LEGACY_CONFIG PROXYPOOL_V2_CONFIG PROXYPOOL_STATE_DIR PROXYPOOL_SOCKET
+"$MIGRATE" >/dev/null || fail 'V1 configuration migration failed'
+capture_ctl v2_shadow classify --config "$V2_CONFIG" || fail 'migrated V2 configuration is invalid'
+
+if [ "$cleanup_required" = v1 ]; then
+	rm -f "$CLEANUP_REQUIRED" || fail 'cannot retire stopped V1 cleanup evidence'
+	"$SYNC" || fail 'cannot sync V1 cleanup evidence retirement'
+fi
+if [ "$activated" != v2_shadow ]; then
+	write_line_atomically "$ACTIVATED_BACKEND" v2_shadow || fail 'cannot publish V2 backend ownership'
+fi
+write_selector_atomically "$SELECTOR_FILE" || fail 'cannot publish V2 runtime selector'
+capture_ctl v2_shadow select-backend --config "$SELECTOR_FILE" || fail 'published V2 runtime selector is invalid'
+rm -f "$ACTIVATION_REQUEST" || fail 'cannot retire completed activation request'
+"$SYNC" || fail 'cannot sync completed activation request retirement'
+
+echo 'ProxyPool backend activation: V2 migration committed'
+exit 0

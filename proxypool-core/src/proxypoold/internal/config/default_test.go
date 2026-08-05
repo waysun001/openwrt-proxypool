@@ -25,7 +25,7 @@ func TestPackagedDefaultRemainsTheExactLegacyV1UpgradeBaseline(t *testing.T) {
 	}
 }
 
-func TestImageBuilderDefaultSelectsV1AndRetainsStrictEmptyV2Shadow(t *testing.T) {
+func TestImageBuilderDefaultQueuesColdV2ActivationFromStrictV1Baseline(t *testing.T) {
 	overlayRoot := filepath.Join("..", "..", "..", "..", "..", "files", "etc", "config")
 	legacyContents, err := os.ReadFile(filepath.Join(overlayRoot, "proxypool"))
 	if err != nil {
@@ -37,6 +37,14 @@ func TestImageBuilderDefaultSelectsV1AndRetainsStrictEmptyV2Shadow(t *testing.T)
 	selector := InspectRuntimeSelectorFile(filepath.Join(overlayRoot, "proxypool_runtime"))
 	if selector != RuntimeSelectionV1 {
 		t.Fatalf("ImageBuilder selector=%q", selector)
+	}
+	activationRequestPath := filepath.Join("..", "..", "..", "..", "..", "files", "etc", "proxypool", "v2-activation-request")
+	activationRequest, err := os.ReadFile(activationRequestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(activationRequest) != "image\n" {
+		t.Fatalf("ImageBuilder V2 activation request=%q", activationRequest)
 	}
 	contents, err := os.ReadFile(filepath.Join(overlayRoot, "proxypool_v2"))
 	if err != nil {

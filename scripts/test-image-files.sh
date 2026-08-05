@@ -8,10 +8,11 @@ trap 'rm -rf "$TEST_TMP"' EXIT HUP INT TERM
 SOURCE="$TEST_TMP/source"
 DESTINATION="$TEST_TMP/staged"
 
-mkdir -p "$SOURCE/etc/config" "$SOURCE/etc/uci-defaults"
+mkdir -p "$SOURCE/etc/config" "$SOURCE/etc/uci-defaults" "$SOURCE/etc/proxypool"
 printf '%s\n' "config global 'global'" >"$SOURCE/etc/config/proxypool"
 printf '%s\n' "config global 'global'" >"$SOURCE/etc/config/proxypool_v2"
 printf '%s\n' "config global 'global'" >"$SOURCE/etc/config/proxypool_runtime"
+printf '%s\n' image >"$SOURCE/etc/proxypool/v2-activation-request"
 printf '%s\n' '#!/bin/sh' 'exit 0' >"$SOURCE/etc/uci-defaults/keep"
 chmod 644 "$SOURCE/etc/config/proxypool"
 chmod 644 "$SOURCE/etc/config/proxypool_v2"
@@ -23,6 +24,7 @@ sh "$PREPARE" "$SOURCE" "$DESTINATION"
 cmp -s "$SOURCE/etc/config/proxypool" "$DESTINATION/etc/config/proxypool"
 cmp -s "$SOURCE/etc/config/proxypool_v2" "$DESTINATION/etc/config/proxypool_v2"
 cmp -s "$SOURCE/etc/config/proxypool_runtime" "$DESTINATION/etc/config/proxypool_runtime"
+cmp -s "$SOURCE/etc/proxypool/v2-activation-request" "$DESTINATION/etc/proxypool/v2-activation-request"
 cmp -s "$SOURCE/etc/uci-defaults/keep" "$DESTINATION/etc/uci-defaults/keep"
 [ "$(stat -c '%a' "$SOURCE/etc/config/proxypool")" = 644 ]
 [ "$(stat -c '%a' "$SOURCE/etc/config/proxypool_v2")" = 644 ]
@@ -33,6 +35,8 @@ case "$(uname -s)" in
 		for config_name in proxypool proxypool_v2 proxypool_runtime; do
 			[ "$(stat -c '%a' "$DESTINATION/etc/config/$config_name")" = 600 ]
 		done
+		[ "$(stat -c '%a' "$DESTINATION/etc/proxypool")" = 700 ]
+		[ "$(stat -c '%a' "$DESTINATION/etc/proxypool/v2-activation-request")" = 600 ]
 		;;
 	*) echo 'SKIP: staged config mode assertion requires a POSIX filesystem' ;;
 esac
@@ -51,6 +55,19 @@ for required_config in proxypool proxypool_v2 proxypool_runtime; do
 		exit 1
 	}
 done
+
+missing_request_source="$TEST_TMP/missing-request"
+missing_request_destination="$TEST_TMP/staged-missing-request"
+cp -a "$SOURCE" "$missing_request_source"
+rm "$missing_request_source/etc/proxypool/v2-activation-request"
+if sh "$PREPARE" "$missing_request_source" "$missing_request_destination" >/dev/null 2>&1; then
+	echo 'staging accepted a missing V2 activation request' >&2
+	exit 1
+fi
+[ ! -e "$missing_request_destination" ] || {
+	echo 'failed activation-request staging left a partial destination' >&2
+	exit 1
+}
 
 # Model a settings-preserving sysupgrade from a legacy-only V1 image. The old
 # backup has no selector, so the new ROM default remains visible after restore
@@ -86,6 +103,10 @@ cp -a "$ROM/." "$UPGRADED_V2/"
 cp -a "$V2_KEEP_BACKUP/." "$UPGRADED_V2/"
 grep -Fq "option runtime_backend 'v2_shadow'" "$UPGRADED_V2/etc/config/proxypool_runtime" || {
 	echo 'preserved V2 selector did not override the ROM default' >&2
+	exit 1
+}
+[ "$(cat "$UPGRADED_V1/etc/proxypool/v2-activation-request")" = image ] || {
+	echo 'legacy V1 sysupgrade did not retain the explicit cold V2 activation request' >&2
 	exit 1
 }
 [ "$(cat "$UPGRADED_V2/etc/proxypool/activated-backend")" = v2_shadow ] || {

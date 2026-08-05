@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=proxypool-core
 PKG_VERSION:=2.0.0
-PKG_RELEASE:=7
+PKG_RELEASE:=8
 
 PKG_MAINTAINER:=ProxyPool maintainers
 PKG_LICENSE:=MIT
@@ -61,6 +61,7 @@ define Package/proxypool-core/install
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/proxypool.init $(1)/etc/init.d/proxypool
 	$(INSTALL_BIN) ./files/proxypool-guard.init $(1)/etc/init.d/proxypool-guard
+	$(INSTALL_BIN) ./files/proxypool-activate.init $(1)/etc/init.d/proxypool-activate
 
 	$(INSTALL_DIR) $(1)/etc/hotplug.d/net $(1)/etc/hotplug.d/iface
 	$(INSTALL_BIN) ./files/proxypool-lan-isolation.hotplug $(1)/etc/hotplug.d/net/99-proxypool-lan-isolation
@@ -97,7 +98,9 @@ define Package/proxypool-core/install
 	$(INSTALL_BIN) ./files/proxypool-fw4-check-staged $(1)/usr/lib/proxypool/proxypool-fw4-check-staged
 	$(INSTALL_BIN) ./files/proxypool-postinst $(1)/usr/lib/proxypool/proxypool-postinst
 	$(INSTALL_BIN) ./files/proxypool-migrate.sh $(1)/usr/lib/proxypool/proxypool-migrate.sh
+	$(INSTALL_BIN) ./files/proxypool-backend-activate $(1)/usr/lib/proxypool/proxypool-backend-activate
 	$(INSTALL_BIN) ./files/proxypool-safety-uci-default $(1)/usr/lib/proxypool/proxypool-safety-uci-default
+	$(INSTALL_DATA) ./files/proxypool-v2-default $(1)/usr/lib/proxypool/proxypool-v2-default
 	$(INSTALL_DATA) ./files/proxypool-guard.nft $(1)/usr/lib/proxypool/proxypool-guard.nft
 	$(INSTALL_DATA) ./files/proxypool-fw4-input-gate.nft $(1)/usr/lib/proxypool/proxypool-fw4-input-gate.nft
 	$(INSTALL_DATA) ./files/proxypool-fw4-forward-gate.nft $(1)/usr/lib/proxypool/proxypool-fw4-forward-gate.nft

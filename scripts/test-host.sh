@@ -43,8 +43,10 @@ for shell_file in \
 	proxypool-core/files/proxypool-fw4-activate \
 	proxypool-core/files/proxypool-fw4-check-staged \
 	proxypool-core/files/proxypool-guard.init \
+	proxypool-core/files/proxypool-activate.init \
 	proxypool-core/files/proxypool.init \
 	proxypool-core/files/proxypool-postinst \
+	proxypool-core/files/proxypool-backend-activate \
 	proxypool-core/files/proxypool-migrate.sh \
 	proxypool-core/files/proxypool-safety-uci-default \
 	proxypool-core/files/status.sh \
@@ -56,6 +58,7 @@ for shell_file in \
 	scripts/regenerate-sha256sums.sh \
 	scripts/test-artifact-sha256sums.sh \
 	scripts/test-backup-contract.sh \
+	scripts/test-backend-activation-integration.sh \
 	scripts/test-dns-fail-closed.sh \
 	scripts/test-firewall-defaults.sh \
 	scripts/test-fw4-activate.sh \
@@ -84,6 +87,7 @@ for shell_file in \
 done
 sh scripts/test-artifact-sha256sums.sh
 sh scripts/test-backup-contract.sh
+sh scripts/test-backend-activation-integration.sh
 sh scripts/test-dns-fail-closed.sh
 sh scripts/test-firewall-defaults.sh
 sh scripts/test-fw4-activate.sh
