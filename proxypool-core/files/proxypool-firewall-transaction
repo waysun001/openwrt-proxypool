@@ -741,7 +741,8 @@ verify_runtime_chain_order() {
 			}
 			is_dns_gate = require_dnat == 1 &&
 				index(normalized, "iifname \"br-lan\"") &&
-				index(normalized, "meta nfproto ipv4") &&
+				# An ip daddr expression already constrains this rule to IPv4;
+				# nftables 1.0.8 removes the redundant meta nfproto token.
 				index(normalized, "ip daddr 192.168.9.1") &&
 				index(normalized, "meta l4proto { tcp, udp }") &&
 				index(normalized, "th dport 53") &&
@@ -824,16 +825,16 @@ verify_guard_inet_runtime() {
 			# symbolic form even when the source used a numeric priority.
 			expected["guard_prerouting",1]="type filter hook prerouting priority raw - 10; policy accept;"
 			expected["guard_prerouting",2]="iifname \"br-lan\" meta mark set meta mark & 0xff000000"
-			expected["guard_prerouting",3]="iifname \"br-lan\" meta nfproto ipv4 meta mark set ether saddr . ip saddr map @v2_policy_marks"
+			expected["guard_prerouting",3]="iifname \"br-lan\" meta mark set ether saddr . ip saddr map @v2_policy_marks"
 			maximum["guard_prerouting"]=3
 
 			expected["guard_input",1]="type filter hook input priority filter + 10; policy drop;"
 			expected["guard_input",2]="iifname \"br-lan\" meta nfproto ipv4 udp sport 68 udp dport 67 accept"
-			expected["guard_input",3]="iifname \"br-lan\" meta nfproto ipv4 ip daddr 192.168.9.1 tcp dport { 80, 443 } accept"
-			expected["guard_input",4]="iifname \"br-lan\" meta nfproto ipv4 ip daddr 192.168.9.1 ether saddr . ip saddr @v2_dns_clients meta l4proto { tcp, udp } th dport 53 accept"
+			expected["guard_input",3]="iifname \"br-lan\" ip daddr 192.168.9.1 tcp dport { 80, 443 } accept"
+			expected["guard_input",4]="iifname \"br-lan\" ip daddr 192.168.9.1 ether saddr . ip saddr @v2_dns_clients meta l4proto { tcp, udp } th dport 53 accept"
 			expected["guard_input",5]="iifname \"br-lan\" meta nfproto ipv4 ct original ip daddr @blocked_v4_destinations drop"
-			expected["guard_input",6]="iifname \"br-lan\" meta nfproto ipv4 meta mark & 0x00ff0000 == 0x005a0000 meta l4proto tcp ct status dnat ip saddr . tcp dport @v1_tcp_redirects accept"
-			expected["guard_input",7]="iifname \"br-lan\" meta nfproto ipv4 meta mark & 0x00ff0000 == 0x005a0000 meta l4proto tcp ct status dnat ether saddr . ip saddr . tcp dport @v2_tcp_redirects accept"
+			expected["guard_input",6]="iifname \"br-lan\" meta mark & 0x00ff0000 == 0x005a0000 ct status dnat ip saddr . tcp dport @v1_tcp_redirects accept"
+			expected["guard_input",7]="iifname \"br-lan\" meta mark & 0x00ff0000 == 0x005a0000 ct status dnat ether saddr . ip saddr . tcp dport @v2_tcp_redirects accept"
 			expected["guard_input",8]="iifname \"br-lan\" drop"
 			expected["guard_input",9]="iifname \"lo\" accept"
 			expected["guard_input",10]="ct state established,related accept"
@@ -843,15 +844,15 @@ verify_guard_inet_runtime() {
 			expected["guard_forward",1]="type filter hook forward priority filter + 10; policy drop;"
 			expected["guard_forward",2]="iifname \"br-lan\" meta nfproto ipv6 drop"
 			expected["guard_forward",3]="iifname \"br-lan\" meta nfproto ipv4 meta l4proto udp drop"
-			expected["guard_forward",4]="iifname \"br-lan\" meta nfproto ipv4 ip daddr @blocked_v4_destinations drop"
-			expected["guard_forward",5]="iifname \"br-lan\" meta nfproto ipv4 meta mark & 0x00ff0000 == 0x005a0000 meta l4proto tcp ip saddr . oifname @v1_l2tp_paths accept"
-			expected["guard_forward",6]="iifname \"br-lan\" meta nfproto ipv4 meta mark & 0x00ff0000 == 0x005a0000 meta l4proto tcp ether saddr . ip saddr . oifname @v2_l2tp_paths accept"
+			expected["guard_forward",4]="iifname \"br-lan\" ip daddr @blocked_v4_destinations drop"
+			expected["guard_forward",5]="iifname \"br-lan\" meta mark & 0x00ff0000 == 0x005a0000 meta l4proto tcp ip saddr . oifname @v1_l2tp_paths accept"
+			expected["guard_forward",6]="iifname \"br-lan\" meta mark & 0x00ff0000 == 0x005a0000 meta l4proto tcp ether saddr . ip saddr . oifname @v2_l2tp_paths accept"
 			expected["guard_forward",7]="iifname \"br-lan\" drop"
 			expected["guard_forward",8]="oifname \"br-lan\" meta nfproto ipv6 drop"
 			expected["guard_forward",9]="oifname \"br-lan\" meta nfproto ipv4 meta l4proto udp drop"
-			expected["guard_forward",10]="oifname \"br-lan\" meta nfproto ipv4 ip saddr @blocked_v4_destinations drop"
-			expected["guard_forward",11]="oifname \"br-lan\" meta nfproto ipv4 ct state established ct direction reply meta l4proto tcp ip daddr . iifname @v1_l2tp_paths accept"
-			expected["guard_forward",12]="oifname \"br-lan\" meta nfproto ipv4 ct state established ct direction reply meta l4proto tcp ip daddr . iifname @v2_l2tp_return_paths accept"
+			expected["guard_forward",10]="oifname \"br-lan\" ip saddr @blocked_v4_destinations drop"
+			expected["guard_forward",11]="oifname \"br-lan\" ct state established ct direction reply meta l4proto tcp ip daddr . iifname @v1_l2tp_paths accept"
+			expected["guard_forward",12]="oifname \"br-lan\" ct state established ct direction reply meta l4proto tcp ip daddr . iifname @v2_l2tp_return_paths accept"
 			expected["guard_forward",13]="oifname \"br-lan\" drop"
 			maximum["guard_forward"]=13
 		}
@@ -873,7 +874,9 @@ verify_guard_inet_runtime() {
 				if (line == "}") {
 					if (set_type_count != 1) reject()
 					if (set_name in expiring) {
-						if (timeout_flags != 1 || timeout_default != 1) reject()
+						# nftables 1.0.8 omits the implicit "flags timeout"
+						# from runtime dumps while retaining the timeout value.
+						if (timeout_flags > 1 || timeout_default != 1) reject()
 					}
 					if (set_name == "blocked_v4_destinations") {
 						if (blocked_flags != 1 || blocked_merge != 1 || blocked_elements != 1 ||

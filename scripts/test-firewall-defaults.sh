@@ -1399,27 +1399,26 @@ RUNTIME_GUARD_PREFIX
 	}
 	set v2_l2tp_paths {
 		type ether_addr . ipv4_addr . ifname
-		flags timeout
-		timeout 20s
+RUNTIME_GUARD_BODY
+		if [ "${PROXYPOOL_TEST_RUNTIME_FAULT:-}" != missing_timeout ]; then
+			printf '\t\ttimeout 20s\n'
+		fi
+		cat <<'RUNTIME_GUARD_BODY'
 	}
 	set v2_l2tp_return_paths {
 		type ipv4_addr . ifname
-		flags timeout
 		timeout 20s
 	}
 	set v2_tcp_redirects {
 		type ether_addr . ipv4_addr . inet_service
-		flags timeout
 		timeout 20s
 	}
 	set v2_dns_clients {
 		type ether_addr . ipv4_addr
-		flags timeout
 		timeout 20s
 	}
 	map v2_policy_marks {
 		type ether_addr . ipv4_addr : mark
-		flags timeout
 		timeout 20s
 	}
 	set blocked_v4_destinations {
@@ -1439,21 +1438,21 @@ RUNTIME_GUARD_PREFIX
 			198.18.0.0/15,
 			198.51.100.0/24,
 			203.0.113.0/24,
-			224.0.0.0-255.255.255.255 }
+			224.0.0.0/3 }
 	}
 	chain guard_prerouting {
 		type filter hook prerouting priority raw - 10; policy accept;
 		iifname "br-lan" meta mark set meta mark & 0xff000000
-		iifname "br-lan" meta nfproto ipv4 meta mark set ether saddr . ip saddr map @v2_policy_marks
+		iifname "br-lan" meta mark set ether saddr . ip saddr map @v2_policy_marks
 	}
 	chain guard_input {
 		type filter hook input priority filter + 10; policy drop;
 		iifname "br-lan" meta nfproto ipv4 udp sport 68 udp dport 67 accept
-		iifname "br-lan" meta nfproto ipv4 ip daddr 192.168.9.1 tcp dport { 80, 443 } accept
-		iifname "br-lan" meta nfproto ipv4 ip daddr 192.168.9.1 ether saddr . ip saddr @v2_dns_clients meta l4proto { tcp, udp } th dport 53 accept
+		iifname "br-lan" ip daddr 192.168.9.1 tcp dport { 80, 443 } accept
+		iifname "br-lan" ip daddr 192.168.9.1 ether saddr . ip saddr @v2_dns_clients meta l4proto { tcp, udp } th dport 53 accept
 		iifname "br-lan" meta nfproto ipv4 ct original ip daddr @blocked_v4_destinations drop
-		iifname "br-lan" meta nfproto ipv4 meta mark & 0x00ff0000 == 0x005a0000 meta l4proto tcp ct status dnat ip saddr . tcp dport @v1_tcp_redirects accept
-		iifname "br-lan" meta nfproto ipv4 meta mark & 0x00ff0000 == 0x005a0000 meta l4proto tcp ct status dnat ether saddr . ip saddr . tcp dport @v2_tcp_redirects accept
+		iifname "br-lan" meta mark & 0x00ff0000 == 0x005a0000 ct status dnat ip saddr . tcp dport @v1_tcp_redirects accept
+		iifname "br-lan" meta mark & 0x00ff0000 == 0x005a0000 ct status dnat ether saddr . ip saddr . tcp dport @v2_tcp_redirects accept
 		iifname "br-lan" drop
 		iifname "lo" accept
 		ct state established,related accept
@@ -1467,15 +1466,15 @@ RUNTIME_GUARD_BODY
 		fi
 		cat <<'RUNTIME_GUARD_SUFFIX'
 		iifname "br-lan" meta nfproto ipv4 meta l4proto udp drop
-		iifname "br-lan" meta nfproto ipv4 ip daddr @blocked_v4_destinations drop
-		iifname "br-lan" meta nfproto ipv4 meta mark & 0x00ff0000 == 0x005a0000 meta l4proto tcp ip saddr . oifname @v1_l2tp_paths accept
-		iifname "br-lan" meta nfproto ipv4 meta mark & 0x00ff0000 == 0x005a0000 meta l4proto tcp ether saddr . ip saddr . oifname @v2_l2tp_paths accept
+		iifname "br-lan" ip daddr @blocked_v4_destinations drop
+		iifname "br-lan" meta mark & 0x00ff0000 == 0x005a0000 meta l4proto tcp ip saddr . oifname @v1_l2tp_paths accept
+		iifname "br-lan" meta mark & 0x00ff0000 == 0x005a0000 meta l4proto tcp ether saddr . ip saddr . oifname @v2_l2tp_paths accept
 		iifname "br-lan" drop
 		oifname "br-lan" meta nfproto ipv6 drop
 		oifname "br-lan" meta nfproto ipv4 meta l4proto udp drop
-		oifname "br-lan" meta nfproto ipv4 ip saddr @blocked_v4_destinations drop
-		oifname "br-lan" meta nfproto ipv4 ct state established ct direction reply meta l4proto tcp ip daddr . iifname @v1_l2tp_paths accept
-		oifname "br-lan" meta nfproto ipv4 ct state established ct direction reply meta l4proto tcp ip daddr . iifname @v2_l2tp_return_paths accept
+		oifname "br-lan" ip saddr @blocked_v4_destinations drop
+		oifname "br-lan" ct state established ct direction reply meta l4proto tcp ip daddr . iifname @v1_l2tp_paths accept
+		oifname "br-lan" ct state established ct direction reply meta l4proto tcp ip daddr . iifname @v2_l2tp_return_paths accept
 		oifname "br-lan" drop
 RUNTIME_GUARD_SUFFIX
 		if [ "${PROXYPOOL_TEST_RUNTIME_FAULT:-}" = extra_accept ]; then
@@ -1500,13 +1499,13 @@ table inet fw4 {
 	chain input {
 		type filter hook input priority filter; policy drop;
 		iifname "br-lan" meta nfproto ipv4 meta mark & 0x00ff0000 == 0x005a0000 meta l4proto tcp ct status dnat accept
-		iifname "br-lan" meta nfproto ipv4 ip daddr 192.168.9.1 meta l4proto { tcp, udp } th dport 53 accept
-		ct state vmap { established : accept, related : accept }
+		iifname "br-lan" ip daddr 192.168.9.1 meta l4proto { tcp, udp } th dport 53 accept
+		ct state established,related accept
 	}
 	chain forward {
 		type filter hook forward priority filter; policy drop;
 		iifname "br-lan" meta nfproto ipv4 meta mark & 0x00ff0000 == 0x005a0000 meta l4proto tcp accept
-		ct state vmap { established : accept, related : accept }
+		ct state established,related accept
 	}
 }
 RUNTIME_FW4
@@ -2772,7 +2771,7 @@ FOCUSED_NETWORK
 		exit 0
 	fi
 
-	runtime_faults=${PROXYPOOL_TEST_RUNTIME_CASE:-"missing_rule nonempty_set missing_bridge extra_accept"}
+	runtime_faults=${PROXYPOOL_TEST_RUNTIME_CASE:-"missing_rule missing_timeout nonempty_set missing_bridge extra_accept"}
 	for runtime_fault in $runtime_faults; do
 		if activation_runtime_current_for_fixture "$config_dir" 1 "$runtime_fault" >/dev/null 2>&1; then
 			fail "focused runtime gate accepted $runtime_fault"
