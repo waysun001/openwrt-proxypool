@@ -89,7 +89,7 @@ make_ipk() {
 	esac
 
 	cp "$ROOT/proxypool-core/files/proxypool.config" "$data/etc/config/proxypool"
-	printf '/etc/config/proxypool_v2\n/etc/config/proxypool_runtime\n/etc/proxypool/activated-backend\n/etc/proxypool/cleanup-required\n/etc/proxypool/v2-activation-request\n/etc/proxypool/firewall-transaction\n/etc/proxypool/wireless-quarantine\n/etc/proxypool/migration-v1.json\n/etc/proxypool/backups/\n' \
+	printf '/etc/config/proxypool_v2\n/etc/proxypool/migration-v1.json\n/etc/proxypool/backups/\n' \
 		>"$data/lib/upgrade/keep.d/proxypool"
 	case "$fixture_kind" in
 		payload_v2) printf "config global 'global'\n" >"$data/etc/config/proxypool_v2" ;;
@@ -130,7 +130,7 @@ make_ipk() {
 			printf '%s\n' '#!/bin/sh' 'exit 0' >"$data/etc/uci-defaults/99-proxypool-safety"
 			;;
 		bad_keep)
-			printf '/etc/config/proxypool_v2\n/etc/config/proxypool_runtime\n/etc/proxypool/activated-backend\n/etc/proxypool/cleanup-required\n' \
+			printf '/etc/config/proxypool_v2\n/etc/config/proxypool_runtime\n/etc/proxypool/migration-v1.json\n/etc/proxypool/backups/\n' \
 				>"$data/lib/upgrade/keep.d/proxypool"
 			;;
 	esac

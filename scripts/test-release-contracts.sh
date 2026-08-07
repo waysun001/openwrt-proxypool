@@ -61,7 +61,7 @@ workflow_jobs() {
 
 require_fixed "$MAKEFILE" 'PKG_BUILD_DEPENDS:=golang/host'
 require_fixed "$MAKEFILE" 'PKG_VERSION:=2.0.0'
-require_fixed "$MAKEFILE" 'PKG_RELEASE:=9'
+require_fixed "$MAKEFILE" 'PKG_RELEASE:=10'
 require_fixed "$MAKEFILE" 'GO_PKG:=proxypoold'
 require_fixed "$MAKEFILE" 'GO_PKG_BUILD_PKG:=$(GO_PKG)/cmd/proxypoold $(GO_PKG)/cmd/proxypoolctl'
 require_fixed "$MAKEFILE" 'GO_PKG_LDFLAGS_X:=$(GO_PKG)/internal/buildinfo.Version=$(PKG_VERSION)'
@@ -131,9 +131,9 @@ if grep -Eq 'INSTALL_(CONF|DATA).*proxypool_(v2|runtime).*etc/config' "$MAKEFILE
 	exit 1
 fi
 [ -f "$UPGRADE_KEEP" ] || { echo 'missing sysupgrade keep list for overlay-only configs' >&2; exit 1; }
-expected_keep=$(printf '/etc/config/proxypool_v2\n/etc/config/proxypool_runtime\n/etc/proxypool/activated-backend\n/etc/proxypool/cleanup-required\n/etc/proxypool/v2-activation-request\n/etc/proxypool/firewall-transaction\n/etc/proxypool/wireless-quarantine\n/etc/proxypool/migration-v1.json\n/etc/proxypool/backups/\n')
+expected_keep=$(printf '/etc/config/proxypool_v2\n/etc/proxypool/migration-v1.json\n/etc/proxypool/backups/\n')
 [ "$(cat "$UPGRADE_KEEP")" = "$expected_keep" ] || { echo 'unexpected ProxyPool sysupgrade keep list' >&2; exit 1; }
-require_fixed "$IPK_INSPECTOR" '/etc/proxypool/wireless-quarantine'
+require_fixed "$IPK_INSPECTOR" 'for runtime_state in activated-backend cleanup-required firewall-transaction firewall-safety-activated wireless-quarantine; do'
 require_fixed "$IPK_INSPECTOR" '/etc/proxypool/migration-v1.json'
 require_fixed "$IPK_INSPECTOR" 'usr/lib/proxypool/proxypool-migrate.sh'
 require_fixed "$IPK_INSPECTOR" 'usr/lib/proxypool/ubus-call-stdin.uc'

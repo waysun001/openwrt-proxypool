@@ -100,7 +100,7 @@ fi
 
 keep="$inspect_tmp/data/lib/upgrade/keep.d/proxypool"
 expected_keep="$inspect_tmp/expected-keep"
-printf '/etc/config/proxypool_v2\n/etc/config/proxypool_runtime\n/etc/proxypool/activated-backend\n/etc/proxypool/cleanup-required\n/etc/proxypool/v2-activation-request\n/etc/proxypool/firewall-transaction\n/etc/proxypool/wireless-quarantine\n/etc/proxypool/migration-v1.json\n/etc/proxypool/backups/\n' >"$expected_keep"
+printf '/etc/config/proxypool_v2\n/etc/proxypool/migration-v1.json\n/etc/proxypool/backups/\n' >"$expected_keep"
 [ -f "$keep" ] && cmp -s "$expected_keep" "$keep" || { echo 'missing or invalid sysupgrade keep list' >&2; exit 1; }
 [ "$(stat -c '%a' "$keep")" = 644 ] || { echo 'unexpected mode for sysupgrade keep list' >&2; exit 1; }
 

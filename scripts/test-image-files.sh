@@ -92,26 +92,70 @@ fi
 grep -Fq "option schema_version '2'" "$UPGRADED_V1/etc/config/proxypool_v2"
 grep -Fq "option runtime_backend 'v2_shadow'" "$UPGRADED_V1/etc/config/proxypool_v2"
 
-# An existing V2 selector is an explicitly preserved sysupgrade file and must
-# override the safer phase-1 ROM default when restored from the keep archive.
+# New images preserve durable V2 user data, not generated selector, ownership,
+# cleanup, activation, firewall, or wireless transaction state.  Model the
+# keep.d selection itself so this fails if any transient path is reintroduced.
+V2_OVERLAY="$TEST_TMP/v2-overlay"
 V2_KEEP_BACKUP="$TEST_TMP/v2-keep-backup"
 UPGRADED_V2="$TEST_TMP/upgraded-v2"
-mkdir -p "$V2_KEEP_BACKUP/etc/config" "$V2_KEEP_BACKUP/etc/proxypool" "$UPGRADED_V2"
-printf "config global 'global'\n\toption runtime_backend 'v2_shadow'\n" >"$V2_KEEP_BACKUP/etc/config/proxypool_runtime"
-printf 'v2_shadow\n' >"$V2_KEEP_BACKUP/etc/proxypool/activated-backend"
+mkdir -p \
+	"$V2_OVERLAY/etc/config" \
+	"$V2_OVERLAY/etc/proxypool/backups" \
+	"$V2_KEEP_BACKUP" \
+	"$UPGRADED_V2"
+printf '%s\n' "config global 'global'" "\toption schema_version '2'" "\toption runtime_backend 'v2_shadow'" \
+	>"$V2_OVERLAY/etc/config/proxypool_v2"
+printf '%s\n' migrated >"$V2_OVERLAY/etc/proxypool/migration-v1.json"
+printf '%s\n' backup >"$V2_OVERLAY/etc/proxypool/backups/config.tar.gz"
+printf "config global 'global'\n\toption runtime_backend 'v2_shadow'\n" >"$V2_OVERLAY/etc/config/proxypool_runtime"
+printf '%s\n' v2_shadow >"$V2_OVERLAY/etc/proxypool/activated-backend"
+printf '%s\n' v2_shadow >"$V2_OVERLAY/etc/proxypool/cleanup-required"
+printf '%s\n' stale-image >"$V2_OVERLAY/etc/proxypool/v2-activation-request"
+printf '%s\n' transaction >"$V2_OVERLAY/etc/proxypool/firewall-transaction"
+printf '%s\n' quarantine >"$V2_OVERLAY/etc/proxypool/wireless-quarantine"
+
+while IFS= read -r keep_path; do
+	relative=${keep_path#/}
+	source_path="$V2_OVERLAY/$relative"
+	destination_path="$V2_KEEP_BACKUP/$relative"
+	if [ -d "$source_path" ]; then
+		mkdir -p "$destination_path"
+		cp -a "$source_path/." "$destination_path/"
+	elif [ -f "$source_path" ]; then
+		mkdir -p "${destination_path%/*}"
+		cp -a "$source_path" "$destination_path"
+	fi
+done <"$ROOT/proxypool-core/files/proxypool.keep"
+
 cp -a "$ROM/." "$UPGRADED_V2/"
 cp -a "$V2_KEEP_BACKUP/." "$UPGRADED_V2/"
-grep -Fq "option runtime_backend 'v2_shadow'" "$UPGRADED_V2/etc/config/proxypool_runtime" || {
-	echo 'preserved V2 selector did not override the ROM default' >&2
+cmp -s "$V2_OVERLAY/etc/config/proxypool_v2" "$UPGRADED_V2/etc/config/proxypool_v2" || {
+	echo 'V2 user configuration was not selected by the keep policy' >&2
+	exit 1
+}
+cmp -s "$V2_OVERLAY/etc/proxypool/migration-v1.json" "$UPGRADED_V2/etc/proxypool/migration-v1.json"
+cmp -s "$V2_OVERLAY/etc/proxypool/backups/config.tar.gz" "$UPGRADED_V2/etc/proxypool/backups/config.tar.gz"
+grep -Fq "option runtime_backend 'v1'" "$UPGRADED_V2/etc/config/proxypool_runtime" || {
+	echo 'generated V2 selector leaked through the new keep policy' >&2
 	exit 1
 }
 [ "$(cat "$UPGRADED_V1/etc/proxypool/v2-activation-request")" = image ] || {
 	echo 'legacy V1 sysupgrade did not retain the explicit cold V2 activation request' >&2
 	exit 1
 }
-[ "$(cat "$UPGRADED_V2/etc/proxypool/activated-backend")" = v2_shadow ] || {
-	echo 'preserved V2 selector lost its activated backend ownership' >&2
+[ "$(cat "$UPGRADED_V2/etc/proxypool/v2-activation-request")" = image ] || {
+	echo 'new ROM image request was overridden by transient overlay state' >&2
 	exit 1
 }
+for transient_path in \
+	activated-backend \
+	cleanup-required \
+	firewall-transaction \
+	wireless-quarantine; do
+	[ ! -e "$UPGRADED_V2/etc/proxypool/$transient_path" ] || {
+		echo "transient state leaked through the new keep policy: $transient_path" >&2
+		exit 1
+	}
+done
 
 echo 'ImageBuilder FILES staging: PASS'

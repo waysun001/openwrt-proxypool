@@ -144,6 +144,84 @@ assert_v2_committed() {
 		fail 'activation retained a completed request'
 }
 
+set_selector_class() {
+	class=$1
+	case "$class" in
+		missing)
+			rm -f "$CASE_ROOT/etc/config/proxypool_runtime"
+			;;
+		v1|v2_shadow)
+			printf '%s\n' \
+				"config global 'global'" \
+				"\toption runtime_backend '$class'" >"$CASE_ROOT/etc/config/proxypool_runtime"
+			;;
+		unknown)
+			printf '%s\n' \
+				"config global 'global'" \
+				"\toption enabled '1'" \
+				"\toption max_clients '60'" >"$CASE_ROOT/etc/config/proxypool_runtime"
+			;;
+		*) fail "invalid test selector class: $class" ;;
+	esac
+}
+
+set_backend_marker() {
+	path=$1
+	value=$2
+	case "$value" in
+		empty) rm -f "$path" ;;
+		v1|v2_shadow) printf '%s\n' "$value" >"$path" ;;
+		*) fail "invalid test backend marker: $value" ;;
+	esac
+}
+
+migration_count() {
+	count=$(grep -c '^migrate$' "$CASE_ROOT/migrate.log" 2>/dev/null) || count=0
+	printf '%s' "$count"
+}
+
+run_image_recovery_case() {
+	name=$1
+	selector_class=$2
+	owner=$3
+	cleanup=$4
+	expected_migrations=$5
+	reset_case "$name"
+	set_selector_class "$selector_class"
+	set_backend_marker "$CASE_ROOT/etc/proxypool/activated-backend" "$owner"
+	set_backend_marker "$CASE_ROOT/etc/proxypool/cleanup-required" "$cleanup"
+	printf '%s\n' image >"$CASE_ROOT/etc/proxypool/v2-activation-request"
+	run_activate || fail "$name did not converge"
+	assert_v2_committed
+	[ "$(migration_count)" -eq "$expected_migrations" ] ||
+		fail "$name used the wrong migration lineage"
+}
+
+assert_rejected_without_persistent_mutation() {
+	name=$1
+	snapshot="$CASE_ROOT/persistent-before"
+	cp -a "$CASE_ROOT/etc" "$snapshot"
+	if run_activate >/dev/null 2>&1; then
+		fail "$name unexpectedly converged"
+	fi
+	diff -r "$snapshot" "$CASE_ROOT/etc" >/dev/null ||
+		fail "$name changed persistent state before rejection"
+	[ "$(migration_count)" -eq 0 ] || fail "$name ran migration before rejection"
+}
+
+run_rejected_tuple() {
+	name=$1
+	selector_class=$2
+	owner=$3
+	cleanup=$4
+	reset_case "$name"
+	set_selector_class "$selector_class"
+	set_backend_marker "$CASE_ROOT/etc/proxypool/activated-backend" "$owner"
+	set_backend_marker "$CASE_ROOT/etc/proxypool/cleanup-required" "$cleanup"
+	printf '%s\n' image >"$CASE_ROOT/etc/proxypool/v2-activation-request"
+	assert_rejected_without_persistent_mutation "$name"
+}
+
 # A sysupgrade keep archive can contain a pre-selector V1 file at the selector
 # path.  The image request and the absence of backend ownership make this a
 # cold legacy migration, provided the real legacy configuration still proves
@@ -171,18 +249,60 @@ fi
 [ ! -s "$CASE_ROOT/migrate.log" ] ||
 	fail 'invalid selector package request ran migration'
 
-reset_case preserved-invalid-owned
+# The release-10 field regression: an older image can preserve both a
+# pre-selector V1 compatibility file and the exact V1 ownership reservation.
+# A cold image boot with no runtime/procd evidence must reclaim that stopped V1
+# ownership and migrate once instead of remaining permanently fail-closed.
+reset_case preserved-invalid-v1-owned
 printf '%s\n' \
 	"config global 'global'" \
 	"\toption enabled '1'" \
 	"\toption max_clients '60'" >"$CASE_ROOT/etc/config/proxypool_runtime"
 printf '%s\n' image >"$CASE_ROOT/etc/proxypool/v2-activation-request"
 printf '%s\n' v1 >"$CASE_ROOT/etc/proxypool/activated-backend"
-if run_activate >/dev/null 2>&1; then
-	fail 'owned backend recovered an invalid preserved selector'
-fi
-[ ! -s "$CASE_ROOT/migrate.log" ] ||
-	fail 'invalid owned selector ran migration'
+run_activate || fail 'cold image did not recover a preserved V1 owner with an invalid selector'
+assert_v2_committed
+[ "$(grep -c '^migrate$' "$CASE_ROOT/migrate.log")" -eq 1 ] ||
+	fail 'preserved invalid V1 owner recovery did not migrate exactly once'
+
+# Complete safe cold-image matrix.  V1 lineage always migrates exactly once;
+# a proven V2 owner repairs control state without ever re-running V1 migration.
+run_image_recovery_case image-missing-unowned missing empty empty 1
+run_image_recovery_case image-v1-unowned v1 empty empty 1
+run_image_recovery_case image-v1-owned v1 v1 empty 1
+run_image_recovery_case image-v1-owned-wal v1 v1 v1 1
+run_image_recovery_case image-unknown-v1-wal unknown v1 v1 1
+run_image_recovery_case image-missing-v2-owned missing v2_shadow empty 0
+run_image_recovery_case image-v1-v2-owned v1 v2_shadow empty 0
+run_image_recovery_case image-unknown-v2-owned unknown v2_shadow empty 0
+run_image_recovery_case image-v2-v2-owned v2_shadow v2_shadow empty 0
+run_image_recovery_case image-missing-v2-wal missing v2_shadow v2_shadow 0
+run_image_recovery_case image-v1-v2-wal v1 v2_shadow v2_shadow 0
+run_image_recovery_case image-unknown-v2-wal unknown v2_shadow v2_shadow 0
+run_image_recovery_case image-v2-v2-wal v2_shadow v2_shadow v2_shadow 0
+
+# Every cross-lineage or ownerless WAL tuple is terminal and must leave all
+# persistent input byte-for-byte unchanged.
+run_rejected_tuple reject-unknown-ownerless-v1-wal unknown empty v1
+run_rejected_tuple reject-unknown-ownerless-v2-wal unknown empty v2_shadow
+run_rejected_tuple reject-v1-owner-v2-wal unknown v1 v2_shadow
+run_rejected_tuple reject-v2-owner-v1-wal unknown v2_shadow v1
+run_rejected_tuple reject-v2-selector-unowned v2_shadow empty empty
+run_rejected_tuple reject-v2-selector-v1-owner v2_shadow v1 empty
+
+reset_case reject-invalid-v1-lineage-config
+set_selector_class unknown
+printf '%s\n' "config global 'global'" "\toption enabled '0'" >"$CASE_ROOT/etc/config/proxypool"
+printf '%s\n' v1 >"$CASE_ROOT/etc/proxypool/activated-backend"
+printf '%s\n' image >"$CASE_ROOT/etc/proxypool/v2-activation-request"
+assert_rejected_without_persistent_mutation reject-invalid-v1-lineage-config
+
+reset_case reject-invalid-v2-lineage-config
+set_selector_class unknown
+printf '%s\n' "config global 'global'" "\toption schema_version '1'" >"$CASE_ROOT/etc/config/proxypool_v2"
+printf '%s\n' v2_shadow >"$CASE_ROOT/etc/proxypool/activated-backend"
+printf '%s\n' image >"$CASE_ROOT/etc/proxypool/v2-activation-request"
+assert_rejected_without_persistent_mutation reject-invalid-v2-lineage-config
 
 # The field failure: release 7 selected V1, and a quarantined attempt could
 # leave exact V1 ownership/WAL evidence.  A different boot ID proves that all
@@ -233,10 +353,26 @@ fi
 reset_case procd-evidence
 printf '%s\n' image >"$CASE_ROOT/etc/proxypool/v2-activation-request"
 printf '%s\n' present >"$CASE_ROOT/procd-state"
-if run_activate >/dev/null 2>&1; then
-	fail 'activation ignored a procd-owned service'
-fi
-[ ! -s "$CASE_ROOT/migrate.log" ] || fail 'procd-evidence refusal ran migration'
+assert_rejected_without_persistent_mutation procd-evidence
+
+reset_case procd-unknown
+printf '%s\n' image >"$CASE_ROOT/etc/proxypool/v2-activation-request"
+printf '%s\n' unknown >"$CASE_ROOT/procd-state"
+assert_rejected_without_persistent_mutation procd-unknown
+
+for evidence_name in runtime quarantine transition snapshot socket; do
+	reset_case "boot-evidence-$evidence_name"
+	printf '%s\n' image >"$CASE_ROOT/etc/proxypool/v2-activation-request"
+	case "$evidence_name" in
+		runtime) evidence_path="$CASE_ROOT/run/proxypool.backend" ;;
+		quarantine) evidence_path="$CASE_ROOT/run/proxypool.backend.cleanup-required" ;;
+		transition) evidence_path="$CASE_ROOT/run/proxypool.transition" ;;
+		snapshot) evidence_path="$CASE_ROOT/run/proxypool.config-snapshot" ;;
+		socket) evidence_path="$CASE_ROOT/run/proxypoold.sock" ;;
+	esac
+	printf '%s\n' evidence >"$evidence_path"
+	assert_rejected_without_persistent_mutation "boot-evidence-$evidence_name"
+done
 
 # If power is lost after V2 ownership is durable but before the selector is
 # replaced, the preserved request makes that exact intermediate state

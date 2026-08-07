@@ -202,9 +202,9 @@ exec 9>"$ACTIVATION_LOCK" || fail 'cannot open activation lock'
 selector=missing
 if [ -e "$SELECTOR_FILE" ] || [ -L "$SELECTOR_FILE" ]; then
 	require_regular "$SELECTOR_FILE" 'runtime selector'
-	if capture_ctl v1 select-backend --config "$SELECTOR_FILE"; then
+	if capture_ctl v1 select-backend --config "$SELECTOR_FILE" 2>/dev/null; then
 		selector=v1
-	elif capture_ctl v2_shadow select-backend --config "$SELECTOR_FILE"; then
+	elif capture_ctl v2_shadow select-backend --config "$SELECTOR_FILE" 2>/dev/null; then
 		selector=v2_shadow
 	else
 		selector=unknown
@@ -241,23 +241,17 @@ current_boot=$(read_exact_line "$BOOT_ID_FILE") || fail 'boot ID is invalid'
 printf '%s\n' "$current_boot" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' ||
 	fail 'boot ID is malformed'
 case "$request" in
-	image) : ;;
+	image)
+		request_class=image
+		;;
 	boot:*)
 		requested_boot=${request#boot:}
 		printf '%s\n' "$requested_boot" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' ||
 			fail 'activation request boot ID is malformed'
 		[ "$requested_boot" != "$current_boot" ] || fail 'reboot_required: activation cannot run in the package-install boot'
+		request_class=package
 		;;
 	*) fail 'activation request is invalid' ;;
-esac
-
-case "$selector:$activated:$cleanup_required" in
-	missing::|v1::|missing:v1:|v1:v1:|missing:v1:v1|v1:v1:v1|missing:v2_shadow:|v1:v2_shadow:)
-		: ;;
-	unknown::)
-		[ "$request" = image ] || fail 'invalid runtime selector recovery requires a cold image request'
-		;;
-	*) fail 'selector and persistent backend ownership are inconsistent' ;;
 esac
 
 for boot_evidence in "$RUNTIME_MARKER" "$QUARANTINE_MARKER" "$TRANSITION_MARKER" "$ACTIVE_SNAPSHOT_MARKER" "$LEGACY_RUN_DIR" "$SOCKET"; do
@@ -265,33 +259,69 @@ for boot_evidence in "$RUNTIME_MARKER" "$QUARANTINE_MARKER" "$TRANSITION_MARKER"
 		fail "boot-local runtime evidence blocks activation: $boot_evidence"
 done
 capture_ctl absent procd-state --service proxypool || fail 'procd service state is not proven absent'
-require_regular "$LEGACY_CONFIG" 'legacy configuration'
-if [ "$selector" = unknown ]; then
-	capture_ctl v1 classify --config "$LEGACY_CONFIG" ||
-		fail 'invalid runtime selector has no proven legacy V1 configuration'
-	selector=v1
-fi
-ensure_v2_target || fail 'cannot establish the V2 target'
 
-PROXYPOOL_LEGACY_CONFIG="$LEGACY_CONFIG"
-PROXYPOOL_V2_CONFIG="$V2_CONFIG"
-PROXYPOOL_STATE_DIR="$STATE_DIR"
-PROXYPOOL_SOCKET="$SOCKET"
-export PROXYPOOL_LEGACY_CONFIG PROXYPOOL_V2_CONFIG PROXYPOOL_STATE_DIR PROXYPOOL_SOCKET
-"$MIGRATE" >/dev/null || fail 'V1 configuration migration failed'
-capture_ctl v2_shadow classify --config "$V2_CONFIG" || fail 'migrated V2 configuration is invalid'
+lineage=
+case "$request_class:$selector:$activated:$cleanup_required" in
+	image:missing::|image:v1::|image:unknown::|\
+	image:missing:v1:|image:v1:v1:|image:unknown:v1:|\
+	image:missing:v1:v1|image:v1:v1:v1|image:unknown:v1:v1)
+		lineage=v1_migrate
+		;;
+	image:missing:v2_shadow:|image:v1:v2_shadow:|\
+	image:v2_shadow:v2_shadow:|image:unknown:v2_shadow:|\
+	image:missing:v2_shadow:v2_shadow|image:v1:v2_shadow:v2_shadow|\
+	image:v2_shadow:v2_shadow:v2_shadow|image:unknown:v2_shadow:v2_shadow)
+		lineage=v2_repair
+		;;
+	package:missing::|package:v1::|package:missing:v1:|package:v1:v1:|\
+	package:missing:v1:v1|package:v1:v1:v1)
+		lineage=v1_migrate
+		;;
+	package:missing:v2_shadow:|package:v1:v2_shadow:)
+		lineage=v2_repair
+		;;
+	*)
+		fail "state is inconsistent (request=$request_class selector=$selector owner=${activated:-empty} cleanup=${cleanup_required:-empty})"
+		;;
+esac
 
-if [ "$cleanup_required" = v1 ]; then
-	rm -f "$CLEANUP_REQUIRED" || fail 'cannot retire stopped V1 cleanup evidence'
-	"$SYNC" || fail 'cannot sync V1 cleanup evidence retirement'
-fi
-if [ "$activated" != v2_shadow ]; then
-	write_line_atomically "$ACTIVATED_BACKEND" v2_shadow || fail 'cannot publish V2 backend ownership'
-fi
+case "$lineage" in
+	v1_migrate)
+		require_regular "$LEGACY_CONFIG" 'legacy configuration'
+		capture_ctl v1 classify --config "$LEGACY_CONFIG" ||
+			fail 'V1 lineage has no proven legacy V1 configuration'
+		ensure_v2_target || fail 'cannot establish the V2 target'
+		PROXYPOOL_LEGACY_CONFIG="$LEGACY_CONFIG"
+		PROXYPOOL_V2_CONFIG="$V2_CONFIG"
+		PROXYPOOL_STATE_DIR="$STATE_DIR"
+		PROXYPOOL_SOCKET="$SOCKET"
+		export PROXYPOOL_LEGACY_CONFIG PROXYPOOL_V2_CONFIG PROXYPOOL_STATE_DIR PROXYPOOL_SOCKET
+		"$MIGRATE" >/dev/null || fail 'V1 configuration migration failed'
+		capture_ctl v2_shadow classify --config "$V2_CONFIG" || fail 'migrated V2 configuration is invalid'
+		if [ "$cleanup_required" = v1 ]; then
+			rm -f "$CLEANUP_REQUIRED" || fail 'cannot retire stopped V1 cleanup evidence'
+			"$SYNC" || fail 'cannot sync V1 cleanup evidence retirement'
+		fi
+		if [ "$activated" != v2_shadow ]; then
+			write_line_atomically "$ACTIVATED_BACKEND" v2_shadow || fail 'cannot publish V2 backend ownership'
+		fi
+		;;
+	v2_repair)
+		require_regular "$V2_CONFIG" 'V2 configuration'
+		capture_ctl v2_shadow classify --config "$V2_CONFIG" ||
+			fail 'V2 lineage has no proven V2 configuration'
+		if [ "$cleanup_required" = v2_shadow ]; then
+			rm -f "$CLEANUP_REQUIRED" || fail 'cannot retire stopped V2 cleanup evidence'
+			"$SYNC" || fail 'cannot sync V2 cleanup evidence retirement'
+		fi
+		;;
+	*) fail 'internal lineage selection failure' ;;
+esac
+
 write_selector_atomically "$SELECTOR_FILE" || fail 'cannot publish V2 runtime selector'
 capture_ctl v2_shadow select-backend --config "$SELECTOR_FILE" || fail 'published V2 runtime selector is invalid'
 rm -f "$ACTIVATION_REQUEST" || fail 'cannot retire completed activation request'
 "$SYNC" || fail 'cannot sync completed activation request retirement'
 
-echo 'ProxyPool backend activation: V2 migration committed'
+echo "ProxyPool backend activation: V2 state committed ($lineage)"
 exit 0
