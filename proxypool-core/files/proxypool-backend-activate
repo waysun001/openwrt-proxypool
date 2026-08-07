@@ -127,7 +127,7 @@ write_selector_atomically() {
 	[ ! -e "$TEMPORARY" ] && [ ! -L "$TEMPORARY" ] || return 1
 	printf '%s\n' \
 		"config global 'global'" \
-		"\toption runtime_backend 'v2_shadow'" >"$TEMPORARY" || return 1
+		"	option runtime_backend 'v2_shadow'" >"$TEMPORARY" || return 1
 	chmod 600 "$TEMPORARY" || return 1
 	"$SYNC" || return 1
 	mv -f "$TEMPORARY" "$destination" || return 1

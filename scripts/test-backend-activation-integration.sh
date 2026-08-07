@@ -18,6 +18,16 @@ fail() {
 BIN="$TEST_TMP/bin"
 mkdir -p "$BIN"
 
+GO_BIN=${PROXYPOOL_TEST_GO:-}
+if [ -z "$GO_BIN" ]; then
+	GO_BIN=$(command -v go) || fail 'Go toolchain is required for the real selector parser gate'
+fi
+REAL_CTL="$BIN/proxypoolctl-real"
+(
+	cd "$ROOT/proxypool-core/src/proxypoold"
+	"$GO_BIN" build -o "$REAL_CTL" ./cmd/proxypoolctl
+)
+
 cat >"$BIN/flock" <<'EOF'
 #!/usr/bin/env sh
 [ "$#" -eq 2 ] && [ "$1" = -x ] && [ "$2" = 9 ]
@@ -37,30 +47,8 @@ EOF
 cat >"$BIN/proxypoolctl" <<'EOF'
 #!/usr/bin/env sh
 case "${1-}" in
-	select-backend)
-		[ "$#" -eq 3 ] && [ "$2" = --config ] || exit 2
-		if [ ! -e "$3" ]; then
-			printf '%s\n' missing
-		elif grep -Fq "runtime_backend 'v1'" "$3"; then
-			printf '%s\n' v1
-		elif grep -Fq "runtime_backend 'v2_shadow'" "$3"; then
-			printf '%s\n' v2_shadow
-		else
-			printf '%s\n' unknown
-			exit 1
-		fi
-		;;
-	classify)
-		[ "$#" -eq 3 ] && [ "$2" = --config ] || exit 2
-		if grep -Fq "schema_version '2'" "$3" && grep -Fq "runtime_backend 'v2_shadow'" "$3"; then
-			printf '%s\n' v2_shadow
-		elif grep -Fq "config global 'global'" "$3" && grep -Fq "option enabled '1'" "$3" &&
-			! grep -Fq "schema_version '2'" "$3"; then
-			printf '%s\n' v1
-		else
-			printf '%s\n' unknown
-			exit 1
-		fi
+	select-backend|classify)
+		exec "$PROXYPOOL_TEST_REAL_CTL" "$@"
 		;;
 	procd-state)
 		[ "$#" -eq 3 ] && [ "$2" = --service ] && [ "$3" = proxypool ] || exit 2
@@ -86,18 +74,11 @@ reset_case() {
 	CASE_ROOT="$TEST_TMP/$name"
 	rm -rf "$CASE_ROOT"
 	mkdir -p "$CASE_ROOT/etc/config" "$CASE_ROOT/etc/proxypool" "$CASE_ROOT/run" "$CASE_ROOT/lock"
+	cp "$ROOT/files/etc/config/proxypool" "$CASE_ROOT/etc/config/proxypool"
+	cp "$ROOT/files/etc/config/proxypool_v2" "$CASE_ROOT/etc/config/proxypool_v2"
 	printf '%s\n' \
 		"config global 'global'" \
-		"\toption enabled '1'" >"$CASE_ROOT/etc/config/proxypool"
-	printf '%s\n' \
-		"config global 'global'" \
-		"\toption schema_version '2'" \
-		"\toption revision '1'" \
-		"\toption enabled '1'" \
-		"\toption runtime_backend 'v2_shadow'" >"$CASE_ROOT/etc/config/proxypool_v2"
-	printf '%s\n' \
-		"config global 'global'" \
-		"\toption runtime_backend 'v1'" >"$CASE_ROOT/etc/config/proxypool_runtime"
+		"	option runtime_backend 'v1'" >"$CASE_ROOT/etc/config/proxypool_runtime"
 	printf '%s\n' '11111111-1111-4111-8111-111111111111' >"$CASE_ROOT/boot-id"
 	printf '%s\n' absent >"$CASE_ROOT/procd-state"
 	: >"$CASE_ROOT/migrate.log"
@@ -106,6 +87,7 @@ reset_case() {
 
 run_activate() {
 	PROXYPOOL_CTL="$BIN/proxypoolctl" \
+	PROXYPOOL_TEST_REAL_CTL="$REAL_CTL" \
 	PROXYPOOL_MIGRATE="$BIN/migrate" \
 	PROXYPOOL_FLOCK="$BIN/flock" \
 	PROXYPOOL_SYNC="$BIN/sync" \
@@ -133,7 +115,7 @@ run_activate() {
 assert_v2_committed() {
 	printf '%s\n' \
 		"config global 'global'" \
-		"\toption runtime_backend 'v2_shadow'" >"$CASE_ROOT/expected-selector"
+		"	option runtime_backend 'v2_shadow'" >"$CASE_ROOT/expected-selector"
 	cmp -s "$CASE_ROOT/expected-selector" "$CASE_ROOT/etc/config/proxypool_runtime" ||
 		fail 'activation did not publish the exact V2 selector'
 	[ "$(cat "$CASE_ROOT/etc/proxypool/activated-backend")" = v2_shadow ] ||
@@ -153,13 +135,13 @@ set_selector_class() {
 		v1|v2_shadow)
 			printf '%s\n' \
 				"config global 'global'" \
-				"\toption runtime_backend '$class'" >"$CASE_ROOT/etc/config/proxypool_runtime"
+				"	option runtime_backend '$class'" >"$CASE_ROOT/etc/config/proxypool_runtime"
 			;;
 		unknown)
 			printf '%s\n' \
 				"config global 'global'" \
-				"\toption enabled '1'" \
-				"\toption max_clients '60'" >"$CASE_ROOT/etc/config/proxypool_runtime"
+				"	option enabled '1'" \
+				"	option max_clients '60'" >"$CASE_ROOT/etc/config/proxypool_runtime"
 			;;
 		*) fail "invalid test selector class: $class" ;;
 	esac
@@ -229,8 +211,8 @@ run_rejected_tuple() {
 reset_case preserved-pre-selector-v1
 printf '%s\n' \
 	"config global 'global'" \
-	"\toption enabled '1'" \
-	"\toption max_clients '60'" >"$CASE_ROOT/etc/config/proxypool_runtime"
+	"	option enabled '1'" \
+	"	option max_clients '60'" >"$CASE_ROOT/etc/config/proxypool_runtime"
 printf '%s\n' image >"$CASE_ROOT/etc/proxypool/v2-activation-request"
 run_activate || fail 'cold image did not recover a preserved pre-selector V1 file'
 assert_v2_committed
@@ -240,8 +222,8 @@ assert_v2_committed
 reset_case preserved-invalid-package-request
 printf '%s\n' \
 	"config global 'global'" \
-	"\toption enabled '1'" \
-	"\toption max_clients '60'" >"$CASE_ROOT/etc/config/proxypool_runtime"
+	"	option enabled '1'" \
+	"	option max_clients '60'" >"$CASE_ROOT/etc/config/proxypool_runtime"
 printf '%s\n' 'boot:22222222-2222-4222-8222-222222222222' >"$CASE_ROOT/etc/proxypool/v2-activation-request"
 if run_activate >/dev/null 2>&1; then
 	fail 'package request recovered an invalid preserved selector'
@@ -256,8 +238,8 @@ fi
 reset_case preserved-invalid-v1-owned
 printf '%s\n' \
 	"config global 'global'" \
-	"\toption enabled '1'" \
-	"\toption max_clients '60'" >"$CASE_ROOT/etc/config/proxypool_runtime"
+	"	option enabled '1'" \
+	"	option max_clients '60'" >"$CASE_ROOT/etc/config/proxypool_runtime"
 printf '%s\n' image >"$CASE_ROOT/etc/proxypool/v2-activation-request"
 printf '%s\n' v1 >"$CASE_ROOT/etc/proxypool/activated-backend"
 run_activate || fail 'cold image did not recover a preserved V1 owner with an invalid selector'
@@ -292,14 +274,14 @@ run_rejected_tuple reject-v2-selector-v1-owner v2_shadow v1 empty
 
 reset_case reject-invalid-v1-lineage-config
 set_selector_class unknown
-printf '%s\n' "config global 'global'" "\toption enabled '0'" >"$CASE_ROOT/etc/config/proxypool"
+printf '%s\n' "config global 'global'" "	option enabled '0'" >"$CASE_ROOT/etc/config/proxypool"
 printf '%s\n' v1 >"$CASE_ROOT/etc/proxypool/activated-backend"
 printf '%s\n' image >"$CASE_ROOT/etc/proxypool/v2-activation-request"
 assert_rejected_without_persistent_mutation reject-invalid-v1-lineage-config
 
 reset_case reject-invalid-v2-lineage-config
 set_selector_class unknown
-printf '%s\n' "config global 'global'" "\toption schema_version '1'" >"$CASE_ROOT/etc/config/proxypool_v2"
+printf '%s\n' "config global 'global'" "	option schema_version '1'" >"$CASE_ROOT/etc/config/proxypool_v2"
 printf '%s\n' v2_shadow >"$CASE_ROOT/etc/proxypool/activated-backend"
 printf '%s\n' image >"$CASE_ROOT/etc/proxypool/v2-activation-request"
 assert_rejected_without_persistent_mutation reject-invalid-v2-lineage-config
@@ -388,7 +370,7 @@ printf '%s\n' image >"$CASE_ROOT/etc/proxypool/v2-activation-request"
 printf '%s\n' v1 >"$CASE_ROOT/etc/proxypool/activated-backend"
 printf '%s\n' \
 	"config global 'global'" \
-	"\toption runtime_backend 'v2_shadow'" >"$CASE_ROOT/etc/config/proxypool_runtime"
+	"	option runtime_backend 'v2_shadow'" >"$CASE_ROOT/etc/config/proxypool_runtime"
 if run_activate >/dev/null 2>&1; then
 	fail 'activation accepted an impossible selector/owner order'
 fi
@@ -398,7 +380,7 @@ reset_case malformed-completed-request
 printf '%s\n' v2_shadow >"$CASE_ROOT/etc/proxypool/activated-backend"
 printf '%s\n' \
 	"config global 'global'" \
-	"\toption runtime_backend 'v2_shadow'" >"$CASE_ROOT/etc/config/proxypool_runtime"
+	"	option runtime_backend 'v2_shadow'" >"$CASE_ROOT/etc/config/proxypool_runtime"
 printf '%s\n' 'boot:not-a-boot-id' >"$CASE_ROOT/etc/proxypool/v2-activation-request"
 if run_activate >/dev/null 2>&1; then
 	fail 'completed V2 activation discarded a malformed request'
