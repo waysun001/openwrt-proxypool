@@ -54,6 +54,9 @@ case "${1-}" in
 		[ "$#" -eq 3 ] && [ "$2" = --config ] || exit 2
 		if grep -Fq "schema_version '2'" "$3" && grep -Fq "runtime_backend 'v2_shadow'" "$3"; then
 			printf '%s\n' v2_shadow
+		elif grep -Fq "config global 'global'" "$3" && grep -Fq "option enabled '1'" "$3" &&
+			! grep -Fq "schema_version '2'" "$3"; then
+			printf '%s\n' v1
 		else
 			printf '%s\n' unknown
 			exit 1
@@ -140,6 +143,46 @@ assert_v2_committed() {
 	[ ! -e "$CASE_ROOT/etc/proxypool/v2-activation-request" ] ||
 		fail 'activation retained a completed request'
 }
+
+# A sysupgrade keep archive can contain a pre-selector V1 file at the selector
+# path.  The image request and the absence of backend ownership make this a
+# cold legacy migration, provided the real legacy configuration still proves
+# V1.  The stale compatibility file is control data, not user configuration.
+reset_case preserved-pre-selector-v1
+printf '%s\n' \
+	"config global 'global'" \
+	"\toption enabled '1'" \
+	"\toption max_clients '60'" >"$CASE_ROOT/etc/config/proxypool_runtime"
+printf '%s\n' image >"$CASE_ROOT/etc/proxypool/v2-activation-request"
+run_activate || fail 'cold image did not recover a preserved pre-selector V1 file'
+assert_v2_committed
+[ "$(grep -c '^migrate$' "$CASE_ROOT/migrate.log")" -eq 1 ] ||
+	fail 'preserved pre-selector V1 recovery did not migrate exactly once'
+
+reset_case preserved-invalid-package-request
+printf '%s\n' \
+	"config global 'global'" \
+	"\toption enabled '1'" \
+	"\toption max_clients '60'" >"$CASE_ROOT/etc/config/proxypool_runtime"
+printf '%s\n' 'boot:22222222-2222-4222-8222-222222222222' >"$CASE_ROOT/etc/proxypool/v2-activation-request"
+if run_activate >/dev/null 2>&1; then
+	fail 'package request recovered an invalid preserved selector'
+fi
+[ ! -s "$CASE_ROOT/migrate.log" ] ||
+	fail 'invalid selector package request ran migration'
+
+reset_case preserved-invalid-owned
+printf '%s\n' \
+	"config global 'global'" \
+	"\toption enabled '1'" \
+	"\toption max_clients '60'" >"$CASE_ROOT/etc/config/proxypool_runtime"
+printf '%s\n' image >"$CASE_ROOT/etc/proxypool/v2-activation-request"
+printf '%s\n' v1 >"$CASE_ROOT/etc/proxypool/activated-backend"
+if run_activate >/dev/null 2>&1; then
+	fail 'owned backend recovered an invalid preserved selector'
+fi
+[ ! -s "$CASE_ROOT/migrate.log" ] ||
+	fail 'invalid owned selector ran migration'
 
 # The field failure: release 7 selected V1, and a quarantined attempt could
 # leave exact V1 ownership/WAL evidence.  A different boot ID proves that all
