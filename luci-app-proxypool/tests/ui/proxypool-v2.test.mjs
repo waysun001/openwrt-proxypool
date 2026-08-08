@@ -60,6 +60,25 @@ test('node presentation includes runtime error retry and bound device count', ()
   assert.equal(nodes[0].error_code, 'probe_failed');
 });
 
+test('all ordinary runtime labels are Chinese and unknown codes stay hidden', () => {
+  const nodeStates = {
+    disabled: '已停用', queued: '等待连接', starting: '正在启动', validating: '正在验证',
+    online: '在线', degraded: '连接不稳定', stopping: '正在停止', failed: '失败',
+    backoff: '等待重试', recovering: '正在恢复',
+  };
+  for (const [code, label] of Object.entries(nodeStates)) assert.equal(ui.stateLabel('node', code), label);
+  assert.equal(ui.stateLabel('job', 'running'), '执行中');
+  assert.equal(ui.stateLabel('diagnostic', 'ready'), '可下载');
+  assert.equal(ui.stateLabel('node', 'future_state'), '未知状态');
+  assert.equal(ui.errorLabel('auth_failed'), '节点认证失败');
+  assert.equal(ui.errorLabel('dataplane_failed'), '网络通道建立失败');
+  assert.equal(ui.errorLabel('dns_failed'), 'DNS 检测失败');
+  assert.equal(ui.errorLabel('future_code'), '未知错误');
+  assert.equal(ui.jobKindLabel('device.bindings.replace'), '更新节点设备绑定');
+  assert.equal(ui.jobKindLabel('future.kind'), '未知任务');
+  assert.equal(ui.formatError({ code: 'future_code', message: 'raw failure detail' }), '未知错误');
+});
+
 test('job progress summary includes aggregate and per-node failures', () => {
   const summary = ui.jobSummary({
     id: 'job-1', state: 'running', total: 3, succeeded: 1, failed: 1, running: 1,
@@ -70,7 +89,57 @@ test('job progress summary includes aggregate and per-node failures', () => {
   });
   assert.match(summary, /1\/3/);
   assert.match(summary, /node-b/);
-  assert.match(summary, /probe_failed/);
+  assert.match(summary, /连通性检测失败/);
+  assert.doesNotMatch(summary, /probe_failed|running/);
+});
+
+test('node membership model groups devices and supports Chinese ownership search', () => {
+  const nodes = [{ id: 'node-a', name: '节点 A' }, { id: 'node-b', name: '节点 B' }];
+  const devices = [
+    { id: 'keep', hostname: '平板', current_ipv4: '192.168.9.11', fixed_ipv4: '192.168.9.11', mac: '00:11:22:33:44:11', ingress: 'WiFi', node_id: 'node-b', enabled: true },
+    { id: 'remove', hostname: '电视', current_ipv4: '192.168.9.12', fixed_ipv4: '192.168.9.12', mac: '00:11:22:33:44:12', ingress: 'LAN', node_id: 'node-b', enabled: true },
+    { id: 'new', hostname: '笔记本', current_ipv4: '192.168.9.13', fixed_ipv4: '', mac: '00:11:22:33:44:13', ingress: 'LAN', node_id: '', enabled: false },
+    { id: 'move', hostname: '手机', current_ipv4: '192.168.9.14', fixed_ipv4: '192.168.9.24', mac: '00:11:22:33:44:14', ingress: 'WiFi', node_id: 'node-a', enabled: true },
+    { id: 'other', hostname: '', current_ipv4: '192.168.9.15', fixed_ipv4: '', mac: 'AA:BB:CC:DD:EE:15', ingress: 'LAN', node_id: 'node-a', enabled: true },
+  ];
+  const grouped = ui.boundDevicesByNode(nodes, devices);
+  assert.deepEqual(grouped['node-b'].map((device) => device.id), ['keep', 'remove']);
+  assert.equal(grouped['node-b'][0].lan_ipv4, '192.168.9.11');
+
+  const rows = ui.deviceBindingRows(devices, nodes, 'node-b', '');
+  assert.equal(rows.find((row) => row.id === 'keep').ownership_label, '已绑定当前节点');
+  assert.equal(rows.find((row) => row.id === 'new').ownership_label, '未绑定');
+  assert.equal(rows.find((row) => row.id === 'move').ownership_label, '已绑定：节点 A');
+  assert.deepEqual(ui.deviceBindingRows(devices, nodes, 'node-b', '手机').map((row) => row.id), ['move']);
+  assert.deepEqual(ui.deviceBindingRows(devices, nodes, 'node-b', '192.168.9.24').map((row) => row.id), ['move']);
+  assert.deepEqual(ui.deviceBindingRows(devices, nodes, 'node-b', '001122334414').map((row) => row.id), ['move']);
+  assert.deepEqual(ui.deviceBindingRows(devices, nodes, 'node-b', 'wifi').map((row) => row.id), ['keep', 'move']);
+  assert.deepEqual(ui.deviceBindingRows(devices, nodes, 'node-b', '节点 a').map((row) => row.id), ['move', 'other']);
+});
+
+test('binding replacement handles add remove migration and unchanged selections atomically', () => {
+  const nodes = [{ id: 'node-a', name: '节点 A' }, { id: 'node-b', name: '节点 B' }];
+  const devices = [
+    { id: 'keep', hostname: '平板', current_ipv4: '192.168.9.11', mac: '00:11:22:33:44:11', node_id: 'node-b', enabled: true },
+    { id: 'remove', hostname: '电视', current_ipv4: '192.168.9.12', mac: '00:11:22:33:44:12', node_id: 'node-b', enabled: true },
+    { id: 'new', hostname: '笔记本', current_ipv4: '192.168.9.13', mac: '00:11:22:33:44:13', node_id: '', enabled: false },
+    { id: 'move', hostname: '手机', current_ipv4: '192.168.9.14', mac: '00:11:22:33:44:14', node_id: 'node-a', enabled: true },
+    { id: 'other', hostname: '相机', current_ipv4: '192.168.9.15', mac: '00:11:22:33:44:15', node_id: 'node-a', enabled: true },
+  ];
+  const rows = ui.deviceBindingRows(devices, nodes, 'node-b', '');
+  const replacement = ui.buildBindingReplacement(rows, ['move', 'new', 'keep'], 9);
+  assert.equal(replacement.changed, true);
+  assert.equal(replacement.node_id, 'node-b');
+  assert.deepEqual(replacement.device_ids, ['keep', 'move', 'new']);
+  assert.deepEqual(replacement.migrations, [{ device_id: 'move', device_name: '手机', from_node: '节点 A', to_node: '节点 B' }]);
+  assert.equal(replacement.expected_revision, 9);
+  assert.equal(replacement.device_ids.includes('other'), false);
+
+  const unchanged = ui.buildBindingReplacement(rows, ['remove', 'keep'], 9);
+  assert.equal(unchanged.changed, false);
+  assert.deepEqual(unchanged.migrations, []);
+  assert.deepEqual(ui.deviceBindingRows(devices, nodes, 'node-b', '笔记本').map((row) => row.id), ['new']);
+  assert.deepEqual(replacement.device_ids, ['keep', 'move', 'new'], 'hidden search rows must not clear selection');
 });
 
 test('retry countdown is bounded at zero', () => {

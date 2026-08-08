@@ -15,6 +15,42 @@
     var DIAGNOSTIC_JOB_KEY = 'proxypool.v2.diagnostic_job';
     var ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
     var ARTIFACT_PATTERN = /^diag-[a-f0-9]{16,64}$/;
+    var STATE_LABELS = Object.freeze({
+        node: Object.freeze({
+            disabled: '已停用', queued: '等待连接', starting: '正在启动', validating: '正在验证',
+            online: '在线', degraded: '连接不稳定', stopping: '正在停止', failed: '失败',
+            backoff: '等待重试', recovering: '正在恢复'
+        }),
+        job: Object.freeze({
+            queued: '等待执行', running: '执行中', succeeded: '成功', failed: '失败',
+            cancelled: '已取消', replaced: '已替换'
+        }),
+        diagnostic: Object.freeze({
+            idle: '尚未生成', queued: '等待生成', running: '生成中', ready: '可下载',
+            expired: '已过期', failed: '生成失败'
+        })
+    });
+    var ERROR_LABELS = Object.freeze({
+        invalid_request: '请求内容格式错误', internal: '内部服务错误', auth_failed: '节点认证失败',
+        invalid_config: '配置未通过安全校验', unsupported: '当前版本不支持此协议', wan_down: '外网连接不可用',
+        connect_timeout: '节点连接超时', stop_timeout: '节点停止超时', capacity_exceeded: '节点数量已达到上限（60）',
+        revision_conflict: '配置已变化，请刷新页面后重试', duplicate: '操作重复，请刷新页面后重试',
+        not_found: '目标不存在，请刷新页面', resolve_failed: '域名解析失败', probe_failed: '连通性检测失败',
+        dataplane_failed: '网络通道建立失败', dns_failed: 'DNS 检测失败', service_unavailable: 'ProxyPool 服务暂时不可用',
+        bad_gateway: 'ProxyPool 服务响应异常', operation_timeout: '操作超时', unknown_method: '功能接口不可用',
+        collection_failed: '诊断包生成失败', collection_cancelled: '诊断包生成已取消', unavailable: '信息不可用'
+    });
+    var JOB_KIND_LABELS = Object.freeze({
+        'system.recover': '系统恢复', 'pending.learn': '识别待绑定设备', 'node.connect': '连接节点',
+        'node.reconnect': '重连节点', 'node.stop': '停止节点', 'node.save': '保存节点', 'node.delete': '删除节点',
+        'device.bind': '绑定设备', 'device.unbind': '解除设备绑定', 'device.bindings.replace': '更新节点设备绑定',
+        'import.commit': '批量导入节点', reconciliation: '状态同步', reconcile: '状态同步', import: '批量导入'
+    });
+    var JOB_STEP_LABELS = Object.freeze({
+        queued: '等待执行', start: '正在启动', validate: '正在验证', done: '已完成', failed: '失败',
+        cancelled: '已取消', replaced: '已替换', cleanup_failed: '清理失败', blocked_by_previous_node: '等待前一节点处理',
+        shadow_observed: '已确认停用'
+    });
 
     function initialState() {
         return {
@@ -111,19 +147,25 @@
             .replace(/'/g, '&#39;');
     }
 
+    function stateLabel(kind, value) {
+        var labels = STATE_LABELS[String(kind || '')];
+        return labels && labels[String(value || '')] || '未知状态';
+    }
+
+    function errorLabel(code) {
+        return ERROR_LABELS[String(code || '')] || '未知错误';
+    }
+
+    function jobKindLabel(kind) {
+        return JOB_KIND_LABELS[String(kind || '')] || '未知任务';
+    }
+
+    function jobStepLabel(step) {
+        return JOB_STEP_LABELS[String(step || '')] || '未知步骤';
+    }
+
     function formatError(error) {
-        error = error || {};
-        var messages = {
-            revision_conflict: '配置已变化，请刷新页面后重试。',
-            capacity_exceeded: '节点数量已达到上限（60）。',
-            service_unavailable: 'ProxyPool 服务暂时不可用。',
-            bad_gateway: 'ProxyPool 服务响应异常。',
-            unsupported: '当前版本暂不支持该协议。',
-            not_found: '目标已不存在，请刷新页面。',
-            invalid_request: '提交内容不完整或格式错误。',
-            invalid_config: '配置未通过安全校验。'
-        };
-        return messages[error.code] || String(error.message || error.code || '未知错误');
+        return errorLabel(error && error.code);
     }
 
     function retryCountdown(deadline, nowMilliseconds) {
@@ -137,12 +179,12 @@
     function jobSummary(job) {
         job = job || {};
         var parts = [
-            String(job.state || 'unknown'),
+            stateLabel('job', job.state),
             String(Number(job.succeeded || 0)) + '/' + String(Number(job.total || 0))
         ];
         (job.nodes || []).forEach(function(node) {
             if (node.error || node.state === 'failed') {
-                parts.push(String(node.node_id || '?') + ':' + String(node.error && node.error.code || 'failed'));
+                parts.push(String(node.node_id || '?') + '：' + (node.error ? errorLabel(node.error.code) : stateLabel('node', 'failed')));
             }
         });
         return parts.join(' · ');
@@ -219,14 +261,118 @@
         return normalized;
     }
 
-    function presentNodes(nodes, devices, nowMilliseconds) {
-        var counts = {};
+    function deviceSortKey(device) {
+        var name = String(device.hostname || device.display_name || '未命名设备').toLowerCase();
+        var address = String(device.current_ipv4 || device.fixed_ipv4 || device.lan_ipv4 || '');
+        return name + '\u0000' + address + '\u0000' + String(device.mac || '').toLowerCase() + '\u0000' + String(device.id || '');
+    }
+
+    function compareDevices(left, right) {
+        var leftKey = deviceSortKey(left);
+        var rightKey = deviceSortKey(right);
+        return leftKey < rightKey ? -1 : (leftKey > rightKey ? 1 : 0);
+    }
+
+    function boundDevicesByNode(nodes, devices) {
+        var grouped = {};
+        (nodes || []).forEach(function(node) { grouped[node.id] = []; });
         (devices || []).forEach(function(device) {
-            if (device.enabled && device.node_id) counts[device.node_id] = (counts[device.node_id] || 0) + 1;
+            if (!device.enabled || !device.node_id) return;
+            if (!grouped[device.node_id]) grouped[device.node_id] = [];
+            grouped[device.node_id].push({
+                id: String(device.id || ''),
+                display_name: String(device.hostname || '未命名设备'),
+                lan_ipv4: String(device.current_ipv4 || device.fixed_ipv4 || ''),
+                fixed_ipv4: String(device.fixed_ipv4 || ''),
+                mac: String(device.mac || ''),
+                ingress: String(device.ingress || '')
+            });
         });
+        Object.keys(grouped).forEach(function(nodeID) { grouped[nodeID].sort(compareDevices); });
+        return grouped;
+    }
+
+    function normalizedSearch(value) {
+        return String(value || '').trim().toLowerCase();
+    }
+
+    function normalizedMAC(value) {
+        return normalizedSearch(value).replace(/[^a-f0-9]/g, '');
+    }
+
+    function deviceBindingRows(devices, nodes, targetNodeID, query) {
+        targetNodeID = String(targetNodeID || '');
+        var names = {};
+        (nodes || []).forEach(function(node) { names[node.id] = String(node.name || node.id || ''); });
+        var targetName = names[targetNodeID] || targetNodeID;
+        var needle = normalizedSearch(query);
+        var compactNeedle = /^[\s0-9a-f:-]+$/i.test(String(query || '')) ? normalizedMAC(query) : '';
+        return (devices || []).map(function(device) {
+            var nodeID = device.enabled ? String(device.node_id || '') : '';
+            var nodeName = names[nodeID] || nodeID;
+            var current = nodeID === targetNodeID && !!targetNodeID;
+            var row = {
+                id: String(device.id || ''),
+                device_name: String(device.hostname || '未命名设备'),
+                current_ipv4: String(device.current_ipv4 || ''),
+                fixed_ipv4: String(device.fixed_ipv4 || ''),
+                mac: String(device.mac || ''),
+                ingress: String(device.ingress || ''),
+                node_id: nodeID,
+                node_name: nodeName,
+                target_node_id: targetNodeID,
+                target_node_name: targetName,
+                was_selected: current,
+                ownership_label: current ? '已绑定当前节点' : (nodeID ? '已绑定：' + nodeName : '未绑定')
+            };
+            return row;
+        }).filter(function(row) {
+            if (!needle) return true;
+            var fields = [row.device_name, row.current_ipv4, row.fixed_ipv4, row.mac, row.ingress, row.node_name, row.ownership_label];
+            var ordinary = fields.some(function(value) { return normalizedSearch(value).indexOf(needle) !== -1; });
+            return ordinary || (!!compactNeedle && normalizedMAC(row.mac).indexOf(compactNeedle) !== -1);
+        }).sort(compareDevices);
+    }
+
+    function buildBindingReplacement(originalRows, selectedIDs, revision) {
+        var rows = originalRows || [];
+        var byID = {};
+        rows.forEach(function(row) { if (ID_PATTERN.test(String(row.id || ''))) byID[row.id] = row; });
+        var selected = [];
+        var selectedSet = {};
+        (selectedIDs || []).forEach(function(id) {
+            id = String(id || '');
+            if (!byID[id] || selectedSet[id]) return;
+            selectedSet[id] = true;
+            selected.push(id);
+        });
+        selected.sort();
+        var original = rows.filter(function(row) { return row.was_selected; }).map(function(row) { return row.id; }).sort();
+        var migrations = rows.filter(function(row) {
+            return selectedSet[row.id] && row.node_id && row.node_id !== row.target_node_id;
+        }).map(function(row) {
+            return {
+                device_id: row.id,
+                device_name: row.device_name,
+                from_node: row.node_name,
+                to_node: row.target_node_name
+            };
+        }).sort(function(left, right) { return left.device_id < right.device_id ? -1 : (left.device_id > right.device_id ? 1 : 0); });
+        return {
+            changed: original.join('\u0000') !== selected.join('\u0000'),
+            node_id: rows.length ? String(rows[0].target_node_id || '') : '',
+            device_ids: selected,
+            migrations: migrations,
+            expected_revision: Number(revision || 0)
+        };
+    }
+
+    function presentNodes(nodes, devices, nowMilliseconds) {
+        var grouped = boundDevicesByNode(nodes, devices);
         return (nodes || []).map(function(node) {
             var copy = Object.assign({}, node);
-            copy.bound_count = counts[node.id] || 0;
+            copy.bound_devices = grouped[node.id] || [];
+            copy.bound_count = copy.bound_devices.length;
             copy.retry_seconds = retryCountdown(node.retry_at, nowMilliseconds);
             copy.error_code = node.last_error && node.last_error.code || '';
             return copy;
@@ -865,12 +1011,19 @@
         initialState: initialState,
         reduceState: reduceState,
         escapeText: escapeText,
+        stateLabel: stateLabel,
+        errorLabel: errorLabel,
+        jobKindLabel: jobKindLabel,
+        jobStepLabel: jobStepLabel,
         formatError: formatError,
         retryCountdown: retryCountdown,
         jobSummary: jobSummary,
         validateNodeForm: validateNodeForm,
         loadTrackedJobIDs: loadTrackedJobIDs,
         saveTrackedJobIDs: saveTrackedJobIDs,
+        boundDevicesByNode: boundDevicesByNode,
+        deviceBindingRows: deviceBindingRows,
+        buildBindingReplacement: buildBindingReplacement,
         presentNodes: presentNodes,
         visibleJobs: visibleJobs,
         buildImportPreviewRequest: buildImportPreviewRequest,
