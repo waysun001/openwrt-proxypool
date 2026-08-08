@@ -926,6 +926,9 @@ func (controller *Controller) handleDeviceBindingsReplace(ctx context.Context, r
 	}
 	for _, id := range params.DeviceIDs {
 		device, configured := current.Devices[id]
+		if configured && device.NodeID == params.NodeID && device.Enabled {
+			continue
+		}
 		observed, found := discovered[id]
 		if controller.deviceSource != nil {
 			if !found {
@@ -943,9 +946,6 @@ func (controller *Controller) handleDeviceBindingsReplace(ctx context.Context, r
 				return controllerError(request.ID, ErrorCodeNotFound)
 			}
 			device = model.Device{ID: observed.ID, MAC: observed.MAC, Hostname: observed.Hostname, FixedIPv4: observed.IPv4}
-		}
-		if device.NodeID == params.NodeID && device.Enabled {
-			continue
 		}
 		if device.NodeID != "" && device.NodeID != params.NodeID {
 			oldNodes[device.NodeID] = struct{}{}

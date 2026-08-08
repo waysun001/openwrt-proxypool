@@ -227,6 +227,31 @@ func TestControllerReplaceDeviceBindingsPersistsOneAtomicRevision(t *testing.T) 
 	}
 }
 
+func TestControllerReplaceDeviceBindingsPreservesOfflineCurrentMember(t *testing.T) {
+	cfg := controllerConfig()
+	configPath := writeControllerConfig(t, cfg)
+	leases := &controllerLeaseManager{}
+	source := &controllerDeviceSource{devices: []platform.DiscoveredDevice{{
+		ID: "device_c", MAC: "00:11:22:33:44:77", IPv4: netip.MustParseAddr("192.168.9.12"), Hostname: "Device C", Confirmed: true,
+	}}}
+	controller, err := NewController(
+		config.NewStore(configPath), NewRuntimeStore(filepath.Join(t.TempDir(), "runtime.json")), NewMachine(nil), NewJobStore(),
+		WithControllerJobIDSource(func() string { return "job-preserve-offline" }), WithDeviceServices(source, leases),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := controller.Handle(context.Background(), controllerRequest("preserve-offline", "device.bindings.replace", `{"node_id":"node_a","device_ids":["device_a","device_c"],"expected_revision":3}`))
+	assertControllerSuccess(t, response)
+	stored, loadErr := config.NewStore(configPath).Load()
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if stored.Revision != 4 || !stored.Devices["device_a"].Enabled || stored.Devices["device_a"].NodeID != "node_a" || !stored.Devices["device_c"].Enabled || stored.Devices["device_c"].NodeID != "node_a" {
+		t.Fatalf("offline member was not preserved: revision=%d devices=%#v", stored.Revision, stored.Devices)
+	}
+}
+
 func TestControllerReplaceDeviceBindingsRejectsInvalidBatchWithoutMutation(t *testing.T) {
 	tooMany := make([]string, 61)
 	for index := range tooMany {
