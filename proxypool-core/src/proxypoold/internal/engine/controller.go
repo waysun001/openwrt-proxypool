@@ -531,6 +531,7 @@ type nodeActionParams struct {
 type nodeSaveParams struct {
 	NodeID           string         `json:"node_id"`
 	Name             string         `json:"name"`
+	Note             string         `json:"note"`
 	Protocol         model.Protocol `json:"protocol"`
 	Enabled          bool           `json:"enabled"`
 	Server           string         `json:"server"`
@@ -1119,7 +1120,7 @@ func (controller *Controller) handleNodeSave(ctx context.Context, request api.Re
 		password = previous.Password
 	}
 	node := model.Node{
-		ID: nodeID, Name: strings.TrimSpace(params.Name), Protocol: params.Protocol, Enabled: params.Enabled,
+		ID: nodeID, Name: strings.TrimSpace(params.Name), Note: strings.TrimSpace(params.Note), Protocol: params.Protocol, Enabled: params.Enabled,
 		Server: strings.TrimSpace(params.Server), Port: params.Port, Username: username, Password: password,
 		ExpiresAt: expiresAt, PolicyID: previous.PolicyID, Revision: previous.Revision,
 	}
@@ -1132,7 +1133,9 @@ func (controller *Controller) handleNodeSave(ctx context.Context, request api.Re
 		return controllerModelError(request.ID, err)
 	}
 	nodeIDs := []string(nil)
-	if (updating && previous.Enabled) || (current.Global.Enabled && node.Enabled) {
+	runtimeChanged := updating && !sameNodeDataplane(previous, node)
+	if (!updating && current.Global.Enabled && node.Enabled) ||
+		(runtimeChanged && (previous.Enabled || (current.Global.Enabled && node.Enabled))) {
 		nodeIDs = []string{nodeID}
 	}
 	stored, err := controller.desiredStore.Replace(ctx, current.Revision, next)
@@ -1144,6 +1147,31 @@ func (controller *Controller) handleNodeSave(ctx context.Context, request api.Re
 		return controllerModelError(request.ID, err)
 	}
 	return controller.finishReplayDurableMutationLocked(ctx, request, digest, stored, "node.save", nodeIDs)
+}
+
+func sameNodeDataplane(left, right model.Node) bool {
+	return left.ID == right.ID &&
+		left.Protocol == right.Protocol &&
+		left.Enabled == right.Enabled &&
+		left.DeletePending == right.DeletePending &&
+		left.Server == right.Server &&
+		left.Port == right.Port &&
+		left.Username == right.Username &&
+		left.Password == right.Password &&
+		left.SLPToken == right.SLPToken &&
+		left.SLPTransport == right.SLPTransport &&
+		left.SLPObfs == right.SLPObfs &&
+		left.SLPObfsKey == right.SLPObfsKey &&
+		left.SLPInsecure == right.SLPInsecure &&
+		left.PolicyID == right.PolicyID &&
+		sameOptionalTime(left.ExpiresAt, right.ExpiresAt)
+}
+
+func sameOptionalTime(left, right *time.Time) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left.Equal(*right)
 }
 
 func (controller *Controller) handleNodeDelete(ctx context.Context, request api.Request) api.Response {

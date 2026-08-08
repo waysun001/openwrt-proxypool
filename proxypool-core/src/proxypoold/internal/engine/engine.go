@@ -56,6 +56,7 @@ type DesiredSummary struct {
 type DesiredNodeSummary struct {
 	ID            string         `json:"id"`
 	Name          string         `json:"name"`
+	Note          string         `json:"note"`
 	Protocol      model.Protocol `json:"protocol"`
 	Enabled       bool           `json:"enabled"`
 	DeletePending bool           `json:"delete_pending"`
@@ -258,7 +259,7 @@ func summarizeDesired(desired model.DesiredConfig) (DesiredSummary, RuntimeSumma
 	for _, id := range nodeIDs {
 		node := desired.Nodes[id]
 		summary.Nodes = append(summary.Nodes, DesiredNodeSummary{
-			ID: node.ID, Name: node.Name, Protocol: node.Protocol, Enabled: node.Enabled,
+			ID: node.ID, Name: node.Name, Note: node.Note, Protocol: node.Protocol, Enabled: node.Enabled,
 			DeletePending: node.DeletePending, Server: node.Server, Port: node.Port,
 			HasUsername: node.Username != "", HasPassword: node.Password != "", ExpiresAt: node.ExpiresAt,
 			PolicyID: node.PolicyID, Revision: node.Revision,

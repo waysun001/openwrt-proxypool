@@ -124,6 +124,7 @@ func Encode(w io.Writer, cfg model.DesiredConfig) error {
 		output.WriteByte('\n')
 		writeSection(&output, "node", id)
 		writeOption(&output, "name", node.Name)
+		writeOption(&output, "note", node.Note)
 		writeOption(&output, "protocol", string(node.Protocol))
 		writeOption(&output, "enabled", boolText(node.Enabled))
 		writeOption(&output, "delete_pending", boolText(node.DeletePending))
@@ -400,7 +401,7 @@ func decodeNode(section *uciSection) (model.Node, error) {
 		}
 		expiresAt = &parsed
 	}
-	return model.Node{ID: section.name, Name: section.options["name"], Protocol: model.Protocol(section.options["protocol"]), Enabled: enabled, DeletePending: deletePending, Server: section.options["server"], Port: uint16(port), Username: section.options["username"], Password: section.options["password"], SLPToken: section.options["slp_token"], SLPTransport: section.options["slp_transport"], SLPObfs: slpObfs, SLPObfsKey: section.options["slp_obfs_key"], SLPInsecure: slpInsecure, ExpiresAt: expiresAt, PolicyID: uint16(policyID), Revision: revision}, nil
+	return model.Node{ID: section.name, Name: section.options["name"], Note: section.options["note"], Protocol: model.Protocol(section.options["protocol"]), Enabled: enabled, DeletePending: deletePending, Server: section.options["server"], Port: uint16(port), Username: section.options["username"], Password: section.options["password"], SLPToken: section.options["slp_token"], SLPTransport: section.options["slp_transport"], SLPObfs: slpObfs, SLPObfsKey: section.options["slp_obfs_key"], SLPInsecure: slpInsecure, ExpiresAt: expiresAt, PolicyID: uint16(policyID), Revision: revision}, nil
 }
 
 func decodeDevice(section *uciSection) (model.Device, error) {
@@ -439,7 +440,7 @@ func decodePendingBinding(section *uciSection) (model.PendingBinding, error) {
 var globalOptions = []string{"schema_version", "revision", "enabled", "runtime_backend", "max_nodes", "lan_device", "l2tp_concurrency", "proxy_concurrency", "connect_timeout", "stop_timeout"}
 var globalLists = []string{"management_port", "doh_url", "doh_bootstrap_ip", "doh_server_name"}
 var nodeRequiredOptions = []string{"name", "protocol", "enabled", "server", "port", "username", "password", "slp_token", "slp_transport", "slp_obfs", "slp_obfs_key", "slp_insecure", "expires_at", "policy_id", "revision"}
-var nodeOptions = append(append([]string(nil), nodeRequiredOptions...), "delete_pending")
+var nodeOptions = append(append([]string(nil), nodeRequiredOptions...), "delete_pending", "note")
 var deviceOptions = []string{"mac", "hostname", "fixed_ipv4", "node_id", "enabled"}
 var pendingBindingOptions = []string{"legacy_ipv4", "node_id", "created_at", "error_code"}
 

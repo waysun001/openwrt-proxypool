@@ -4,9 +4,14 @@ import (
 	"net"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
-const maxNodes = 60
+const (
+	maxNodes         = 60
+	MaxNodeNoteRunes = 200
+)
 
 func Validate(cfg DesiredConfig) error {
 	if cfg.SchemaVersion != 2 {
@@ -86,6 +91,9 @@ func validateNodeIdentity(nodes map[string]Node, nodeKeys []string) error {
 		if key == "" || node.ID != key {
 			return invalid("invalid_config", "node identity is invalid")
 		}
+		if !validNodeNote(node.Note) {
+			return invalid("invalid_config", "node note is invalid")
+		}
 		name := strings.ToLower(strings.TrimSpace(node.Name))
 		if name == "" {
 			return invalid("invalid_config", "node name is required")
@@ -103,6 +111,18 @@ func validateNodeIdentity(nodes map[string]Node, nodeKeys []string) error {
 		policyIDs[node.PolicyID] = struct{}{}
 	}
 	return nil
+}
+
+func validNodeNote(note string) bool {
+	if !utf8.ValidString(note) || note != strings.TrimSpace(note) || utf8.RuneCountInString(note) > MaxNodeNoteRunes {
+		return false
+	}
+	for _, character := range note {
+		if unicode.IsControl(character) {
+			return false
+		}
+	}
+	return true
 }
 
 func validateNodeProtocol(nodes map[string]Node, nodeKeys []string) error {
