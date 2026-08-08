@@ -5,7 +5,8 @@ ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 DNS_MANAGER="$ROOT/proxypool-core/files/dns-manager.sh"
 STATUS_SCRIPT="$ROOT/proxypool-core/files/status.sh"
 LUCI_CONTROLLER="$ROOT/luci-app-proxypool/luasrc/controller/proxypool.lua"
-GLOBAL_JS="$ROOT/luci-app-proxypool/htdocs/luci-static/resources/proxypool-global.js"
+GLOBAL_JS="$ROOT/luci-theme-proxypool/htdocs/luci-static/proxypool/proxypool-global.js"
+THEME_HEADER="$ROOT/luci-theme-proxypool/ucode/template/themes/proxypool/header.ut"
 MAIN_VIEW="$ROOT/luci-app-proxypool/luasrc/view/proxypool/main.htm"
 TEST_TMP=$(mktemp -d)
 trap 'rm -rf "$TEST_TMP"' EXIT HUP INT TERM
@@ -415,7 +416,7 @@ test_luci_status_contract_exposes_dns_failure() {
 			fail "LuCI directly mutates DNS or UCI state: $forbidden" || return 1
 		fi
 	done
-	grep -Fq 'data-status-url="<%=url([[admin]], [[services]], [[proxypool]], [[api]], [[read]])%>?action=status"' "$MAIN_VIEW" ||
+	grep -Fq 'data-status-url="{{ dispatcher.build_url('\''admin'\'', '\''services'\'', '\''proxypool'\'', '\''api'\'', '\''read'\'') }}?action=status"' "$THEME_HEADER" ||
 		fail 'global menu template does not generate the read-only V2 status route' || return 1
 	grep -Fq "menu.getAttribute('data-status-url')" "$GLOBAL_JS" ||
 		fail 'global menu script does not read the template-generated status route' || return 1
