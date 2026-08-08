@@ -15,10 +15,10 @@ import (
 const schedulerQueueCapacity = MaxRetainedJobs * 2
 
 type SchedulerConfig struct {
-	L2TPConcurrency      int
-	ProxyConcurrency     int
-	ConnectTimeout       time.Duration
-	StopTimeout          time.Duration
+	L2TPConcurrency       int
+	ProxyConcurrency      int
+	ConnectTimeout        time.Duration
+	StopTimeout           time.Duration
 	TrafficSampleInterval time.Duration
 }
 
@@ -30,13 +30,13 @@ type scheduledNode struct {
 // Scheduler is the sole owner of protocol and dataplane side effects. Control
 // requests only create durable jobs; Run reconciles those jobs independently.
 type Scheduler struct {
-	controller *Controller
-	adapter    platform.NodeAdapter
+	controller    *Controller
+	adapter       platform.NodeAdapter
 	trafficReader platform.InterfaceTrafficReader
 	traffic       *trafficTracker
-	gates      []platform.SessionGate
-	config     SchedulerConfig
-	queue      chan Job
+	gates         []platform.SessionGate
+	config        SchedulerConfig
+	queue         chan Job
 
 	mu        sync.Mutex
 	submitted map[string]struct{}
@@ -68,18 +68,18 @@ func NewSchedulerWithTraffic(controller *Controller, adapter platform.NodeAdapte
 		config.TrafficSampleInterval = time.Second
 	}
 	return &Scheduler{
-		controller: controller,
-		adapter:    adapter,
+		controller:    controller,
+		adapter:       adapter,
 		trafficReader: trafficReader,
 		traffic:       newTrafficTracker(),
-		gates:      append([]platform.SessionGate(nil), gates...),
-		config:     config,
-		queue:      make(chan Job, schedulerQueueCapacity),
-		submitted:  make(map[string]struct{}),
-		nodeLocks:  make(map[string]*sync.Mutex),
-		sessions:   make(map[string]platform.Session),
-		l2tp:       make(chan struct{}, config.L2TPConcurrency),
-		proxy:      make(chan struct{}, config.ProxyConcurrency),
+		gates:         append([]platform.SessionGate(nil), gates...),
+		config:        config,
+		queue:         make(chan Job, schedulerQueueCapacity),
+		submitted:     make(map[string]struct{}),
+		nodeLocks:     make(map[string]*sync.Mutex),
+		sessions:      make(map[string]platform.Session),
+		l2tp:          make(chan struct{}, config.L2TPConcurrency),
+		proxy:         make(chan struct{}, config.ProxyConcurrency),
 	}
 }
 
