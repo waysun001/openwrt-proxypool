@@ -36,7 +36,7 @@ case "$live_line" in *--shadow*) fail 'OpenWrt init still launches shadow mode' 
 for forbidden in proxypool.sh l2tp-manager.sh socks5-manager.sh slp-manager.sh 'luci.model.uci' 'os.execute'; do
 	if grep -Fq "$forbidden" "$LUCI"; then fail "LuCI directly invokes forbidden path: $forbidden"; fi
 done
-for contract in 'device.bind' 'device.unbind' 'node.action' 'node.save' 'node.delete' 'import.preview' 'import.commit' 'job.get' 'job.list' 'diagnostics.create' 'diagnostics.get' 'diagnostics.claim' 'diagnostics.release' 'post("api_write")'; do
+for contract in 'device.bind' 'device.unbind' 'device.bindings.replace' 'node.action' 'node.save' 'node.delete' 'import.preview' 'import.commit' 'job.get' 'job.list' 'diagnostics.create' 'diagnostics.get' 'diagnostics.claim' 'diagnostics.release' 'post("api_write")'; do
 	require "$LUCI" "$contract" "LuCI is missing control contract: $contract"
 done
 require "$V2_JS" "apiCall('diagnostics_create', {}, true)" 'LuCI does not create diagnostics asynchronously'
@@ -47,8 +47,11 @@ require "$LUCI_RPC" 'socket:setopt("socket", "rcvtimeo", TIMEOUT_SECONDS, 0)' 'L
 require "$V2_JS" 'environment.setTimeout(poll, 3000)' 'LuCI does not use one bounded status poller'
 require "$V2_JS" "apiCall('import_preview', params, true)" 'LuCI does not use server-authoritative import preview'
 require "$V2_JS" "apiCall('import_commit', params, true)" 'LuCI does not use one transactional import commit'
+require "$V2_JS" "apiCall('bindings_replace'" 'LuCI does not use one atomic node membership write'
 require "$VIEW" '无需手工输入' 'LuCI does not expose automatic device discovery'
 require "$VIEW" 'pp-v2-import-raw' 'LuCI batch import modal is missing'
+require "$VIEW" 'pp-v2-binding-modal' 'LuCI node binding modal is missing'
+require "$VIEW" 'proxypool-global-menu' 'LuCI page-local navigation is missing'
 
 if grep -Fq 'function pollJob' "$V2_JS"; then fail 'LuCI still blocks mutation UI while polling a whole job'; fi
 if grep -Eq 'sequentialConnect|pending marker' "$V2_JS"; then fail 'LuCI still owns per-node import orchestration'; fi

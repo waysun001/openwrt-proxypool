@@ -44,7 +44,11 @@ write_main_view() {
 	destination=$1
 	cat >"$destination" <<'EOF'
 <%+header%>
+<link rel="stylesheet" href="<%=resource%>/proxypool-global.css" />
 <link rel="stylesheet" href="<%=resource%>/proxypool-v2.css" />
+<nav id="proxypool-global-menu"></nav>
+<div id="pp-v2-binding-modal"><input id="pp-v2-binding-search" /><div id="pp-v2-binding-list"></div><button id="pp-v2-binding-save"></button></div>
+<script type="text/javascript" src="<%=resource%>/proxypool-global.js"></script>
 <script type="text/javascript" src="<%=resource%>/proxypool-v2.js"></script>
 <div id="proxypool"></div>
 <%+footer%>
@@ -97,7 +101,11 @@ make_ipk() {
 		versioned_resource_load)
 			printf '%s\n' \
 				'<%+header%>' \
+				'<link rel="stylesheet" href="<%=resource%>/proxypool-global.css?v=1.0.0" />' \
 				'<link rel="stylesheet" href="<%=resource%>/proxypool-v2.css?v=1.0.0" />' \
+				'<nav id="proxypool-global-menu"></nav>' \
+				'<div id="pp-v2-binding-modal"><input id="pp-v2-binding-search" /><div id="pp-v2-binding-list"></div><button id="pp-v2-binding-save"></button></div>' \
+				'<script type="text/javascript" src="<%=resource%>/proxypool-global.js?v=1.0.0"></script>' \
 				'<script type="text/javascript" src="<%=resource%>/proxypool-v2.js?v=1.0.0"></script>' \
 				'<%+footer%>' >"$data/usr/lib/lua/luci/view/proxypool/main.htm"
 			;;

@@ -30,6 +30,13 @@ fi
 	fail 'main view must load the packaged ProxyPool stylesheet exactly once'
 [ "$(grep -Fc '<script type="text/javascript" src="<%=resource%>/proxypool-v2.js"></script>' "$MAIN_VIEW")" -eq 1 ] ||
 	fail 'main view must load the packaged ProxyPool script exactly once'
+[ "$(grep -Fc '<link rel="stylesheet" href="<%=resource%>/proxypool-global.css" />' "$MAIN_VIEW")" -eq 1 ] ||
+	fail 'main view must load the packaged navigation stylesheet exactly once'
+[ "$(grep -Fc '<script type="text/javascript" src="<%=resource%>/proxypool-global.js"></script>' "$MAIN_VIEW")" -eq 1 ] ||
+	fail 'main view must load the packaged navigation script exactly once'
+for marker in 'id="proxypool-global-menu"' 'id="pp-v2-binding-modal"' 'id="pp-v2-binding-search"' 'id="pp-v2-binding-list"' 'id="pp-v2-binding-save"'; do
+	grep -Fq "$marker" "$MAIN_VIEW" || fail "main view is missing required marker: $marker"
+done
 
 if grep -Fq 'luci-proxypool-menu' "$MAKEFILE"; then
 	fail 'legacy global-menu mutator must not be packaged'

@@ -112,10 +112,18 @@ done
 
 main_view="$inspect_tmp/data/usr/lib/lua/luci/view/proxypool/main.htm"
 [ "$(grep -Ec '<link rel="stylesheet" href="<%=resource%>/proxypool-v2\.css(\?v=[A-Za-z0-9._+-]+)?" />' "$main_view")" -eq 1 ] &&
-	[ "$(grep -Ec '<script type="text/javascript" src="<%=resource%>/proxypool-v2\.js(\?v=[A-Za-z0-9._+-]+)?"></script>' "$main_view")" -eq 1 ] || {
+	[ "$(grep -Ec '<script type="text/javascript" src="<%=resource%>/proxypool-v2\.js(\?v=[A-Za-z0-9._+-]+)?"></script>' "$main_view")" -eq 1 ] &&
+	[ "$(grep -Ec '<link rel="stylesheet" href="<%=resource%>/proxypool-global\.css(\?v=[A-Za-z0-9._+-]+)?" />' "$main_view")" -eq 1 ] &&
+	[ "$(grep -Ec '<script type="text/javascript" src="<%=resource%>/proxypool-global\.js(\?v=[A-Za-z0-9._+-]+)?"></script>' "$main_view")" -eq 1 ] || {
 	echo 'main view does not load packaged V2 assets' >&2
 	exit 1
 }
+for marker in 'id="proxypool-global-menu"' 'id="pp-v2-binding-modal"' 'id="pp-v2-binding-search"' 'id="pp-v2-binding-list"' 'id="pp-v2-binding-save"'; do
+	grep -Fq "$marker" "$main_view" || {
+		echo "main view is missing device-management marker: $marker" >&2
+		exit 1
+	}
+done
 
 for asset in \
 	"$inspect_tmp/data/www/luci-static/resources/proxypool-global.css" \
