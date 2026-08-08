@@ -4,12 +4,14 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 MAKEFILE="$ROOT/proxypool-core/Makefile"
 LUCI_MAKEFILE="$ROOT/luci-app-proxypool/Makefile"
+THEME_MAKEFILE="$ROOT/luci-theme-proxypool/Makefile"
 TEST_WORKFLOW="$ROOT/.github/workflows/test.yml"
 FAST_WORKFLOW="$ROOT/.github/workflows/build-fast.yml"
 FULL_WORKFLOW="$ROOT/.github/workflows/build.yml"
 HOST_RUNNER="$ROOT/scripts/test-host.sh"
 IPK_INSPECTOR="$ROOT/scripts/inspect-ipk.sh"
 LUCI_IPK_INSPECTOR="$ROOT/scripts/inspect-luci-ipk.sh"
+THEME_IPK_INSPECTOR="$ROOT/scripts/inspect-theme-ipk.sh"
 PACKAGE_DEFAULT="$ROOT/proxypool-core/files/proxypool.config"
 IMAGE_OVERLAY_DEFAULT="$ROOT/files/etc/config/proxypool"
 IMAGE_OVERLAY_V2="$ROOT/files/etc/config/proxypool_v2"
@@ -61,9 +63,11 @@ workflow_jobs() {
 
 require_fixed "$MAKEFILE" 'PKG_BUILD_DEPENDS:=golang/host'
 require_fixed "$MAKEFILE" 'PKG_VERSION:=2.0.0'
-require_fixed "$MAKEFILE" 'PKG_RELEASE:=13'
+require_fixed "$MAKEFILE" 'PKG_RELEASE:=14'
 require_fixed "$LUCI_MAKEFILE" 'PKG_VERSION:=2.0.2'
-require_fixed "$LUCI_MAKEFILE" 'PKG_RELEASE:=1'
+require_fixed "$LUCI_MAKEFILE" 'PKG_RELEASE:=2'
+require_fixed "$THEME_MAKEFILE" 'PKG_VERSION:=2.1.0'
+require_fixed "$THEME_MAKEFILE" 'PKG_RELEASE:=1'
 require_fixed "$MAKEFILE" 'GO_PKG:=proxypoold'
 require_fixed "$MAKEFILE" 'GO_PKG_BUILD_PKG:=$(GO_PKG)/cmd/proxypoold $(GO_PKG)/cmd/proxypoolctl'
 require_fixed "$MAKEFILE" 'GO_PKG_LDFLAGS_X:=$(GO_PKG)/internal/buildinfo.Version=$(PKG_VERSION)'
@@ -163,6 +167,9 @@ require_fixed "$HOST_RUNNER" 'test-inspect-ipk.sh'
 require_fixed "$HOST_RUNNER" 'inspect-luci-ipk.sh'
 require_fixed "$HOST_RUNNER" 'test-inspect-luci-ipk.sh'
 require_fixed "$HOST_RUNNER" 'test-luci-package-source-safety.sh'
+require_fixed "$HOST_RUNNER" 'inspect-theme-ipk.sh'
+require_fixed "$HOST_RUNNER" 'test-inspect-theme-ipk.sh'
+require_fixed "$HOST_RUNNER" 'test-theme-source-safety.sh'
 require_fixed "$HOST_RUNNER" 'test-package-safety-integration.sh'
 require_fixed "$HOST_RUNNER" 'test-proxypool-dns-admission.sh'
 require_fixed "$HOST_RUNNER" 'test-lan-isolation-defaults.sh'
@@ -208,11 +215,19 @@ require_fixed "$FAST_WORKFLOW" 'make package/proxypool/proxypool-core/clean'
 require_fixed "$FAST_WORKFLOW" 'make package/proxypool/proxypool-core/compile V=s -j1'
 require_fixed "$FAST_WORKFLOW" 'make package/proxypool/luci-app-proxypool/clean'
 require_fixed "$FAST_WORKFLOW" 'make package/proxypool/luci-app-proxypool/compile V=s -j1'
+require_fixed "$FAST_WORKFLOW" 'cp -r luci-theme-proxypool sdk/package/proxypool/'
+require_fixed "$FAST_WORKFLOW" "'CONFIG_PACKAGE_luci-theme-proxypool=m'"
+require_fixed "$FAST_WORKFLOW" 'make package/proxypool/luci-theme-proxypool/clean'
+require_fixed "$FAST_WORKFLOW" 'make package/proxypool/luci-theme-proxypool/compile V=s -j1'
 require_fixed "$FAST_WORKFLOW" './scripts/inspect-ipk.sh'
 require_fixed "$FAST_WORKFLOW" 'mapfile -t luci_packages'
 require_fixed "$FAST_WORKFLOW" "find sdk/bin -type f -name 'luci-app-proxypool_*.ipk'"
 require_fixed "$FAST_WORKFLOW" '[ "${#luci_packages[@]}" -eq 1 ]'
 require_fixed "$FAST_WORKFLOW" 'sh ./scripts/inspect-luci-ipk.sh "${luci_packages[0]}"'
+require_fixed "$FAST_WORKFLOW" 'mapfile -t theme_packages'
+require_fixed "$FAST_WORKFLOW" "find sdk/bin -type f -name 'luci-theme-proxypool_*.ipk'"
+require_fixed "$FAST_WORKFLOW" '[ "${#theme_packages[@]}" -eq 1 ]'
+require_fixed "$FAST_WORKFLOW" 'sh ./scripts/inspect-theme-ipk.sh "${theme_packages[0]}"'
 require_fixed "$FAST_WORKFLOW" 'feed_updated=0'
 require_fixed "$FAST_WORKFLOW" 'for attempt in 1 2 3; do'
 require_fixed "$FAST_WORKFLOW" 'feed_updated=1'
@@ -251,7 +266,7 @@ require_fixed "$FULL_WORKFLOW" '[ "$source_fetched" = "1" ]'
 require_fixed "$FULL_WORKFLOW" 'git checkout --detach "$OPENWRT_COMMIT"'
 require_fixed "$FULL_WORKFLOW" '[ "$(git rev-parse HEAD)" = "$OPENWRT_COMMIT" ]'
 require_fixed "$FULL_WORKFLOW" 'mkdir -p local-feed'
-require_fixed "$FULL_WORKFLOW" 'cp -a proxypool-core luci-app-proxypool local-feed/'
+require_fixed "$FULL_WORKFLOW" 'cp -a proxypool-core luci-app-proxypool luci-theme-proxypool local-feed/'
 require_fixed "$FULL_WORKFLOW" 'src-link proxypool $GITHUB_WORKSPACE/local-feed'
 require_fixed "$FULL_WORKFLOW" 'git -C feeds/packages rev-parse HEAD)" = "$PACKAGES_FEED_COMMIT"'
 require_fixed "$FULL_WORKFLOW" 'git -C feeds/luci rev-parse HEAD)" = "$LUCI_FEED_COMMIT"'
@@ -261,16 +276,18 @@ require_fixed "$FULL_WORKFLOW" 'sh ./scripts/prepare-image-files.sh files image-
 require_fixed "$FULL_WORKFLOW" 'openwrt-patches/23.05.3/998-net-bridge-offload-br-isolated.patch'
 require_fixed "$FULL_WORKFLOW" 'openwrt-patches/23.05.3/999-net-dsa-mt7530-bridge-port-isolation.patch'
 require_fixed "$FULL_WORKFLOW" 'target/linux/generic/backport-5.15/'
-require_fixed "$FULL_WORKFLOW" './scripts/feeds install -p proxypool proxypool-core luci-app-proxypool'
+require_fixed "$FULL_WORKFLOW" './scripts/feeds install -p proxypool proxypool-core luci-app-proxypool luci-theme-proxypool'
 require_fixed "$FULL_WORKFLOW" "grep -Fqx 'CONFIG_PACKAGE_proxypool-core=y' .config"
 require_fixed "$FULL_WORKFLOW" "grep -Fqx 'CONFIG_PACKAGE_luci-app-proxypool=y' .config"
+require_fixed "$FULL_WORKFLOW" "grep -Fqx 'CONFIG_PACKAGE_luci-theme-proxypool=y' .config"
 require_fixed "$FULL_WORKFLOW" 'sh ../scripts/verify-openwrt-kernel-isolation.sh . ../openwrt-patches/23.05.3'
 require_fixed "$FULL_WORKFLOW" 'make -j"$(nproc)" V=s'
 require_fixed "$FULL_WORKFLOW" "find bin -type f -name 'proxypool-core_*.ipk'"
 require_fixed "$FULL_WORKFLOW" "find bin -type f -name 'luci-app-proxypool_*.ipk'"
+require_fixed "$FULL_WORKFLOW" "find bin -type f -name 'luci-theme-proxypool_*.ipk'"
 require_fixed "$FULL_WORKFLOW" "-name '*glinet_gl-mt6000*squashfs-sysupgrade.bin'"
 require_fixed "$FULL_WORKFLOW" '[ "${#firmware[@]}" -eq 1 ]'
-require_fixed "$FULL_WORKFLOW" 'cp "${packages[0]}" "${luci_packages[0]}" "${firmware[0]}" ../firmware-evidence/'
+require_fixed "$FULL_WORKFLOW" 'cp "${packages[0]}" "${luci_packages[0]}" "${theme_packages[0]}" "${firmware[0]}" ../firmware-evidence/'
 require_fixed "$FULL_WORKFLOW" 'uses: actions/upload-artifact@v4'
 require_fixed "$FULL_WORKFLOW" 'path: firmware-evidence/'
 if grep -Eiq 'imagebuilder|make[[:space:]]+image|factory|softprops/action-gh-release|contents:[[:space:]]*write|make[^#]*\|\|[[:space:]]*make' "$FULL_WORKFLOW"; then
@@ -330,8 +347,10 @@ require_fixed "$IPK_INSPECTOR" 'usr/bin/slp-client'
 require_fixed "$IPK_INSPECTOR" "printf '/etc/config/proxypool\\n'"
 require_fixed "$LUCI_IPK_INSPECTOR" 'Architecture: all'
 require_fixed "$LUCI_IPK_INSPECTOR" 'etc/uci-defaults/luci-proxypool'
-require_fixed "$LUCI_IPK_INSPECTOR" 'www/luci-static/resources/proxypool-global.css'
-require_fixed "$LUCI_IPK_INSPECTOR" 'www/luci-static/resources/proxypool-global.js'
+require_fixed "$THEME_IPK_INSPECTOR" 'Package: luci-theme-proxypool'
+require_fixed "$THEME_IPK_INSPECTOR" 'Architecture: all'
+require_fixed "$THEME_IPK_INSPECTOR" 'www/luci-static/proxypool/proxypool-global.css'
+require_fixed "$THEME_IPK_INSPECTOR" 'usr/share/ucode/luci/template/themes/proxypool/header.ut'
 require_fixed "$LUCI_MAKEFILE" 'PKG_FILE_MODES:=/etc/uci-defaults/luci-proxypool:root:root:0755'
 if grep -Fq 'luci-proxypool-menu' "$LUCI_MAKEFILE"; then
 	echo 'LuCI package still installs the legacy global-menu mutator' >&2
@@ -372,7 +391,7 @@ fast_build=$(job_block "$FAST_WORKFLOW" build)
 printf '%s\n' "$fast_build" | grep -Fq 'needs: host' || { echo 'fast SDK build does not depend on host gates' >&2; exit 1; }
 printf '%s\n' "$fast_build" | grep -Fq 'contents: read' || { echo 'fast SDK build is not read-only' >&2; exit 1; }
 normalized_fast_build=$(printf '%s\n' "$fast_build" | sed 's/^[[:space:]]*//')
-for package_prefix in packages luci_packages; do
+for package_prefix in packages luci_packages theme_packages; do
 	case "$package_prefix" in
 		packages)
 			find_contract="mapfile -t packages < <(find sdk/bin -type f -name 'proxypool-core_*.ipk')"
@@ -381,6 +400,10 @@ for package_prefix in packages luci_packages; do
 		luci_packages)
 			find_contract="mapfile -t luci_packages < <(find sdk/bin -type f -name 'luci-app-proxypool_*.ipk')"
 			inspect_contract='sh ./scripts/inspect-luci-ipk.sh "${luci_packages[0]}"'
+			;;
+		theme_packages)
+			find_contract="mapfile -t theme_packages < <(find sdk/bin -type f -name 'luci-theme-proxypool_*.ipk')"
+			inspect_contract='sh ./scripts/inspect-theme-ipk.sh "${theme_packages[0]}"'
 			;;
 	esac
 	count_contract="[ \"\${#$package_prefix[@]}\" -eq 1 ]"
@@ -407,7 +430,7 @@ compile_line=$(printf '%s\n' "$normalized_full_build" | grep -nF 'make -j"$(npro
 	echo 'full-source patch, firmware compile, and kernel verifier gates are missing or out of order' >&2
 	exit 1
 }
-for package_prefix in packages luci_packages; do
+for package_prefix in packages luci_packages theme_packages; do
 	case "$package_prefix" in
 		packages)
 			find_contract="mapfile -t packages < <(find bin -type f -name 'proxypool-core_*.ipk')"
@@ -416,6 +439,10 @@ for package_prefix in packages luci_packages; do
 		luci_packages)
 			find_contract="mapfile -t luci_packages < <(find bin -type f -name 'luci-app-proxypool_*.ipk')"
 			inspect_contract='sh ../scripts/inspect-luci-ipk.sh "${luci_packages[0]}"'
+			;;
+		theme_packages)
+			find_contract="mapfile -t theme_packages < <(find bin -type f -name 'luci-theme-proxypool_*.ipk')"
+			inspect_contract='sh ../scripts/inspect-theme-ipk.sh "${theme_packages[0]}"'
 			;;
 	esac
 	count_contract="[ \"\${#$package_prefix[@]}\" -eq 1 ]"
@@ -431,9 +458,11 @@ for package_prefix in packages luci_packages; do
 done
 core_inspect_line=$(printf '%s\n' "$normalized_full_build" | grep -nF 'sh ../scripts/inspect-ipk.sh "${packages[0]}" aarch64_cortex-a53' | cut -d: -f1)
 luci_inspect_line=$(printf '%s\n' "$normalized_full_build" | grep -nF 'sh ../scripts/inspect-luci-ipk.sh "${luci_packages[0]}"' | cut -d: -f1)
+theme_inspect_line=$(printf '%s\n' "$normalized_full_build" | grep -nF 'sh ../scripts/inspect-theme-ipk.sh "${theme_packages[0]}"' | cut -d: -f1)
 firmware_count_line=$(printf '%s\n' "$normalized_full_build" | grep -nF '[ "${#firmware[@]}" -eq 1 ]' | cut -d: -f1)
-[ -n "$core_inspect_line" ] && [ -n "$luci_inspect_line" ] && [ -n "$firmware_count_line" ] &&
+[ -n "$core_inspect_line" ] && [ -n "$luci_inspect_line" ] && [ -n "$theme_inspect_line" ] && [ -n "$firmware_count_line" ] &&
 	[ "$compile_line" -lt "$core_inspect_line" ] && [ "$compile_line" -lt "$luci_inspect_line" ] &&
+	[ "$compile_line" -lt "$theme_inspect_line" ] &&
 	[ "$compile_line" -lt "$firmware_count_line" ] || {
 	echo 'full-source artifacts are inspected or selected before the full compile succeeds' >&2
 	exit 1

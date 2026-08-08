@@ -53,6 +53,8 @@ require_fixed "$MT7530_PATCH" 'priv->id == ID_MT7531'
 require_fixed "$MT7530_PATCH" 'return -EOPNOTSUPP;'
 
 require_fixed "$CONFIG" 'CONFIG_PACKAGE_ip-bridge=y'
+require_fixed "$CONFIG" 'CONFIG_PACKAGE_luci-theme-bootstrap=y'
+require_fixed "$CONFIG" 'CONFIG_PACKAGE_luci-theme-proxypool=y'
 
 # Only the full-source build is allowed to emit a GL-MT6000 firmware image.
 # SDK remains useful for package inspection; ImageBuilder cannot replace the
