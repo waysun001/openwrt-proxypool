@@ -125,6 +125,9 @@ make_ipk() {
 			mkdir -p "$data/etc/proxypool"
 			printf 'schema_version=1\n' >"$data/etc/proxypool/firewall-safety-activated"
 			;;
+		payload_image_authorization)
+			printf '%s\n' v2-image-activation-v1 >"$data/usr/lib/proxypool/v2-image-activation-authority"
+			;;
 		payload_uci_default)
 			mkdir -p "$data/etc/uci-defaults"
 			printf '%s\n' '#!/bin/sh' 'exit 0' >"$data/etc/uci-defaults/99-proxypool-safety"
@@ -225,7 +228,7 @@ for invalid_kind in \
 	missing_conffiles extra_conffiles crlf_conffiles no_newline_conffiles \
 	payload_v2 payload_state \
 	payload_ppp_ip_up payload_ppp_ip_down payload_ppp_ip_up_d payload_ppp_ip_down_d \
-	payload_journal payload_wireless_quarantine payload_activation_marker payload_uci_default bad_keep \
+	payload_journal payload_wireless_quarantine payload_activation_marker payload_image_authorization payload_uci_default bad_keep \
 	missing_firewall4_dep missing_bridge_dep missing_uci_dep missing_ucode_dep missing_ucode_ubus_dep missing_ubus_dep missing_jshn_dep \
 	missing_ip_bridge_dep missing_coreutils_stat_dep missing_coreutils_timeout_dep \
 	missing_postinst bad_postinst missing_guard missing_activate_init missing_backend_activator missing_v2_default missing_template \
@@ -278,6 +281,7 @@ grep -Fq 'package payload must not own PPP callback path: /etc/ppp/ip-down.d' "$
 grep -Fq 'package payload unexpectedly owns /etc/proxypool/firewall-transaction' "$TEST_TMP/payload_journal.log"
 grep -Fq 'package payload unexpectedly owns /etc/proxypool/wireless-quarantine' "$TEST_TMP/payload_wireless_quarantine.log"
 grep -Fq 'package payload unexpectedly owns /etc/proxypool/firewall-safety-activated' "$TEST_TMP/payload_activation_marker.log"
+grep -Fq 'package payload must not grant full-image activation authority' "$TEST_TMP/payload_image_authorization.log"
 grep -Fq 'package payload must not own /etc/uci-defaults entries' "$TEST_TMP/payload_uci_default.log"
 grep -Fq 'missing or invalid sysupgrade keep list' "$TEST_TMP/bad_keep.log"
 grep -Fq 'missing required dependency: firewall4' "$TEST_TMP/missing_firewall4_dep.log"

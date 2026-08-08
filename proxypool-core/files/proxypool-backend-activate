@@ -16,6 +16,7 @@ STATE_DIR="${PROXYPOOL_STATE_DIR:-/etc/proxypool}"
 ACTIVATED_BACKEND="${PROXYPOOL_ACTIVATED_BACKEND:-$STATE_DIR/activated-backend}"
 CLEANUP_REQUIRED="${PROXYPOOL_CLEANUP_REQUIRED:-$STATE_DIR/cleanup-required}"
 ACTIVATION_REQUEST="${PROXYPOOL_ACTIVATION_REQUEST:-$STATE_DIR/v2-activation-request}"
+IMAGE_AUTHORIZATION="${PROXYPOOL_IMAGE_AUTHORIZATION:-/usr/lib/proxypool/v2-image-activation-authority}"
 RUNTIME_MARKER="${PROXYPOOL_RUNTIME_MARKER:-/var/run/proxypool.backend}"
 QUARANTINE_MARKER="${PROXYPOOL_QUARANTINE_MARKER:-/var/run/proxypool.backend.cleanup-required}"
 TRANSITION_MARKER="${PROXYPOOL_TRANSITION_MARKER:-/var/run/proxypool.transition}"
@@ -163,6 +164,7 @@ for path_description in \
 	"$ACTIVATED_BACKEND:activated backend marker" \
 	"$CLEANUP_REQUIRED:cleanup marker" \
 	"$ACTIVATION_REQUEST:activation request" \
+	"$IMAGE_AUTHORIZATION:full-image activation authorization" \
 	"$RUNTIME_MARKER:runtime marker" \
 	"$QUARANTINE_MARKER:quarantine marker" \
 	"$TRANSITION_MARKER:transition marker" \
@@ -235,7 +237,15 @@ if [ "$selector" = v2_shadow ] && [ "$activated" = v2_shadow ] && [ -z "$cleanup
 	exit 0
 fi
 
-request=$(read_exact_line "$ACTIVATION_REQUEST") || fail 'a safe V2 activation request is required'
+if [ -e "$ACTIVATION_REQUEST" ] || [ -L "$ACTIVATION_REQUEST" ]; then
+	request=$(read_exact_line "$ACTIVATION_REQUEST") || fail 'activation request is unsafe'
+else
+	image_authorization=$(read_exact_line "$IMAGE_AUTHORIZATION") ||
+		fail 'a safe V2 activation request is required'
+	[ "$image_authorization" = v2-image-activation-v1 ] ||
+		fail 'full-image activation authorization is invalid'
+	request=image
+fi
 require_regular "$BOOT_ID_FILE" 'boot ID file'
 current_boot=$(read_exact_line "$BOOT_ID_FILE") || fail 'boot ID is invalid'
 printf '%s\n' "$current_boot" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' ||

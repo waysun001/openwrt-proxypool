@@ -77,6 +77,11 @@ for runtime_state in activated-backend cleanup-required firewall-transaction fir
 		exit 1
 	}
 done
+image_authorization="$inspect_tmp/data/usr/lib/proxypool/v2-image-activation-authority"
+if [ -e "$image_authorization" ] || [ -L "$image_authorization" ]; then
+	echo 'package payload must not grant full-image activation authority' >&2
+	exit 1
+fi
 
 for forbidden_ppp_callback in etc/ppp/ip-up etc/ppp/ip-down etc/ppp/ip-up.d etc/ppp/ip-down.d; do
 	callback_path="$inspect_tmp/data/$forbidden_ppp_callback"

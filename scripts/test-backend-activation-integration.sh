@@ -73,7 +73,12 @@ reset_case() {
 	name=$1
 	CASE_ROOT="$TEST_TMP/$name"
 	rm -rf "$CASE_ROOT"
-	mkdir -p "$CASE_ROOT/etc/config" "$CASE_ROOT/etc/proxypool" "$CASE_ROOT/run" "$CASE_ROOT/lock"
+	mkdir -p \
+		"$CASE_ROOT/etc/config" \
+		"$CASE_ROOT/etc/proxypool" \
+		"$CASE_ROOT/usr/lib/proxypool" \
+		"$CASE_ROOT/run" \
+		"$CASE_ROOT/lock"
 	cp "$ROOT/files/etc/config/proxypool" "$CASE_ROOT/etc/config/proxypool"
 	cp "$ROOT/files/etc/config/proxypool_v2" "$CASE_ROOT/etc/config/proxypool_v2"
 	printf '%s\n' \
@@ -99,6 +104,7 @@ run_activate() {
 	PROXYPOOL_ACTIVATED_BACKEND="$CASE_ROOT/etc/proxypool/activated-backend" \
 	PROXYPOOL_CLEANUP_REQUIRED="$CASE_ROOT/etc/proxypool/cleanup-required" \
 	PROXYPOOL_ACTIVATION_REQUEST="$CASE_ROOT/etc/proxypool/v2-activation-request" \
+	PROXYPOOL_IMAGE_AUTHORIZATION="$CASE_ROOT/usr/lib/proxypool/v2-image-activation-authority" \
 	PROXYPOOL_RUNTIME_MARKER="$CASE_ROOT/run/proxypool.backend" \
 	PROXYPOOL_QUARANTINE_MARKER="$CASE_ROOT/run/proxypool.backend.cleanup-required" \
 	PROXYPOOL_TRANSITION_MARKER="$CASE_ROOT/run/proxypool.transition" \
@@ -319,6 +325,26 @@ grep -Fq "runtime_backend 'v1'" "$CASE_ROOT/etc/config/proxypool_runtime" ||
 [ ! -e "$CASE_ROOT/etc/proxypool/activated-backend" ] ||
 	fail 'same-boot refusal claimed backend ownership'
 [ ! -s "$CASE_ROOT/migrate.log" ] || fail 'same-boot refusal ran migration'
+
+# A settings-preserving sysupgrade can retain an overlay whiteout for the
+# consumed one-time request.  The full image's separate authorization witness
+# must recover a cold, stopped V2 owner without weakening package-install
+# reboot gating.  This witness is staged only by the full firmware workflow.
+reset_case image-request-whiteout
+printf '%s\n' v2_shadow >"$CASE_ROOT/etc/proxypool/activated-backend"
+printf '%s\n' v2-image-activation-v1 >"$CASE_ROOT/usr/lib/proxypool/v2-image-activation-authority"
+run_activate || fail 'cold image authorization did not recover a whiteouted activation request'
+assert_v2_committed
+[ ! -s "$CASE_ROOT/migrate.log" ] || fail 'whiteout recovery re-ran V1 migration'
+
+# The same stopped state without the full-image witness remains fail-closed;
+# installing the core IPK alone must never grant cold image authority.
+reset_case request-missing-without-image-authorization
+printf '%s\n' v2_shadow >"$CASE_ROOT/etc/proxypool/activated-backend"
+if run_activate >/dev/null 2>&1; then
+	fail 'missing request activated without full-image authorization'
+fi
+[ ! -s "$CASE_ROOT/migrate.log" ] || fail 'unauthorized missing-request recovery ran migration'
 
 # Even after a reboot request becomes eligible, any boot-local legacy or procd
 # evidence keeps the router fail-closed and leaves the durable request intact.

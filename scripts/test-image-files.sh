@@ -8,11 +8,16 @@ trap 'rm -rf "$TEST_TMP"' EXIT HUP INT TERM
 SOURCE="$TEST_TMP/source"
 DESTINATION="$TEST_TMP/staged"
 
-mkdir -p "$SOURCE/etc/config" "$SOURCE/etc/uci-defaults" "$SOURCE/etc/proxypool"
+mkdir -p \
+	"$SOURCE/etc/config" \
+	"$SOURCE/etc/uci-defaults" \
+	"$SOURCE/etc/proxypool" \
+	"$SOURCE/usr/lib/proxypool"
 printf '%s\n' "config global 'global'" >"$SOURCE/etc/config/proxypool"
 printf '%s\n' "config global 'global'" >"$SOURCE/etc/config/proxypool_v2"
 printf '%s\n' "config global 'global'" >"$SOURCE/etc/config/proxypool_runtime"
 printf '%s\n' image >"$SOURCE/etc/proxypool/v2-activation-request"
+printf '%s\n' v2-image-activation-v1 >"$SOURCE/usr/lib/proxypool/v2-image-activation-authority"
 printf '%s\n' '#!/bin/sh' 'exit 0' >"$SOURCE/etc/uci-defaults/keep"
 chmod 644 "$SOURCE/etc/config/proxypool"
 chmod 644 "$SOURCE/etc/config/proxypool_v2"
@@ -25,6 +30,9 @@ cmp -s "$SOURCE/etc/config/proxypool" "$DESTINATION/etc/config/proxypool"
 cmp -s "$SOURCE/etc/config/proxypool_v2" "$DESTINATION/etc/config/proxypool_v2"
 cmp -s "$SOURCE/etc/config/proxypool_runtime" "$DESTINATION/etc/config/proxypool_runtime"
 cmp -s "$SOURCE/etc/proxypool/v2-activation-request" "$DESTINATION/etc/proxypool/v2-activation-request"
+cmp -s \
+	"$SOURCE/usr/lib/proxypool/v2-image-activation-authority" \
+	"$DESTINATION/usr/lib/proxypool/v2-image-activation-authority"
 cmp -s "$SOURCE/etc/uci-defaults/keep" "$DESTINATION/etc/uci-defaults/keep"
 [ "$(stat -c '%a' "$SOURCE/etc/config/proxypool")" = 644 ]
 [ "$(stat -c '%a' "$SOURCE/etc/config/proxypool_v2")" = 644 ]
@@ -66,6 +74,19 @@ if sh "$PREPARE" "$missing_request_source" "$missing_request_destination" >/dev/
 fi
 [ ! -e "$missing_request_destination" ] || {
 	echo 'failed activation-request staging left a partial destination' >&2
+	exit 1
+}
+
+missing_authorization_source="$TEST_TMP/missing-image-authorization"
+missing_authorization_destination="$TEST_TMP/staged-missing-image-authorization"
+cp -a "$SOURCE" "$missing_authorization_source"
+rm "$missing_authorization_source/usr/lib/proxypool/v2-image-activation-authority"
+if sh "$PREPARE" "$missing_authorization_source" "$missing_authorization_destination" >/dev/null 2>&1; then
+	echo 'staging accepted a missing full-image activation authorization' >&2
+	exit 1
+fi
+[ ! -e "$missing_authorization_destination" ] || {
+	echo 'failed image-authorization staging left a partial destination' >&2
 	exit 1
 }
 

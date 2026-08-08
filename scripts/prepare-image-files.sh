@@ -31,6 +31,12 @@ source_activation_request="$source_dir/etc/proxypool/v2-activation-request"
 	printf 'source V2 activation request is missing or invalid: %s\n' "$source_activation_request" >&2
 	exit 1
 }
+source_image_authorization="$source_dir/usr/lib/proxypool/v2-image-activation-authority"
+[ -f "$source_image_authorization" ] && [ ! -L "$source_image_authorization" ] &&
+	[ "$(cat "$source_image_authorization")" = v2-image-activation-v1 ] || {
+	printf 'source full-image activation authorization is missing or invalid: %s\n' "$source_image_authorization" >&2
+	exit 1
+}
 
 mkdir -p "$destination_dir"
 cp -a "$source_dir/." "$destination_dir/"
@@ -56,3 +62,10 @@ activation_request="$state_dir/v2-activation-request"
 }
 chmod 700 "$state_dir"
 chmod 600 "$activation_request"
+
+image_authorization="$destination_dir/usr/lib/proxypool/v2-image-activation-authority"
+[ -f "$image_authorization" ] && [ ! -L "$image_authorization" ] || {
+	printf 'staged full-image activation authorization is missing or unsafe: %s\n' "$image_authorization" >&2
+	exit 1
+}
+chmod 644 "$image_authorization"
