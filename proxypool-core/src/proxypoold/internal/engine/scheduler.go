@@ -15,10 +15,11 @@ import (
 const schedulerQueueCapacity = MaxRetainedJobs * 2
 
 type SchedulerConfig struct {
-	L2TPConcurrency  int
-	ProxyConcurrency int
-	ConnectTimeout   time.Duration
-	StopTimeout      time.Duration
+	L2TPConcurrency      int
+	ProxyConcurrency     int
+	ConnectTimeout       time.Duration
+	StopTimeout          time.Duration
+	TrafficSampleInterval time.Duration
 }
 
 type scheduledNode struct {
@@ -31,6 +32,8 @@ type scheduledNode struct {
 type Scheduler struct {
 	controller *Controller
 	adapter    platform.NodeAdapter
+	trafficReader platform.InterfaceTrafficReader
+	traffic       *trafficTracker
 	gates      []platform.SessionGate
 	config     SchedulerConfig
 	queue      chan Job
@@ -45,6 +48,10 @@ type Scheduler struct {
 }
 
 func NewScheduler(controller *Controller, adapter platform.NodeAdapter, config SchedulerConfig, gates ...platform.SessionGate) *Scheduler {
+	return NewSchedulerWithTraffic(controller, adapter, nil, config, gates...)
+}
+
+func NewSchedulerWithTraffic(controller *Controller, adapter platform.NodeAdapter, trafficReader platform.InterfaceTrafficReader, config SchedulerConfig, gates ...platform.SessionGate) *Scheduler {
 	if config.L2TPConcurrency < 1 {
 		config.L2TPConcurrency = 4
 	}
@@ -57,9 +64,14 @@ func NewScheduler(controller *Controller, adapter platform.NodeAdapter, config S
 	if config.StopTimeout <= 0 {
 		config.StopTimeout = 10 * time.Second
 	}
+	if config.TrafficSampleInterval <= 0 {
+		config.TrafficSampleInterval = time.Second
+	}
 	return &Scheduler{
 		controller: controller,
 		adapter:    adapter,
+		trafficReader: trafficReader,
+		traffic:       newTrafficTracker(),
 		gates:      append([]platform.SessionGate(nil), gates...),
 		config:     config,
 		queue:      make(chan Job, schedulerQueueCapacity),
@@ -96,11 +108,20 @@ func (scheduler *Scheduler) Run(ctx context.Context) error {
 			scheduler.Submit(job)
 		}
 	}
+	var trafficTicker *time.Ticker
+	var trafficTicks <-chan time.Time
+	if scheduler.trafficReader != nil {
+		trafficTicker = time.NewTicker(scheduler.config.TrafficSampleInterval)
+		trafficTicks = trafficTicker.C
+		defer trafficTicker.Stop()
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			scheduler.workers.Wait()
 			return nil
+		case sampledAt := <-trafficTicks:
+			scheduler.sampleTraffic(sampledAt)
 		case job := <-scheduler.queue:
 			scheduler.mu.Lock()
 			delete(scheduler.submitted, job.ID)
@@ -150,6 +171,9 @@ func (scheduler *Scheduler) Shutdown(ctx context.Context) error {
 	}
 	scheduler.sessions = make(map[string]platform.Session)
 	scheduler.mu.Unlock()
+	for nodeID, session := range sessions {
+		scheduler.traffic.End(nodeID, session.Generation)
+	}
 	sort.Strings(nodeIDs)
 	failed := false
 	for _, nodeID := range nodeIDs {
@@ -538,16 +562,46 @@ func (scheduler *Scheduler) nodeLock(nodeID string) *sync.Mutex {
 
 func (scheduler *Scheduler) putSession(nodeID string, session platform.Session) {
 	scheduler.mu.Lock()
-	defer scheduler.mu.Unlock()
 	scheduler.sessions[nodeID] = session
+	scheduler.mu.Unlock()
+	scheduler.traffic.Begin(nodeID, session.Generation, session.Interface)
 }
 
 func (scheduler *Scheduler) takeSession(nodeID string) platform.Session {
 	scheduler.mu.Lock()
-	defer scheduler.mu.Unlock()
 	session := scheduler.sessions[nodeID]
 	delete(scheduler.sessions, nodeID)
+	scheduler.mu.Unlock()
+	scheduler.traffic.End(nodeID, session.Generation)
 	return session
+}
+
+func (scheduler *Scheduler) Traffic(nodeID string) TrafficSnapshot {
+	if scheduler == nil {
+		return TrafficSnapshot{}
+	}
+	return scheduler.traffic.Snapshot(nodeID)
+}
+
+func (scheduler *Scheduler) sampleTraffic(sampledAt time.Time) {
+	scheduler.mu.Lock()
+	sessions := make(map[string]platform.Session, len(scheduler.sessions))
+	for nodeID, session := range scheduler.sessions {
+		sessions[nodeID] = session
+	}
+	scheduler.mu.Unlock()
+	for nodeID, session := range sessions {
+		if session.Interface == "" {
+			scheduler.traffic.Unavailable(nodeID, session.Generation, sampledAt)
+			continue
+		}
+		counters, err := scheduler.trafficReader.ReadInterfaceCounters(session.Interface)
+		if err != nil {
+			scheduler.traffic.Unavailable(nodeID, session.Generation, sampledAt)
+			continue
+		}
+		scheduler.traffic.Sample(nodeID, session.Generation, counters, sampledAt)
+	}
 }
 
 func (controller *Controller) schedulerWork(jobID, nodeID string) (Job, model.Node, bool) {

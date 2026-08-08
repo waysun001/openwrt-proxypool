@@ -42,6 +42,10 @@ type schedulerSubmitter interface {
 	Submit(Job)
 }
 
+type trafficReporter interface {
+	Traffic(string) TrafficSnapshot
+}
+
 type diagnosticsService interface {
 	Create() (diagnostics.DiagnosticStatus, error)
 	Get(string) (diagnostics.DiagnosticStatus, bool)
@@ -116,6 +120,7 @@ type Controller struct {
 	deviceSource platform.DeviceSource
 	leaseManager platform.LeaseManager
 	scheduler    schedulerSubmitter
+	traffic      trafficReporter
 	importer     *importer.Manager
 	diagnostics  diagnosticsService
 
@@ -235,6 +240,7 @@ func (controller *Controller) AttachScheduler(scheduler schedulerSubmitter) {
 	controller.mu.Lock()
 	defer controller.mu.Unlock()
 	controller.scheduler = scheduler
+	controller.traffic, _ = scheduler.(trafficReporter)
 }
 
 // ReconcileStartup durably queues every enabled node that is not already
@@ -612,6 +618,9 @@ func (controller *Controller) handleStatus(request api.Request) api.Response {
 	defer controller.mu.Unlock()
 	desired, runtimeSummary := summarizeDesired(controller.desired)
 	for index := range runtimeSummary.Nodes {
+		if controller.traffic != nil {
+			runtimeSummary.Nodes[index].Traffic = controller.traffic.Traffic(runtimeSummary.Nodes[index].NodeID)
+		}
 		if status, exists := controller.statuses[runtimeSummary.Nodes[index].NodeID]; exists {
 			runtimeSummary.Nodes[index].JobID = status.JobID
 			runtimeSummary.Nodes[index].State = status.State

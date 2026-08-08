@@ -96,6 +96,7 @@ type RuntimeNodeSummary struct {
 	Attempts  uint64             `json:"attempts"`
 	LastError *PublicError       `json:"last_error,omitempty"`
 	RetryAt   *time.Time         `json:"retry_at,omitempty"`
+	Traffic   TrafficSnapshot    `json:"traffic"`
 }
 
 type ReconciliationSummary struct {
