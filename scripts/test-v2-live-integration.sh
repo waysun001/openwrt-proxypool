@@ -11,6 +11,7 @@ LUCI="$ROOT/luci-app-proxypool/luasrc/controller/proxypool.lua"
 LUCI_RPC="$ROOT/luci-app-proxypool/luasrc/model/proxypool_rpc.lua"
 VIEW="$ROOT/luci-app-proxypool/luasrc/view/proxypool/main.htm"
 V2_JS="$ROOT/luci-app-proxypool/htdocs/luci-static/resources/proxypool-v2.js"
+THEME_HEADER="$ROOT/luci-theme-proxypool/ucode/template/themes/proxypool/header.ut"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 require() { grep -Fq "$2" "$1" || fail "$3"; }
@@ -51,7 +52,8 @@ require "$V2_JS" "apiCall('bindings_replace'" 'LuCI does not use one atomic node
 require "$VIEW" '无需手工输入' 'LuCI does not expose automatic device discovery'
 require "$VIEW" 'pp-v2-import-raw' 'LuCI batch import modal is missing'
 require "$VIEW" 'pp-v2-binding-modal' 'LuCI node binding modal is missing'
-require "$VIEW" 'proxypool-global-menu' 'LuCI page-local navigation is missing'
+require "$THEME_HEADER" 'proxypool-global-menu' 'LuCI global theme navigation is missing'
+if grep -Fq 'proxypool-global-menu' "$VIEW"; then fail 'LuCI page duplicates theme-owned navigation'; fi
 
 if grep -Fq 'function pollJob' "$V2_JS"; then fail 'LuCI still blocks mutation UI while polling a whole job'; fi
 if grep -Eq 'sequentialConnect|pending marker' "$V2_JS"; then fail 'LuCI still owns per-node import orchestration'; fi
