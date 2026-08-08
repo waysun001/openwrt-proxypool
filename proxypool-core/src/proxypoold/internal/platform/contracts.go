@@ -36,6 +36,14 @@ type LeaseManager interface {
 	Remove(context.Context, model.Device, uint64) error
 }
 
+// LeaseProjectionManager atomically replaces a complete set of owned DHCP
+// reservations. It is separate from LeaseManager so existing single-device
+// integrations retain their API contract.
+type LeaseProjectionManager interface {
+	LeaseManager
+	Replace(context.Context, []model.Device, []model.Device, uint64) error
+}
+
 // NodeRequest carries one scheduler-owned attempt. Callers must treat the
 // embedded node as secret-bearing configuration and never log the value.
 type NodeRequest struct {

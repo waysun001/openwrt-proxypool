@@ -337,6 +337,230 @@ func (manager *LeaseManager) Remove(ctx context.Context, device model.Device, re
 	return nil
 }
 
+// Replace changes the complete ProxyPool-owned DHCP reservation projection in
+// one UCI commit and one dnsmasq reload. The before projection is used both for
+// ownership proof and for exact rollback after a post-commit failure.
+func (manager *LeaseManager) Replace(ctx context.Context, before, after []model.Device, revision uint64) error {
+	if manager == nil || manager.runner == nil || manager.source == nil || revision == 0 {
+		return errors.New("DHCP reservation replacement is invalid")
+	}
+	beforeByID, err := manager.leaseDeviceMap(before, revision)
+	if err != nil {
+		return err
+	}
+	afterByID, err := manager.leaseDeviceMap(after, revision)
+	if err != nil {
+		return err
+	}
+	touched := changedLeaseDeviceIDs(beforeByID, afterByID)
+	if len(touched) == 0 {
+		return nil
+	}
+	for _, id := range touched {
+		if device, exists := afterByID[id]; exists {
+			if err := manager.confirmDevice(ctx, device); err != nil {
+				return err
+			}
+		}
+	}
+	if err := manager.ensureNoPendingDHCP(ctx); err != nil {
+		return err
+	}
+	contents, err := manager.runner.Run(ctx, "/sbin/uci", "-q", "show", "dhcp")
+	if err != nil {
+		return errors.New("DHCP reservation inventory failed")
+	}
+	hosts, err := parseUCIHosts(contents)
+	if err != nil {
+		return errors.New("DHCP reservation inventory is invalid")
+	}
+	snapshot := make(map[string]uciHost, len(touched))
+	snapshotExists := make(map[string]bool, len(touched))
+	touchedSections := make(map[string]struct{}, len(touched))
+	for _, id := range touched {
+		section := "proxypool_" + id
+		touchedSections[section] = struct{}{}
+		if host, exists := hosts[section]; exists {
+			snapshot[section], snapshotExists[section] = host, true
+		}
+		if device, exists := beforeByID[id]; exists {
+			if host, present := hosts[section]; present && !ownedLeaseHostMatches(host, device) {
+				return errors.New("DHCP reservation ownership mismatch")
+			}
+		}
+	}
+	for _, id := range touched {
+		device, exists := afterByID[id]
+		if !exists {
+			continue
+		}
+		for section, host := range hosts {
+			if _, isTouched := touchedSections[section]; isTouched {
+				continue
+			}
+			if host.MAC == device.MAC || host.IP == device.FixedIPv4.String() {
+				return errors.New("DHCP reservation conflicts with another host")
+			}
+		}
+	}
+	if err := manager.stageLeaseProjection(ctx, touched, afterByID, hosts); err != nil {
+		_, _ = manager.runner.Run(context.Background(), "/sbin/uci", "-q", "revert", "dhcp")
+		return err
+	}
+	projection, err := manager.runner.Run(ctx, "/sbin/uci", "-q", "show", "dhcp")
+	if err != nil || !leaseProjectionMatches(projection, touched, afterByID) {
+		_, _ = manager.runner.Run(context.Background(), "/sbin/uci", "-q", "revert", "dhcp")
+		return errors.New("DHCP reservation replacement verification failed")
+	}
+	if _, err := manager.runner.Run(ctx, "/sbin/uci", "-q", "commit", "dhcp"); err != nil {
+		_, _ = manager.runner.Run(context.Background(), "/sbin/uci", "-q", "revert", "dhcp")
+		return errors.New("DHCP reservation replacement commit failed")
+	}
+	if _, err := manager.runner.Run(ctx, "/etc/init.d/dnsmasq", "reload"); err != nil {
+		manager.restoreLeaseProjection(touched, snapshot, snapshotExists)
+		return errors.New("DHCP reservation replacement reload failed")
+	}
+	for _, id := range touched {
+		device, exists := afterByID[id]
+		if !exists {
+			continue
+		}
+		if err := manager.confirmDevice(ctx, device); err != nil {
+			manager.restoreLeaseProjection(touched, snapshot, snapshotExists)
+			return errors.New("DHCP reservation replacement live lease verification failed")
+		}
+	}
+	return nil
+}
+
+func (manager *LeaseManager) leaseDeviceMap(devices []model.Device, revision uint64) (map[string]model.Device, error) {
+	result := make(map[string]model.Device, len(devices))
+	macs := make(map[string]struct{}, len(devices))
+	addresses := make(map[string]struct{}, len(devices))
+	for _, device := range devices {
+		if _, exists := result[device.ID]; exists {
+			return nil, errors.New("DHCP reservation replacement contains duplicate devices")
+		}
+		if err := manager.validateDevice(device, revision); err != nil {
+			return nil, err
+		}
+		address := device.FixedIPv4.String()
+		if _, exists := macs[device.MAC]; exists {
+			return nil, errors.New("DHCP reservation replacement contains duplicate MAC addresses")
+		}
+		if _, exists := addresses[address]; exists {
+			return nil, errors.New("DHCP reservation replacement contains duplicate IPv4 addresses")
+		}
+		macs[device.MAC] = struct{}{}
+		addresses[address] = struct{}{}
+		result[device.ID] = device
+	}
+	return result, nil
+}
+
+func changedLeaseDeviceIDs(before, after map[string]model.Device) []string {
+	set := make(map[string]struct{}, len(before)+len(after))
+	for id, device := range before {
+		candidate, exists := after[id]
+		if !exists || !sameLeaseDevice(device, candidate) {
+			set[id] = struct{}{}
+		}
+	}
+	for id, device := range after {
+		candidate, exists := before[id]
+		if !exists || !sameLeaseDevice(device, candidate) {
+			set[id] = struct{}{}
+		}
+	}
+	ids := make([]string, 0, len(set))
+	for id := range set {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func sameLeaseDevice(left, right model.Device) bool {
+	return left.ID == right.ID && left.MAC == right.MAC && left.FixedIPv4 == right.FixedIPv4 && sanitizeHostname(left.Hostname) == sanitizeHostname(right.Hostname)
+}
+
+func ownedLeaseHostMatches(host uciHost, device model.Device) bool {
+	return host.Type == "host" && host.MAC == device.MAC && host.IP == device.FixedIPv4.String()
+}
+
+func (manager *LeaseManager) stageLeaseProjection(ctx context.Context, touched []string, after map[string]model.Device, existing map[string]uciHost) error {
+	for _, id := range touched {
+		section := "proxypool_" + id
+		if _, exists := existing[section]; exists {
+			if _, err := manager.runner.Run(ctx, "/sbin/uci", "-q", "delete", "dhcp."+section); err != nil {
+				return errors.New("DHCP reservation replacement staging failed")
+			}
+		}
+		device, exists := after[id]
+		if !exists {
+			continue
+		}
+		commands := [][]string{
+			{"-q", "set", "dhcp." + section + "=host"},
+			{"-q", "set", "dhcp." + section + ".mac=" + device.MAC},
+			{"-q", "set", "dhcp." + section + ".ip=" + device.FixedIPv4.String()},
+		}
+		if hostname := sanitizeHostname(device.Hostname); hostname != "" {
+			commands = append(commands, []string{"-q", "set", "dhcp." + section + ".name=" + hostname})
+		}
+		for _, args := range commands {
+			if _, err := manager.runner.Run(ctx, "/sbin/uci", args...); err != nil {
+				return errors.New("DHCP reservation replacement staging failed")
+			}
+		}
+	}
+	return nil
+}
+
+func leaseProjectionMatches(contents []byte, touched []string, after map[string]model.Device) bool {
+	hosts, err := parseUCIHosts(contents)
+	if err != nil {
+		return false
+	}
+	for _, id := range touched {
+		host, exists := hosts["proxypool_"+id]
+		device, wanted := after[id]
+		if exists != wanted {
+			return false
+		}
+		if wanted && (!ownedLeaseHostMatches(host, device) || host.Name != sanitizeHostname(device.Hostname)) {
+			return false
+		}
+	}
+	return true
+}
+
+func (manager *LeaseManager) restoreLeaseProjection(touched []string, snapshot map[string]uciHost, snapshotExists map[string]bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), defaultCommandTimeout)
+	defer cancel()
+	for _, id := range touched {
+		section := "proxypool_" + id
+		_, _ = manager.runner.Run(ctx, "/sbin/uci", "-q", "delete", "dhcp."+section)
+		host, exists := snapshot[section]
+		if !snapshotExists[section] || !exists {
+			continue
+		}
+		commands := [][]string{
+			{"-q", "set", "dhcp." + section + "=" + host.Type},
+			{"-q", "set", "dhcp." + section + ".mac=" + host.MAC},
+			{"-q", "set", "dhcp." + section + ".ip=" + host.IP},
+		}
+		if host.Name != "" {
+			commands = append(commands, []string{"-q", "set", "dhcp." + section + ".name=" + host.Name})
+		}
+		for _, args := range commands {
+			_, _ = manager.runner.Run(ctx, "/sbin/uci", args...)
+		}
+	}
+	_, _ = manager.runner.Run(ctx, "/sbin/uci", "-q", "commit", "dhcp")
+	_, _ = manager.runner.Run(ctx, "/etc/init.d/dnsmasq", "reload")
+}
+
 func (manager *LeaseManager) ensureNoPendingDHCP(ctx context.Context) error {
 	changes, err := manager.runner.Run(ctx, "/sbin/uci", "-q", "changes", "dhcp")
 	if err != nil || len(bytes.TrimSpace(changes)) != 0 {
