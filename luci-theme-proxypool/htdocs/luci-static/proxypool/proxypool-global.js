@@ -1,8 +1,7 @@
 (function() {
 	'use strict';
 
-	function setText(id, value) {
-		var target = document.getElementById(id);
+	function setText(target, value) {
 		if (target) target.textContent = String(value);
 	}
 
@@ -10,6 +9,9 @@
 		var menu = document.getElementById('proxypool-global-menu');
 		if (!menu || typeof window.fetch !== 'function') return;
 		var statusURL = menu.getAttribute('data-status-url');
+		var totalTarget = document.getElementById('pp-stat-total');
+		var connectedTarget = document.getElementById('pp-stat-connected');
+		var disconnectedTarget = document.getElementById('pp-stat-disconnected');
 		if (!statusURL) return;
 
 		window.fetch(statusURL, {
@@ -24,9 +26,9 @@
 			var desired = data.desired && data.desired.nodes || [];
 			var runtime = data.runtime && data.runtime.nodes || [];
 			var online = runtime.filter(function(node) { return node.state === 'online'; }).length;
-			setText('pp-stat-total', desired.length);
-			setText('pp-stat-connected', online);
-			setText('pp-stat-disconnected', Math.max(0, desired.length - online));
+			setText(totalTarget, desired.length);
+			setText(connectedTarget, online);
+			setText(disconnectedTarget, Math.max(0, desired.length - online));
 		}).catch(function() {});
 	}
 
