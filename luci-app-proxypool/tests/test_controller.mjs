@@ -44,6 +44,20 @@ test('controller separates GET reads from LuCI protected POST writes', () => {
   assert.match(source, /node_delete\s*=\s*"node\.delete"/);
 });
 
+test('node notes cross the Lua bridge with bounded control-safe text', () => {
+  assert.match(source, /local note\s*=\s*bounded\(http\.formvalue\("note"\),\s*800,\s*false\)/);
+  assert.match(source, /note:find\("%c"\)/);
+  assert.match(source, /note\s*=\s*note/);
+  assert.match(mainView, /<input name="note" maxlength="200"/);
+});
+
+test('node table exposes compact traffic columns and text-only note rendering', () => {
+  assert.match(mainView, /<th>累计流量<\/th><th>实时速度<\/th>/);
+  assert.match(v2Script, /pp-v2-node-note[^\n]+node\.note/);
+  assert.match(v2Script, /cell\.colSpan\s*=\s*11/);
+  assert.doesNotMatch(v2Script, /innerHTML/);
+});
+
 test('atomic device membership writes accept one bounded dense JSON array', () => {
   assert.match(source, /bindings_replace\s*=\s*"device\.bindings\.replace"/);
   assert.match(source, /formvalue\("device_ids_json"\)/);

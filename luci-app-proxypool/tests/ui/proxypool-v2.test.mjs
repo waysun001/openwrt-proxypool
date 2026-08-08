@@ -21,6 +21,37 @@ test('newer status replaces state and stale status is ignored', () => {
   assert.strictEqual(stale, newer);
 });
 
+test('status reduction preserves note and normalizes live traffic', () => {
+  const state = ui.reduceState(ui.initialState(), {
+    type: 'status.received',
+    value: {
+      config: { revision: 8 },
+      desired: { nodes: [{ id: 'node-a', note: '微信专用', enabled: true }] },
+      runtime: { nodes: [{
+        node_id: 'node-a', state: 'online',
+        traffic: { download_bytes: 2048, upload_bytes: 1024, download_bytes_per_second: 512, upload_bytes_per_second: 256 },
+      }] },
+    },
+  });
+  assert.equal(state.nodes[0].note, '微信专用');
+  assert.deepEqual(state.nodes[0].traffic, {
+    download_bytes: 2048,
+    upload_bytes: 1024,
+    download_bytes_per_second: 512,
+    upload_bytes_per_second: 256,
+    sampled_at: '',
+  });
+});
+
+test('byte and rate formatting is compact and bounded', () => {
+  assert.equal(ui.formatBytes(0), '0 B');
+  assert.equal(ui.formatBytes(1536), '1.5 KB');
+  assert.equal(ui.formatBytes(1048576), '1 MB');
+  assert.equal(ui.formatRate(1048576), '1 MB/s');
+  assert.equal(ui.formatBytes(-1), '0 B');
+  assert.equal(ui.formatBytes(Number.POSITIVE_INFINITY), '0 B');
+});
+
 test('stale device response cannot overwrite a newer configuration view', () => {
   const state = { ...ui.initialState(), revision: 9, devices: [{ id: 'fresh' }] };
   const stale = ui.reduceState(state, {
@@ -160,6 +191,32 @@ test('node validation preserves blank credentials on update', () => {
   assert.equal(result.params.expected_revision, 12);
 });
 
+test('node validation trims and bounds notes by Unicode code point', () => {
+  const valid = ui.validateNodeForm({
+    node_id: 'node-a', name: 'Node A', note: ' 微信专用 ', protocol: 'l2tp', enabled: true,
+    server: 'vpn.example', port: '1701', username: '', password: '', expires_at: '',
+    has_username: true, has_password: true,
+  }, 12);
+  assert.deepEqual(valid.errors, []);
+  assert.equal(valid.params.note, '微信专用');
+
+  const emoji = ui.validateNodeForm({
+    node_id: 'node-a', name: 'Node A', note: '😀'.repeat(200), protocol: 'l2tp', enabled: true,
+    server: 'vpn.example', port: '1701', username: '', password: '', expires_at: '',
+    has_username: true, has_password: true,
+  }, 12);
+  assert.equal(emoji.errors.includes('invalid_note'), false);
+
+  for (const note of ['界'.repeat(201), '第一行\n第二行', '节点\u0007备注']) {
+    const invalid = ui.validateNodeForm({
+      node_id: 'node-a', name: 'Node A', note, protocol: 'l2tp', enabled: true,
+      server: 'vpn.example', port: '1701', username: '', password: '', expires_at: '',
+      has_username: true, has_password: true,
+    }, 12);
+    assert.ok(invalid.errors.includes('invalid_note'));
+  }
+});
+
 test('node validation rejects unsupported protocol and missing create credentials', () => {
   const unsupported = ui.validateNodeForm({
     node_id: '', name: 'Proxy', protocol: 'socks5', enabled: true,
@@ -275,13 +332,14 @@ test('sanitized export uses an explicit allowlist and contains no credential mat
     config: { revision: 9 },
     desired: {
       enabled: true,
-      nodes: [{ id: 'node-a', name: 'A', protocol: 'l2tp', server: 'vpn.example', port: 1701, enabled: true, policy_id: 1, has_password: true, password: 'DO-NOT-EXPORT' }],
+      nodes: [{ id: 'node-a', name: 'A', note: '微信专用', protocol: 'l2tp', server: 'vpn.example', port: 1701, enabled: true, policy_id: 1, has_password: true, password: 'DO-NOT-EXPORT' }],
       devices: [{ id: 'device-a', mac: '00:11:22:33:44:55', node_id: 'node-a', enabled: true }],
       pending_bindings: [],
     },
   });
   const encoded = JSON.stringify(exported);
   assert.match(encoded, /vpn\.example/);
+  assert.equal(exported.desired.nodes[0].note, '微信专用');
   assert.equal(encoded.includes('DO-NOT-EXPORT'), false);
   assert.equal(encoded.includes('has_password'), false);
 });
