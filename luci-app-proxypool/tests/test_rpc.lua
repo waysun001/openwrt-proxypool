@@ -72,6 +72,18 @@ test("frames one request and validates one response", function()
     equal(#nixio.state.setopts, 2, "timeout option count")
 end)
 
+test("encodes empty parameters as an object for the strict daemon contract", function()
+    local serialized = '{"version":1,"id":"test-id","method":"status.get","params":[]}'
+    local result, err = call_with({ "response\n" }, { encoded = serialized })
+    truthy(result and result.ok, "missing daemon result")
+    equal(err, nil, "unexpected error")
+    equal(
+        nixio.state.sent,
+        '{"version":1,"id":"test-id","method":"status.get","params":{}}\n',
+        "empty parameters JSON shape"
+    )
+end)
+
 test("rejects an oversized request before opening a socket", function()
     local result, err = call_with({}, { encoded = string.rep("x", 1024 * 1024 + 1) })
     equal(result, nil, "oversized result")

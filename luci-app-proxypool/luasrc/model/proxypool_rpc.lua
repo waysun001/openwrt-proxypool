@@ -43,12 +43,17 @@ function rpc._call(method, params, dependencies)
     local nixio = dependencies.nixio or require "nixio"
     local make_request_id = dependencies.request_id or request_id
     local id = make_request_id()
+    local request_params = params or {}
     local encoded, payload = pcall(json.stringify, {
         version = 1,
         id = id,
         method = method,
-        params = params or {}
+        params = request_params
     })
+    -- luci.jsonc serializes an empty Lua table as []; the daemon contract requires {}.
+    if encoded and type(payload) == "string" and type(request_params) == "table" and next(request_params) == nil then
+        payload = payload:gsub('("params"%s*:%s*)%[%]', '%1{}', 1)
+    end
     if not encoded or type(payload) ~= "string" or #payload > MAX_FRAME_SIZE then
         return failure("invalid_request", "request encoding failed", 400)
     end
