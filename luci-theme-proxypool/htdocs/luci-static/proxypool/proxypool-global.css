@@ -1,0 +1,64 @@
+#proxypool-global-menu {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	min-height: 52px;
+	padding: 0 24px;
+	background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+	font-size: 14px;
+}
+
+#proxypool-global-menu .menu-links {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 4px;
+}
+
+#proxypool-global-menu .menu-links a {
+	padding: 7px 16px;
+	border-radius: 6px;
+	color: rgba(255, 255, 255, 0.78);
+	font-weight: 500;
+	text-decoration: none;
+}
+
+#proxypool-global-menu .menu-links a:hover,
+#proxypool-global-menu .menu-links a:focus-visible {
+	background: rgba(255, 255, 255, 0.12);
+	color: #fff;
+	outline: 2px solid #81d4fa;
+	outline-offset: 2px;
+}
+
+#proxypool-global-menu .menu-links a.active {
+	background: rgba(255, 255, 255, 0.18);
+	box-shadow: inset 0 -2px 0 #4fc3f7;
+	color: #fff;
+}
+
+#proxypool-global-menu .menu-stats {
+	display: flex;
+	align-items: center;
+	gap: 16px;
+	white-space: nowrap;
+}
+
+#proxypool-global-menu .menu-stats span { color: rgba(255, 255, 255, 0.65); }
+#proxypool-global-menu .menu-stats strong { color: #fff; font-size: 15px; }
+#proxypool-global-menu .menu-stats .stat-connected,
+#proxypool-global-menu .menu-stats .stat-connected strong { color: #81c784; }
+#proxypool-global-menu .menu-stats .stat-disconnected,
+#proxypool-global-menu .menu-stats .stat-disconnected strong { color: #ef9a9a; }
+
+@media (max-width: 900px) {
+	#proxypool-global-menu {
+		align-items: flex-start;
+		flex-direction: column;
+		gap: 8px;
+		padding: 9px 12px;
+	}
+	#proxypool-global-menu .menu-links a { padding: 6px 10px; }
+	#proxypool-global-menu .menu-stats { padding-left: 10px; }
+}

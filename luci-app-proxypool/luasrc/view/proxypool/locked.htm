@@ -1,30 +1,8 @@
-<%
--- 使用期限到期：返回一个独立的全屏"正在加载中"页面，
--- 不引入 LuCI 主题/全局菜单，使其看起来像面板一直在加载、无法进入。
-luci.http.prepare_content("text/html; charset=utf-8")
-%><!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>智联盒子</title>
-    <style>
-        html, body { height: 100%; margin: 0; }
-        body {
-            display: flex; flex-direction: column; align-items: center; justify-content: center;
-            gap: 18px; background: #fff; color: #5f6368;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-        }
-        .pp-spinner {
-            width: 44px; height: 44px; border: 4px solid #e0e0e0; border-top-color: #1a73e8;
-            border-radius: 50%; animation: pp-spin 0.9s linear infinite;
-        }
-        .pp-text { font-size: 15px; color: #5f6368; }
-        @keyframes pp-spin { to { transform: rotate(360deg); } }
-    </style>
-</head>
-<body>
-    <div class="pp-spinner"></div>
-    <div class="pp-text">正在加载中...</div>
-</body>
-</html>
+<%+header%>
+<div class="cbi-map">
+    <h2>ProxyPool 服务暂时不可用</h2>
+    <div class="alert-message warning">
+        服务尚未通过安全启动检查。路由器管理页面仍然可用，请查看系统日志后重试；在服务恢复前不要连接业务终端。
+    </div>
+</div>
+<%+footer%>

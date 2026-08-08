@@ -1,0 +1,114 @@
+{#
+ Copyright 2008 Steven Barth <steven@midlink.org>
+ Copyright 2012 David Menting <david@nut-bolt.nl>
+ Copyright 2008-2022 Jo-Philipp Wich <jo@mein.io>
+ Licensed to the public under the Apache License 2.0.
+-#}
+
+{%
+	import { getuid, getspnam } from 'luci.core';
+
+	const boardinfo = ubus.call('system', 'board');
+	const darkpref = (theme == 'bootstrap-dark' ? 'true' : (theme == 'bootstrap-light' ? 'false' : null));
+	const request_path = ctx.request_path ?? [];
+	const request_group = request_path[1] ?? '';
+	const request_page = request_path[2] ?? '';
+	const proxypool_active = request_group == 'services' && request_page == 'proxypool';
+	const wireless_active = request_group == 'network' && request_page == 'wireless';
+	const network_active = request_group == 'network' && !wireless_active;
+	const flash_active = request_group == 'system' && request_page == 'flash';
+	const reboot_active = request_group == 'system' && request_page == 'reboot';
+	const system_active = request_group == 'system' && !flash_active && !reboot_active;
+
+	http.prepare_content('text/html; charset=UTF-8');
+-%}
+
+<!DOCTYPE html>
+<html lang="{{ dispatcher.lang }}" {{ darkpref ? `data-darkmode="${darkpref}"` : '' }}>
+	<head>
+		<meta charset="utf-8">
+		<title>{{ striptags(`${boardinfo.hostname ?? '?'}${node ? ` - ${node.title}` : ''}`) }} - LuCI</title>
+		{% if (!darkpref): %}
+			<script type="text/javascript">
+				var mediaQuery = window.matchMedia('(prefers-color-scheme: dark)'),
+				    rootElement = document.querySelector(':root'),
+				    setDarkMode = function(match) { rootElement.setAttribute('data-darkmode', match.matches) };
+
+				mediaQuery.addEventListener('change', setDarkMode);
+				setDarkMode(mediaQuery);
+			</script>
+		{% endif %}
+		<meta name="viewport" content="initial-scale=1.0">
+		<link rel="stylesheet" href="/luci-static/bootstrap/cascade.css">
+		<link rel="stylesheet" media="only screen and (max-device-width: 854px)" href="/luci-static/bootstrap/mobile.css" type="text/css" />
+		<link rel="shortcut icon" href="/luci-static/bootstrap/favicon.png">
+		{% if (!blank_page): %}
+		<link rel="stylesheet" href="/luci-static/proxypool/proxypool-global.css">
+		<script defer src="/luci-static/proxypool/proxypool-global.js"></script>
+		{% endif %}
+		{% if (node?.css): %}
+		<link rel="stylesheet" href="{{ resource }}/{{ node.css }}">
+		{% endif %}
+		{% if (css): %}
+		<style title="text/css">{{ css }}</style>
+		{% endif %}
+		<script src="{{ dispatcher.build_url('admin/translations', dispatcher.lang) }}"></script>
+		<script src="{{ resource }}/cbi.js"></script>
+	</head>
+
+	<body class="lang_{{ dispatcher.lang }} {{ entityencode(striptags(node?.title ?? ''), true) }}" data-page="{{ entityencode(join('-', ctx.request_path), true) }}">
+		{% if (!blank_page): %}
+		<header>
+			<a class="brand" href="/">{{ striptags(boardinfo.hostname ?? '?') }}</a>
+			<ul class="nav" id="topmenu" style="display:none"></ul>
+			<div id="indicators" class="pull-right"></div>
+		</header>
+
+		<nav id="proxypool-global-menu"
+			 data-status-url="{{ dispatcher.build_url('admin', 'services', 'proxypool', 'api', 'read') }}?action=status"
+			 aria-label="ProxyPool 管理导航">
+			<div class="menu-links">
+				<a class="{{ proxypool_active ? 'active' : '' }}"{% if (proxypool_active): %} aria-current="page"{% endif %} href="{{ dispatcher.build_url('admin', 'services', 'proxypool') }}">ProxyPool</a>
+				<a class="{{ network_active ? 'active' : '' }}"{% if (network_active): %} aria-current="page"{% endif %} href="{{ dispatcher.build_url('admin', 'network') }}">网络</a>
+				<a class="{{ wireless_active ? 'active' : '' }}"{% if (wireless_active): %} aria-current="page"{% endif %} href="{{ dispatcher.build_url('admin', 'network', 'wireless') }}">无线</a>
+				<a class="{{ system_active ? 'active' : '' }}"{% if (system_active): %} aria-current="page"{% endif %} href="{{ dispatcher.build_url('admin', 'system') }}">系统</a>
+				<a class="{{ flash_active ? 'active' : '' }}"{% if (flash_active): %} aria-current="page"{% endif %} href="{{ dispatcher.build_url('admin', 'system', 'flash') }}">备份与升级</a>
+				<a class="{{ reboot_active ? 'active' : '' }}"{% if (reboot_active): %} aria-current="page"{% endif %} href="{{ dispatcher.build_url('admin', 'system', 'reboot') }}">重启</a>
+			</div>
+			<div class="menu-stats" aria-label="节点状态">
+				<span>节点 <strong id="pp-stat-total">-</strong></span>
+				<span class="stat-connected">在线 <strong id="pp-stat-connected">-</strong></span>
+				<span class="stat-disconnected">离线 <strong id="pp-stat-disconnected">-</strong></span>
+			</div>
+		</nav>
+
+		<div id="maincontent" class="container">
+			{% if (getuid() == 0 && getspnam('root')?.pwdp === ''): %}
+				<div class="alert-message warning">
+					<h4>{{ _('No password set!') }}</h4>
+					<p>{{ _('There is no password set on this router. Please configure a root password to protect the web interface.') }}</p>
+					{% if (dispatcher.lookup("admin/system/admin")): %}
+					  <div class="right"><a class="btn" href="{{ dispatcher.build_url("admin/system/admin") }}">{{ _('Go to password configuration...') }}</a></div>
+					{% endif %}
+				</div>
+			{% endif %}
+
+			{% if (boardinfo.rootfs_type == "initramfs"): %}
+				<div class="alert-message warning">
+					<h4>{{ _('System running in recovery (initramfs) mode.') }}</h4>
+					<p>{{ _('No changes to settings will be stored and are lost after rebooting. This mode should only be used to install a firmware upgrade') }}</p>
+					{% if (dispatcher.lookup("admin/system/flash")): %}
+					  <div class="right"><a class="btn" href="{{ dispatcher.build_url("admin/system/flash") }}">{{ _('Go to firmware upgrade...') }}</a></div>
+					{% endif %}
+				</div>
+			{% endif %}
+
+			<noscript>
+				<div class="alert-message warning">
+					<h4>{{ _('JavaScript required!') }}</h4>
+					<p>{{ _('You must enable JavaScript in your browser or LuCI will not work properly.') }}</p>
+				</div>
+			</noscript>
+
+			<div id="tabmenu" style="display:none"></div>
+		{% endif %}

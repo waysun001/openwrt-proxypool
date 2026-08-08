@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+
+theme_root=${IPKG_INSTROOT:-}/usr/share/ucode/luci/template/themes/proxypool
+asset_root=${IPKG_INSTROOT:-}/www/luci-static/proxypool
+
+[ -f "$theme_root/header.ut" ] && [ ! -L "$theme_root/header.ut" ] &&
+	[ -f "$theme_root/footer.ut" ] && [ ! -L "$theme_root/footer.ut" ] &&
+	[ -f "$theme_root/sysauth.ut" ] && [ ! -L "$theme_root/sysauth.ut" ] &&
+	[ -f "$asset_root/proxypool-global.css" ] && [ ! -L "$asset_root/proxypool-global.css" ] &&
+	[ -f "$asset_root/proxypool-global.js" ] && [ ! -L "$asset_root/proxypool-global.js" ] || exit 0
+
+uci -q set luci.themes.ProxyPool='/luci-static/proxypool'
+uci -q set luci.main.mediaurlbase='/luci-static/proxypool'
+uci -q commit luci
+
+if [ -z "${IPKG_INSTROOT:-}" ]; then
+	rm -f /tmp/luci-indexcache
+	rm -rf /tmp/luci-modulecache
+fi
+
+exit 0

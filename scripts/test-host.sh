@@ -31,6 +31,7 @@ fi
 
 for shell_file in \
 	luci-app-proxypool/root/etc/uci-defaults/luci-proxypool \
+	luci-theme-proxypool/root/etc/uci-defaults/30_luci-theme-proxypool \
 	proxypool-core/files/dns-manager.sh \
 	proxypool-core/files/guard-resync.sh \
 	proxypool-core/files/lan-isolation.sh \
@@ -53,6 +54,7 @@ for shell_file in \
 	scripts/check-whitespace-range.sh \
 	scripts/inspect-ipk.sh \
 	scripts/inspect-luci-ipk.sh \
+	scripts/inspect-theme-ipk.sh \
 	scripts/prepare-image-files.sh \
 	scripts/test-prepare-sdk-base-packages.sh \
 	scripts/regenerate-sha256sums.sh \
@@ -66,11 +68,13 @@ for shell_file in \
 	scripts/test-image-files.sh \
 	scripts/test-inspect-ipk.sh \
 	scripts/test-inspect-luci-ipk.sh \
+	scripts/test-inspect-theme-ipk.sh \
 	scripts/test-kernel-isolation-contract.sh \
 	scripts/test-legacy-quarantine.sh \
 	scripts/test-lan-isolation-defaults.sh \
 	scripts/test-lan-isolation-worker.sh \
 	scripts/test-luci-package-source-safety.sh \
+	scripts/test-theme-source-safety.sh \
 	scripts/test-package-safety-integration.sh \
 	scripts/test-proxypool-dns-admission.sh \
 	scripts/test-proxypool-guard.sh \
@@ -95,11 +99,13 @@ sh scripts/test-guardian-terminal-policy.sh
 sh scripts/test-image-files.sh
 sh scripts/test-inspect-ipk.sh
 sh scripts/test-inspect-luci-ipk.sh
+sh scripts/test-inspect-theme-ipk.sh
 sh scripts/test-kernel-isolation-contract.sh
 sh scripts/test-legacy-quarantine.sh
 sh scripts/test-lan-isolation-defaults.sh
 sh scripts/test-lan-isolation-worker.sh
 sh scripts/test-luci-package-source-safety.sh
+sh scripts/test-theme-source-safety.sh
 sh scripts/test-package-safety-integration.sh
 sh scripts/test-prepare-sdk-base-packages.sh
 sh scripts/test-proxypool-dns-admission.sh

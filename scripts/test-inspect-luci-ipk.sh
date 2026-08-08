@@ -44,11 +44,8 @@ write_main_view() {
 	destination=$1
 	cat >"$destination" <<'EOF'
 <%+header%>
-<link rel="stylesheet" href="<%=resource%>/proxypool-global.css" />
 <link rel="stylesheet" href="<%=resource%>/proxypool-v2.css" />
-<nav id="proxypool-global-menu"></nav>
 <div id="pp-v2-binding-modal"><input id="pp-v2-binding-search" /><div id="pp-v2-binding-list"></div><button id="pp-v2-binding-save"></button></div>
-<script type="text/javascript" src="<%=resource%>/proxypool-global.js"></script>
 <script type="text/javascript" src="<%=resource%>/proxypool-v2.js"></script>
 <div id="proxypool"></div>
 <%+footer%>
@@ -70,10 +67,10 @@ make_ipk() {
 		"$data/www/luci-static/resources"
 
 	architecture=all
-	depends='libc, proxypool-core, luci-base, luci-lua-runtime, luci-compat, luci-lib-jsonc'
+	depends='libc, proxypool-core, luci-base, luci-lua-runtime, luci-compat, luci-lib-jsonc, luci-theme-proxypool'
 	case "$kind" in
 		bad_arch) architecture=aarch64_cortex-a53 ;;
-		missing_core_dep) depends='libc, luci-base, luci-lua-runtime, luci-compat, luci-lib-jsonc' ;;
+		missing_core_dep) depends='libc, luci-base, luci-lua-runtime, luci-compat, luci-lib-jsonc, luci-theme-proxypool' ;;
 	esac
 	printf '%s\n' \
 		'Package: luci-app-proxypool' \
@@ -87,13 +84,11 @@ make_ipk() {
 	write_main_view "$data/usr/lib/lua/luci/view/proxypool/main.htm"
 	printf '<div>locked</div>\n' >"$data/usr/lib/lua/luci/view/proxypool/locked.htm"
 	printf '<div>lease</div>\n' >"$data/usr/lib/lua/luci/view/proxypool/lease.htm"
-	printf 'body{}\n' >"$data/www/luci-static/resources/proxypool-global.css"
-	printf 'window.ProxyPool=true;\n' >"$data/www/luci-static/resources/proxypool-global.js"
 	printf 'body{}\n' >"$data/www/luci-static/resources/proxypool-v2.css"
 	printf 'window.ProxyPoolV2=true;\n' >"$data/www/luci-static/resources/proxypool-v2.js"
 
 	case "$kind" in
-		missing_css) rm -f "$data/www/luci-static/resources/proxypool-global.css" ;;
+		missing_css) rm -f "$data/www/luci-static/resources/proxypool-v2.css" ;;
 		extra_global_luci) printf 'mutated\n' >"$data/www/luci-static/resources/luci.js" ;;
 		extra_uci_default) printf '#!/bin/sh\nexit 0\n' >"$data/etc/uci-defaults/luci-proxypool-menu" ;;
 		unsafe_default) printf '#!/bin/sh\n/etc/init.d/xl2tpd disable\n' >"$data/etc/uci-defaults/luci-proxypool" ;;
@@ -101,11 +96,8 @@ make_ipk() {
 		versioned_resource_load)
 			printf '%s\n' \
 				'<%+header%>' \
-				'<link rel="stylesheet" href="<%=resource%>/proxypool-global.css?v=1.0.0" />' \
 				'<link rel="stylesheet" href="<%=resource%>/proxypool-v2.css?v=1.0.0" />' \
-				'<nav id="proxypool-global-menu"></nav>' \
 				'<div id="pp-v2-binding-modal"><input id="pp-v2-binding-search" /><div id="pp-v2-binding-list"></div><button id="pp-v2-binding-save"></button></div>' \
-				'<script type="text/javascript" src="<%=resource%>/proxypool-global.js?v=1.0.0"></script>' \
 				'<script type="text/javascript" src="<%=resource%>/proxypool-v2.js?v=1.0.0"></script>' \
 				'<%+footer%>' >"$data/usr/lib/lua/luci/view/proxypool/main.htm"
 			;;
@@ -115,12 +107,9 @@ make_ipk() {
 		"$data/usr/lib/lua/luci/model/proxypool_rpc.lua" \
 		"$data/usr/lib/lua/luci/view/proxypool/main.htm" \
 		"$data/usr/lib/lua/luci/view/proxypool/locked.htm" \
-		"$data/usr/lib/lua/luci/view/proxypool/lease.htm" \
-		"$data/www/luci-static/resources/proxypool-global.js"
+		"$data/usr/lib/lua/luci/view/proxypool/lease.htm"
 	chmod 644 "$data/www/luci-static/resources/proxypool-v2.js" \
 		"$data/www/luci-static/resources/proxypool-v2.css"
-	[ ! -e "$data/www/luci-static/resources/proxypool-global.css" ] ||
-		chmod 644 "$data/www/luci-static/resources/proxypool-global.css"
 	[ "$kind" != group_writable ] ||
 		chmod 664 "$data/usr/lib/lua/luci/controller/proxypool.lua"
 

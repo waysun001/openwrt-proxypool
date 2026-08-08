@@ -35,7 +35,7 @@ dependency_names=$(
 		tr ',' '\n' |
 		sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*(.*$//' -e 's/[[:space:]]*$//'
 )
-for required_dependency in proxypool-core luci-base luci-lua-runtime luci-compat luci-lib-jsonc; do
+for required_dependency in proxypool-core luci-base luci-lua-runtime luci-compat luci-lib-jsonc luci-theme-proxypool; do
 	printf '%s\n' "$dependency_names" | grep -Fqx "$required_dependency" || {
 		echo "missing required dependency: $required_dependency" >&2
 		exit 1
@@ -54,8 +54,6 @@ usr/lib/lua/luci/model/proxypool_rpc.lua
 usr/lib/lua/luci/view/proxypool/lease.htm
 usr/lib/lua/luci/view/proxypool/locked.htm
 usr/lib/lua/luci/view/proxypool/main.htm
-www/luci-static/resources/proxypool-global.css
-www/luci-static/resources/proxypool-global.js
 www/luci-static/resources/proxypool-v2.css
 www/luci-static/resources/proxypool-v2.js
 EOF
@@ -87,8 +85,6 @@ for relative in \
 	usr/lib/lua/luci/view/proxypool/lease.htm \
 	usr/lib/lua/luci/view/proxypool/locked.htm \
 	usr/lib/lua/luci/view/proxypool/main.htm \
-	www/luci-static/resources/proxypool-global.css \
-	www/luci-static/resources/proxypool-global.js \
 	www/luci-static/resources/proxypool-v2.css \
 	www/luci-static/resources/proxypool-v2.js; do
 	require_mode "$relative" 644
@@ -112,13 +108,15 @@ done
 
 main_view="$inspect_tmp/data/usr/lib/lua/luci/view/proxypool/main.htm"
 [ "$(grep -Ec '<link rel="stylesheet" href="<%=resource%>/proxypool-v2\.css(\?v=[A-Za-z0-9._+-]+)?" />' "$main_view")" -eq 1 ] &&
-	[ "$(grep -Ec '<script type="text/javascript" src="<%=resource%>/proxypool-v2\.js(\?v=[A-Za-z0-9._+-]+)?"></script>' "$main_view")" -eq 1 ] &&
-	[ "$(grep -Ec '<link rel="stylesheet" href="<%=resource%>/proxypool-global\.css(\?v=[A-Za-z0-9._+-]+)?" />' "$main_view")" -eq 1 ] &&
-	[ "$(grep -Ec '<script type="text/javascript" src="<%=resource%>/proxypool-global\.js(\?v=[A-Za-z0-9._+-]+)?"></script>' "$main_view")" -eq 1 ] || {
+	[ "$(grep -Ec '<script type="text/javascript" src="<%=resource%>/proxypool-v2\.js(\?v=[A-Za-z0-9._+-]+)?"></script>' "$main_view")" -eq 1 ] || {
 	echo 'main view does not load packaged V2 assets' >&2
 	exit 1
 }
-for marker in 'id="proxypool-global-menu"' 'id="pp-v2-binding-modal"' 'id="pp-v2-binding-search"' 'id="pp-v2-binding-list"' 'id="pp-v2-binding-save"'; do
+if grep -Eq 'proxypool-global\.(css|js)|id="proxypool-global-menu"' "$main_view"; then
+	echo 'main view embeds theme-owned global navigation' >&2
+	exit 1
+fi
+for marker in 'id="pp-v2-binding-modal"' 'id="pp-v2-binding-search"' 'id="pp-v2-binding-list"' 'id="pp-v2-binding-save"'; do
 	grep -Fq "$marker" "$main_view" || {
 		echo "main view is missing device-management marker: $marker" >&2
 		exit 1
@@ -126,8 +124,6 @@ for marker in 'id="proxypool-global-menu"' 'id="pp-v2-binding-modal"' 'id="pp-v2
 done
 
 for asset in \
-	"$inspect_tmp/data/www/luci-static/resources/proxypool-global.css" \
-	"$inspect_tmp/data/www/luci-static/resources/proxypool-global.js" \
 	"$inspect_tmp/data/www/luci-static/resources/proxypool-v2.css" \
 	"$inspect_tmp/data/www/luci-static/resources/proxypool-v2.js"; do
 	[ -s "$asset" ] || { echo "packaged asset is empty: ${asset##*/}" >&2; exit 1; }
