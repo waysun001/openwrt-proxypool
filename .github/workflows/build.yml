@@ -99,7 +99,7 @@ jobs:
       - name: Configure pinned source feeds
         run: |
           mkdir -p local-feed
-          cp -a proxypool-core luci-app-proxypool local-feed/
+          cp -a proxypool-core luci-app-proxypool luci-theme-proxypool local-feed/
           printf '%s\n' \
             "src-git packages https://git.openwrt.org/feed/packages.git^$PACKAGES_FEED_COMMIT" \
             "src-git luci https://git.openwrt.org/project/luci.git^$LUCI_FEED_COMMIT" \
@@ -132,7 +132,7 @@ jobs:
             "telephony $TELEPHONY_FEED_COMMIT" \
             > ../build-evidence/feed-commits.txt
           ./scripts/feeds install -a
-          ./scripts/feeds install -p proxypool proxypool-core luci-app-proxypool
+          ./scripts/feeds install -p proxypool proxypool-core luci-app-proxypool luci-theme-proxypool
 
       - name: Stage image overlay and build configuration
         run: |
@@ -144,6 +144,7 @@ jobs:
           make defconfig
           grep -Fqx 'CONFIG_PACKAGE_proxypool-core=y' .config
           grep -Fqx 'CONFIG_PACKAGE_luci-app-proxypool=y' .config
+          grep -Fqx 'CONFIG_PACKAGE_luci-theme-proxypool=y' .config
 
       - name: Install the two MT7531 isolation patches
         run: |
@@ -189,6 +190,9 @@ jobs:
           mapfile -t luci_packages < <(find bin -type f -name 'luci-app-proxypool_*.ipk')
           [ "${#luci_packages[@]}" -eq 1 ]
           sh ../scripts/inspect-luci-ipk.sh "${luci_packages[0]}"
+          mapfile -t theme_packages < <(find bin -type f -name 'luci-theme-proxypool_*.ipk')
+          [ "${#theme_packages[@]}" -eq 1 ]
+          sh ../scripts/inspect-theme-ipk.sh "${theme_packages[0]}"
           mapfile -t firmware < <(
             find "bin/targets/$TARGET/$SUBTARGET" -maxdepth 1 -type f \
               -name '*glinet_gl-mt6000*squashfs-sysupgrade.bin'
@@ -196,7 +200,7 @@ jobs:
           [ "${#firmware[@]}" -eq 1 ]
 
           mkdir -p ../firmware-evidence
-          cp "${packages[0]}" "${luci_packages[0]}" "${firmware[0]}" ../firmware-evidence/
+          cp "${packages[0]}" "${luci_packages[0]}" "${theme_packages[0]}" "${firmware[0]}" ../firmware-evidence/
           cp ../build-evidence/* ../firmware-evidence/
           sh ../scripts/regenerate-sha256sums.sh ../firmware-evidence
 

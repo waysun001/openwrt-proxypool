@@ -107,6 +107,7 @@ jobs:
           mkdir -p sdk/package/proxypool
           cp -r proxypool-core sdk/package/proxypool/
           cp -r luci-app-proxypool sdk/package/proxypool/
+          cp -r luci-theme-proxypool sdk/package/proxypool/
           cd sdk
           printf '%s\n' \
             "src-git packages https://git.openwrt.org/feed/packages.git^$PACKAGES_FEED_COMMIT" \
@@ -139,7 +140,8 @@ jobs:
           ./scripts/feeds install -a
           printf '%s\n' \
             'CONFIG_PACKAGE_proxypool-core=m' \
-            'CONFIG_PACKAGE_luci-app-proxypool=m' >>.config
+            'CONFIG_PACKAGE_luci-app-proxypool=m' \
+            'CONFIG_PACKAGE_luci-theme-proxypool=m' >>.config
           make defconfig
 
       - name: Clean-build core package with verbose proof
@@ -156,6 +158,13 @@ jobs:
           make package/proxypool/luci-app-proxypool/clean
           make package/proxypool/luci-app-proxypool/compile V=s -j1 2>&1 | tee ../luci-app-proxypool-build.log
 
+      - name: Clean-build ProxyPool theme package
+        run: |
+          set -o pipefail
+          cd sdk
+          make package/proxypool/luci-theme-proxypool/clean
+          make package/proxypool/luci-theme-proxypool/compile V=s -j1 2>&1 | tee ../luci-theme-proxypool-build.log
+
       - name: Inspect unique core and LuCI IPK payloads
         run: |
           mapfile -t packages < <(find sdk/bin -type f -name 'proxypool-core_*.ipk')
@@ -164,10 +173,13 @@ jobs:
           mapfile -t luci_packages < <(find sdk/bin -type f -name 'luci-app-proxypool_*.ipk')
           [ "${#luci_packages[@]}" -eq 1 ]
           sh ./scripts/inspect-luci-ipk.sh "${luci_packages[0]}"
+          mapfile -t theme_packages < <(find sdk/bin -type f -name 'luci-theme-proxypool_*.ipk')
+          [ "${#theme_packages[@]}" -eq 1 ]
+          sh ./scripts/inspect-theme-ipk.sh "${theme_packages[0]}"
 
           mkdir -p package-evidence
-          cp "${packages[0]}" "${luci_packages[0]}" package-evidence/
-          cp proxypool-core-build.log luci-app-proxypool-build.log feed-commits.txt package-evidence/
+          cp "${packages[0]}" "${luci_packages[0]}" "${theme_packages[0]}" package-evidence/
+          cp proxypool-core-build.log luci-app-proxypool-build.log luci-theme-proxypool-build.log feed-commits.txt package-evidence/
           sh ./scripts/regenerate-sha256sums.sh package-evidence
 
       - name: Upload build evidence
