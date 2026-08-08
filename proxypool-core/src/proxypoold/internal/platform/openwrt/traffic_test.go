@@ -21,11 +21,11 @@ func TestInterfaceTrafficReaderReadsSysfsCounters(t *testing.T) {
 
 func TestInterfaceTrafficReaderRejectsUnsafeOrInvalidCounters(t *testing.T) {
 	tests := []struct {
-		name      string
+		name          string
 		interfaceName string
-		rx        string
-		tx        string
-		omitTX    bool
+		rx            string
+		tx            string
+		omitTX        bool
 	}{
 		{name: "path traversal", interfaceName: "../escape", rx: "1", tx: "2"},
 		{name: "interface name too long", interfaceName: "abcdefghijklmnop", rx: "1", tx: "2"},
