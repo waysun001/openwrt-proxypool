@@ -36,6 +36,15 @@ type LeaseManager interface {
 	Remove(context.Context, model.Device, uint64) error
 }
 
+type InterfaceCounters struct {
+	RXBytes uint64
+	TXBytes uint64
+}
+
+type InterfaceTrafficReader interface {
+	ReadInterfaceCounters(interfaceName string) (InterfaceCounters, error)
+}
+
 // LeaseProjectionManager atomically replaces a complete set of owned DHCP
 // reservations. It is separate from LeaseManager so existing single-device
 // integrations retain their API contract.
