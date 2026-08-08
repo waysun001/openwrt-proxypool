@@ -107,6 +107,7 @@ end
 local function node_save_params(http)
     local node = exact_id(http.formvalue("node_id"), true)
     local name = bounded(http.formvalue("name"), 128, true)
+    local note = bounded(http.formvalue("note"), 800, false)
     local protocol = tostring(http.formvalue("protocol") or "")
     local enabled = exact_boolean(http.formvalue("enabled"))
     local server = bounded(http.formvalue("server"), 253, true)
@@ -115,13 +116,15 @@ local function node_save_params(http)
     local password = bounded(http.formvalue("password"), 4096, false)
     local expires = bounded(http.formvalue("expires_at"), 32, false)
     local revision = exact_revision(http.formvalue("expected_revision"))
-    if node == nil or not name or (protocol ~= "l2tp" and protocol ~= "socks5" and protocol ~= "slp") or
+    if note and note:find("%c") then note = nil end
+    if node == nil or not name or note == nil or (protocol ~= "l2tp" and protocol ~= "socks5" and protocol ~= "slp") or
         enabled == nil or not server or not port or username == nil or password == nil or expires == nil or not revision then
         return nil
     end
     return {
         node_id = node,
         name = name,
+        note = note,
         protocol = protocol,
         enabled = enabled,
         server = server,

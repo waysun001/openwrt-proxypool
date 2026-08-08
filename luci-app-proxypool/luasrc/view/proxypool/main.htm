@@ -56,7 +56,7 @@
         </div>
         <div class="pp-v2-table-wrap">
             <table class="table pp-v2-table">
-                <thead><tr><th>名称</th><th>服务器</th><th>协议</th><th>状态</th><th>错误</th><th>重试</th><th>已绑定设备</th><th>策略</th><th>操作</th></tr></thead>
+                <thead><tr><th>名称</th><th>服务器</th><th>协议</th><th>状态</th><th>错误</th><th>重试</th><th>累计流量</th><th>实时速度</th><th>已绑定设备</th><th>策略</th><th>操作</th></tr></thead>
                 <tbody id="pp-v2-node-list"></tbody>
             </table>
         </div>
@@ -95,6 +95,7 @@
                 <div class="pp-v2-form-grid">
                     <label>名称<input name="name" maxlength="128" required /></label>
                     <label>协议<select name="protocol" disabled><option value="l2tp">L2TP</option></select></label>
+                    <label class="pp-v2-form-wide">备注<input name="note" maxlength="200" placeholder="例如：香港微信专用" /></label>
                     <label>服务器<input name="server" maxlength="253" required /></label>
                     <label>端口<input name="port" type="number" min="1" max="65535" value="1701" required /></label>
                     <label>用户名<input name="username" maxlength="1024" autocomplete="off" placeholder="编辑时留空表示保留" /></label>

@@ -87,6 +87,7 @@
             var nodes = ((status.desired && status.desired.nodes) || []).map(function(node) {
                 var copy = Object.assign({}, node);
                 var observed = runtime[node.id];
+                copy.traffic = normalizeTraffic(observed && observed.traffic);
                 if (observed) {
                     copy.state = observed.state;
                     copy.attempts = observed.attempts || 0;
@@ -152,6 +153,39 @@
             .replace(/'/g, '&#39;');
     }
 
+    function normalizedCounter(value) {
+        value = Number(value);
+        if (!Number.isFinite(value) || value <= 0) return 0;
+        return Math.min(Number.MAX_SAFE_INTEGER, Math.floor(value));
+    }
+
+    function normalizeTraffic(traffic) {
+        traffic = traffic || {};
+        return {
+            download_bytes: normalizedCounter(traffic.download_bytes),
+            upload_bytes: normalizedCounter(traffic.upload_bytes),
+            download_bytes_per_second: normalizedCounter(traffic.download_bytes_per_second),
+            upload_bytes_per_second: normalizedCounter(traffic.upload_bytes_per_second),
+            sampled_at: String(traffic.sampled_at || '')
+        };
+    }
+
+    function formatBytes(value) {
+        value = normalizedCounter(value);
+        var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+        var unit = 0;
+        while (value >= 1024 && unit < units.length - 1) {
+            value /= 1024;
+            unit++;
+        }
+        var rounded = Math.round(value * 10) / 10;
+        return String(rounded) + ' ' + units[unit];
+    }
+
+    function formatRate(value) {
+        return formatBytes(value) + '/s';
+    }
+
     function stateLabel(kind, value) {
         var labels = STATE_LABELS[String(kind || '')];
         return labels && labels[String(value || '')] || '未知状态';
@@ -200,6 +234,7 @@
         var errors = [];
         var protocol = String(form.protocol || '');
         var name = String(form.name || '').trim();
+        var note = String(form.note || '').trim();
         var server = String(form.server || '').trim();
         var port = Number(form.port);
         var nodeID = String(form.node_id || '');
@@ -210,6 +245,7 @@
 
         if (protocol !== 'l2tp') errors.push('unsupported_protocol');
         if (!name || name.length > 128) errors.push('invalid_name');
+        if (Array.from(note).length > 200 || /[\u0000-\u001F\u007F-\u009F]/.test(note)) errors.push('invalid_note');
         if (!server || server.length > 253) errors.push('invalid_server');
         if (!Number.isInteger(port) || port < 1 || port > 65535) errors.push('invalid_port');
         if (!creating && !ID_PATTERN.test(nodeID)) errors.push('invalid_node_id');
@@ -224,6 +260,7 @@
             params: {
                 node_id: nodeID,
                 name: name,
+                note: note,
                 protocol: protocol,
                 enabled: !!form.enabled,
                 server: server,
@@ -481,7 +518,7 @@
                 enabled: !!desired.enabled,
                 nodes: (desired.nodes || []).map(function(node) {
                     return {
-                        id: node.id, name: node.name, protocol: node.protocol, enabled: !!node.enabled,
+                        id: node.id, name: node.name, note: node.note || '', protocol: node.protocol, enabled: !!node.enabled,
                         delete_pending: !!node.delete_pending, server: node.server, port: node.port,
                         expires_at: node.expires_at || '', policy_id: node.policy_id, revision: node.revision
                     };
@@ -753,6 +790,7 @@
             form.reset();
             form.elements.node_id.value = node && node.id || '';
             form.elements.name.value = node && node.name || '';
+            form.elements.note.value = node && node.note || '';
             form.elements.server.value = node && node.server || '';
             form.elements.port.value = node && node.port || 1701;
             form.elements.enabled.checked = node ? !!node.enabled : true;
@@ -770,12 +808,23 @@
             body.textContent = '';
             presentNodes(state.nodes, state.devices, Date.now()).forEach(function(node) {
                 var row = element('tr');
-                row.appendChild(element('td', '', node.name));
+                var nameCell = element('td', 'pp-v2-node-name');
+                nameCell.appendChild(element('strong', '', node.name));
+                if (node.note) nameCell.appendChild(element('span', 'pp-v2-node-note', node.note));
+                row.appendChild(nameCell);
                 row.appendChild(element('td', '', node.server + ':' + node.port));
                 row.appendChild(element('td', '', node.protocol.toUpperCase()));
                 row.appendChild(element('td', 'pp-v2-state pp-v2-state-' + node.state, node.delete_pending ? '等待删除' : stateLabel('node', node.state)));
                 row.appendChild(element('td', '', node.error_code ? errorLabel(node.error_code) : '-'));
                 row.appendChild(element('td', '', node.retry_seconds == null ? (node.attempts ? '已尝试 ' + node.attempts + ' 次' : '-') : node.retry_seconds + ' 秒'));
+                var totals = element('td', 'pp-v2-traffic-cell');
+                totals.appendChild(element('span', '', '下行 ' + formatBytes(node.traffic.download_bytes)));
+                totals.appendChild(element('span', '', '上行 ' + formatBytes(node.traffic.upload_bytes)));
+                row.appendChild(totals);
+                var rates = element('td', 'pp-v2-traffic-cell');
+                rates.appendChild(element('span', '', '下行 ' + formatRate(node.traffic.download_bytes_per_second)));
+                rates.appendChild(element('span', '', '上行 ' + formatRate(node.traffic.upload_bytes_per_second)));
+                row.appendChild(rates);
                 var boundCell = element('td', 'pp-v2-bound-cell');
                 node.bound_devices.forEach(function(device) {
                     var item = element('div', 'pp-v2-bound-device');
@@ -809,7 +858,7 @@
             if (!state.nodes.length) {
                 var empty = element('tr');
                 var cell = element('td', 'pp-v2-empty', '暂无节点，请先新增或批量导入。');
-                cell.colSpan = 9;
+                cell.colSpan = 11;
                 empty.appendChild(cell);
                 body.appendChild(empty);
             }
@@ -966,6 +1015,7 @@
             var validation = validateNodeForm({
                 node_id: form.elements.node_id.value,
                 name: form.elements.name.value,
+                note: form.elements.note.value,
                 protocol: 'l2tp',
                 enabled: form.elements.enabled.checked,
                 server: form.elements.server.value,
@@ -1155,6 +1205,8 @@
         jobKindLabel: jobKindLabel,
         jobStepLabel: jobStepLabel,
         formatError: formatError,
+        formatBytes: formatBytes,
+        formatRate: formatRate,
         retryCountdown: retryCountdown,
         jobSummary: jobSummary,
         validateNodeForm: validateNodeForm,

@@ -15,6 +15,11 @@
 .pp-v2-table-wrap { overflow-x: auto; border: 1px solid #dfe5ec; border-radius: 10px; background: #fff; }
 .pp-v2-table { width: 100%; margin: 0; }
 .pp-v2-table th, .pp-v2-table td { padding: 10px; vertical-align: middle; white-space: nowrap; }
+.pp-v2-table td.pp-v2-node-name { min-width: 150px; white-space: normal; }
+.pp-v2-node-name strong, .pp-v2-node-note { display: block; overflow-wrap: anywhere; }
+.pp-v2-node-note { margin-top: 3px; color: #667085; font-size: 12px; }
+.pp-v2-traffic-cell { min-width: 115px; font-family: monospace; }
+.pp-v2-traffic-cell span { display: block; }
 .pp-v2-table td.pp-v2-bound-cell { min-width: 230px; white-space: normal; }
 .pp-v2-bound-device { display: grid; grid-template-columns: minmax(80px, 1fr) auto; gap: 2px 10px; padding: 5px 0; border-bottom: 1px solid #eef1f4; }
 .pp-v2-bound-device:last-child { border-bottom: 0; }
@@ -36,6 +41,7 @@
 .pp-v2-form-grid label { display: flex; flex-direction: column; gap: 6px; }
 .pp-v2-form-grid input, .pp-v2-form-grid select { box-sizing: border-box; width: 100%; padding: 8px; }
 .pp-v2-form-grid .pp-v2-checkbox { flex-direction: row; align-items: center; }
+.pp-v2-form-grid .pp-v2-form-wide { grid-column: 1 / -1; }
 .pp-v2-form-grid .pp-v2-checkbox input { width: auto; }
 .pp-v2-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 .pp-v2-import-raw { box-sizing: border-box; width: 100%; min-height: 180px; padding: 10px; font-family: monospace; resize: vertical; }
