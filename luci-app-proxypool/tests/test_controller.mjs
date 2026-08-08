@@ -18,6 +18,10 @@ const v2Script = await readFile(
   new URL('../htdocs/luci-static/resources/proxypool-v2.js', import.meta.url),
   'utf8',
 );
+const globalScript = await readFile(
+  new URL('../htdocs/luci-static/resources/proxypool-global.js', import.meta.url),
+  'utf8',
+);
 
 test('controller contains no direct system mutation or socket implementation', () => {
   for (const forbidden of [
@@ -60,6 +64,33 @@ test('main page sends reads and writes to their defined endpoints', () => {
   assert.match(mainView, /data-api-write=/);
   assert.doesNotMatch(v2Script, /target=api\+/);
   assert.match(v2Script, /target\s*=\s*mutation\s*\?\s*apiWrite\s*:\s*apiRead/);
+});
+
+test('main page renders a package-local navigation bar with LuCI-generated links', () => {
+  assert.match(mainView, /proxypool-global\.css/);
+  assert.match(mainView, /id="proxypool-global-menu"/);
+  assert.match(mainView, /<%=url\(\[\[admin\]\],\s*\[\[system\]\],\s*\[\[flash\]\]\)%>/);
+  assert.match(mainView, /<%=url\(\[\[admin\]\],\s*\[\[network\]\],\s*\[\[wireless\]\]\)%>/);
+  assert.match(mainView, /<%=url\(\[\[admin\]\],\s*\[\[system\]\],\s*\[\[reboot\]\]\)%>/);
+  assert.match(mainView, /proxypool-global\.js/);
+  assert.match(globalScript, /getAttribute\('data-status-url'\)/);
+});
+
+test('node page exposes searchable multi-device membership with migration confirmation', () => {
+  for (const id of ['pp-v2-binding-modal', 'pp-v2-binding-search', 'pp-v2-binding-list', 'pp-v2-binding-save', 'pp-v2-binding-cancel']) {
+    assert.match(mainView, new RegExp(`id="${id}"`));
+  }
+  assert.match(v2Script, /deviceBindingRows\(bindingDevices,\s*bindingNodes/);
+  assert.match(v2Script, /apiCall\('bindings_replace'/);
+  assert.match(v2Script, /device_ids_json:\s*JSON\.stringify/);
+  assert.match(v2Script, /confirm\([^\n]*迁移/);
+});
+
+test('ordinary node job and diagnostic rendering uses Chinese label helpers', () => {
+  assert.match(v2Script, /stateLabel\('node',\s*node\.state\)/);
+  assert.match(v2Script, /errorLabel\(node\.error_code\)/);
+  assert.match(v2Script, /jobKindLabel\(job\.kind\)/);
+  assert.match(v2Script, /stateLabel\('diagnostic',\s*model\.state\)/);
 });
 
 test('device unbind option has an explicit empty value', () => {

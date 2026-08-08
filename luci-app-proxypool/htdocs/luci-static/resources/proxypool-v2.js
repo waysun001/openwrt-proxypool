@@ -38,7 +38,12 @@
         not_found: '目标不存在，请刷新页面', resolve_failed: '域名解析失败', probe_failed: '连通性检测失败',
         dataplane_failed: '网络通道建立失败', dns_failed: 'DNS 检测失败', service_unavailable: 'ProxyPool 服务暂时不可用',
         bad_gateway: 'ProxyPool 服务响应异常', operation_timeout: '操作超时', unknown_method: '功能接口不可用',
-        collection_failed: '诊断包生成失败', collection_cancelled: '诊断包生成已取消', unavailable: '信息不可用'
+        collection_failed: '诊断包生成失败', collection_cancelled: '诊断包生成已取消', unavailable: '信息不可用',
+        invalid_protocol: '协议不受支持', invalid_fields: '字段数量或格式错误', invalid_server: '服务器地址格式错误',
+        invalid_port: '端口格式错误', invalid_expiry: '到期日期格式错误', invalid_character: '内容包含不允许的字符',
+        invalid_secret: '账号或密码格式错误', request_too_large: '导入内容超过大小限制', preview_not_found: '导入预览不存在',
+        preview_mismatch: '导入预览校验失败', preview_blocked: '导入内容存在阻断错误', preview_expired: '导入预览已过期',
+        preview_capacity: '待处理导入预览过多', device_capacity: '单个节点最多绑定 60 台设备'
     });
     var JOB_KIND_LABELS = Object.freeze({
         'system.recover': '系统恢复', 'pending.learn': '识别待绑定设备', 'node.connect': '连接节点',
@@ -323,6 +328,8 @@
                 target_node_id: targetNodeID,
                 target_node_name: targetName,
                 was_selected: current,
+                confirmed: !!device.confirmed,
+                selectable: current || !!device.confirmed,
                 ownership_label: current ? '已绑定当前节点' : (nodeID ? '已绑定：' + nodeName : '未绑定')
             };
             return row;
@@ -419,7 +426,7 @@
             rows: (preview.rows || []).map(function(row) {
                 return {
                     line: Number(row.line || 0),
-                    action: String(row.action || ''),
+                    action: row.action === 'add' ? '新增' : (row.action === 'skip' ? '跳过' : '未知操作'),
                     protocol: String(row.protocol || ''),
                     endpoint: String(row.server || '') + ':' + String(row.port || ''),
                     expires_at: String(row.expires_at || ''),
@@ -427,9 +434,17 @@
                 };
             }),
             errors: (preview.errors || []).map(function(error) {
-                return { line: Number(error.line || 0), code: String(error.code || ''), message: String(error.message || '') };
+                return { line: Number(error.line || 0), message: errorLabel(error.code) };
             })
         };
+    }
+
+    function ingressLabel(value) {
+        value = String(value || '').toLowerCase();
+        if (!value) return '-';
+        if (value.indexOf('wifi') !== -1 || value.indexOf('wlan') !== -1 || value.indexOf('wireless') !== -1) return 'WiFi';
+        if (value.indexOf('lan') !== -1 || value.indexOf('eth') !== -1) return 'LAN';
+        return '未知接入';
     }
 
     function buildImportCommitRequest(preview) {
@@ -524,6 +539,13 @@
         var stopped = false;
         var diagnosticJobId = '';
         var diagnosticStatus = null;
+        var bindingNodeID = '';
+        var bindingDevices = [];
+        var bindingNodes = [];
+        var bindingRows = [];
+        var bindingSelected = {};
+        var bindingRevision = 0;
+        var bindingSaving = false;
         try {
             diagnosticJobId = String(storage && storage.getItem(DIAGNOSTIC_JOB_KEY) || '');
             if (!ID_PATTERN.test(diagnosticJobId)) diagnosticJobId = '';
@@ -610,7 +632,7 @@
             });
             model.errors.forEach(function(error) {
                 target.appendChild(element('div', 'pp-v2-import-error',
-                    (error.line ? '第 ' + error.line + ' 行 · ' : '') + error.code + '：' + error.message));
+                    (error.line ? '第 ' + error.line + ' 行 · ' : '') + error.message));
             });
             commit.disabled = !model.can_commit;
         }
@@ -638,13 +660,91 @@
             return button;
         }
 
+        function selectedBindingIDs() {
+            return Object.keys(bindingSelected).filter(function(id) { return bindingSelected[id]; }).sort();
+        }
+
+        function renderBindingEditor() {
+            if (!bindingNodeID) return;
+            var search = document.getElementById('pp-v2-binding-search');
+            var list = document.getElementById('pp-v2-binding-list');
+            var selectedIDs = selectedBindingIDs();
+            var visible = deviceBindingRows(bindingDevices, bindingNodes, bindingNodeID, search.value);
+            var replacement = buildBindingReplacement(bindingRows, selectedIDs, bindingRevision);
+            list.textContent = '';
+            visible.forEach(function(row) {
+                var label = element('label', 'pp-v2-binding-row');
+                var checkbox = element('input');
+                checkbox.type = 'checkbox';
+                checkbox.checked = !!bindingSelected[row.id];
+                checkbox.disabled = bindingSaving || !row.selectable;
+                checkbox.addEventListener('change', function() {
+                    if (checkbox.checked && selectedBindingIDs().length >= 60) {
+                        checkbox.checked = false;
+                        showError({ code: 'device_capacity' });
+                        return;
+                    }
+                    bindingSelected[row.id] = checkbox.checked;
+                    showError(null);
+                    renderBindingEditor();
+                });
+                label.appendChild(checkbox);
+                label.appendChild(element('strong', '', row.device_name));
+                label.appendChild(element('span', '', '当前 IP：' + (row.current_ipv4 || '-') + '；固定 IP：' + (row.fixed_ipv4 || '-')));
+                label.appendChild(element('small', '', (row.mac || '-') + ' · ' + ingressLabel(row.ingress) + (row.selectable ? '' : ' · 当前不可选择')));
+                label.appendChild(element('span', row.was_selected ? 'pp-v2-binding-owner-current' : (row.node_id ? 'pp-v2-binding-owner-other' : ''), row.ownership_label));
+                list.appendChild(label);
+            });
+            if (!visible.length) list.appendChild(element('div', 'pp-v2-empty', '没有符合条件的设备。'));
+            document.getElementById('pp-v2-binding-count').textContent = '已选择 ' + selectedIDs.length + ' 台；当前显示 ' + visible.length + ' 台。';
+            var migrations = document.getElementById('pp-v2-binding-migrations');
+            migrations.textContent = '';
+            migrations.hidden = !replacement.migrations.length;
+            if (replacement.migrations.length) {
+                migrations.appendChild(element('strong', '', '以下设备将迁移到当前节点：'));
+                replacement.migrations.forEach(function(item) {
+                    migrations.appendChild(element('div', '', item.device_name + '：' + item.from_node + ' → ' + item.to_node));
+                });
+            }
+            search.disabled = bindingSaving;
+            document.getElementById('pp-v2-binding-cancel').disabled = bindingSaving;
+            document.getElementById('pp-v2-binding-save').disabled = bindingSaving || !replacement.changed;
+        }
+
+        function openBindingEditor(node) {
+            bindingNodeID = node.id;
+            bindingRevision = state.revision;
+            bindingSaving = false;
+            bindingDevices = state.devices.slice();
+            bindingNodes = state.nodes.slice();
+            bindingRows = deviceBindingRows(bindingDevices, bindingNodes, node.id, '');
+            bindingSelected = {};
+            bindingRows.forEach(function(row) { if (row.was_selected) bindingSelected[row.id] = true; });
+            document.getElementById('pp-v2-binding-title').textContent = '绑定设备 · ' + node.name;
+            document.getElementById('pp-v2-binding-context').textContent = '勾选表示绑定到该节点；取消当前设备表示解除绑定；勾选其他节点设备表示迁移。';
+            document.getElementById('pp-v2-binding-search').value = '';
+            document.getElementById('pp-v2-binding-modal').hidden = false;
+            renderBindingEditor();
+        }
+
+        function closeBindingEditor() {
+            if (bindingSaving) return;
+            document.getElementById('pp-v2-binding-modal').hidden = true;
+            bindingNodeID = '';
+            bindingDevices = [];
+            bindingNodes = [];
+            bindingRows = [];
+            bindingSelected = {};
+            bindingRevision = 0;
+        }
+
         function renderSummary() {
             var online = state.nodes.filter(function(node) { return node.state === 'online'; }).length;
             var bound = state.devices.filter(function(device) { return device.enabled && device.node_id; }).length;
             document.getElementById('pp-v2-total').textContent = String(state.nodes.length);
             document.getElementById('pp-v2-online').textContent = String(online);
             document.getElementById('pp-v2-bound').textContent = String(bound);
-            document.getElementById('pp-v2-revision').textContent = state.revision ? 'Revision ' + state.revision : '';
+            document.getElementById('pp-v2-revision').textContent = state.revision ? '配置版本 ' + state.revision : '';
         }
 
         function openNodeEditor(node) {
@@ -673,12 +773,22 @@
                 row.appendChild(element('td', '', node.name));
                 row.appendChild(element('td', '', node.server + ':' + node.port));
                 row.appendChild(element('td', '', node.protocol.toUpperCase()));
-                row.appendChild(element('td', 'pp-v2-state pp-v2-state-' + node.state, node.delete_pending ? '删除中' : node.state));
-                row.appendChild(element('td', '', node.error_code || '-'));
-                row.appendChild(element('td', '', node.retry_seconds == null ? (node.attempts ? '尝试 ' + node.attempts : '-') : node.retry_seconds + 's'));
-                row.appendChild(element('td', '', node.bound_count));
+                row.appendChild(element('td', 'pp-v2-state pp-v2-state-' + node.state, node.delete_pending ? '等待删除' : stateLabel('node', node.state)));
+                row.appendChild(element('td', '', node.error_code ? errorLabel(node.error_code) : '-'));
+                row.appendChild(element('td', '', node.retry_seconds == null ? (node.attempts ? '已尝试 ' + node.attempts + ' 次' : '-') : node.retry_seconds + ' 秒'));
+                var boundCell = element('td', 'pp-v2-bound-cell');
+                node.bound_devices.forEach(function(device) {
+                    var item = element('div', 'pp-v2-bound-device');
+                    item.appendChild(element('strong', '', device.display_name));
+                    item.appendChild(element('span', '', device.lan_ipv4 || '-'));
+                    item.appendChild(element('small', '', device.mac || '-'));
+                    boundCell.appendChild(item);
+                });
+                if (!node.bound_devices.length) boundCell.appendChild(element('span', '', '未绑定设备'));
+                row.appendChild(boundCell);
                 row.appendChild(element('td', '', node.policy_id));
                 var actions = element('td', 'pp-v2-actions');
+                actions.appendChild(actionButton('绑定设备', function() { openBindingEditor(node); }, node.delete_pending));
                 actions.appendChild(actionButton('编辑', function() { openNodeEditor(node); }, node.delete_pending));
                 actions.appendChild(actionButton(node.enabled ? '重连' : '连接', function() {
                     mutate('node_action', { node_id: node.id, operation: node.enabled ? 'reconnect' : 'connect', expected_revision: state.revision });
@@ -713,7 +823,7 @@
                 row.appendChild(element('td', '', (device.hostname || '未命名设备') + ' / ' + device.mac));
                 row.appendChild(element('td', '', device.current_ipv4 || '-'));
                 row.appendChild(element('td', '', device.fixed_ipv4 || '-'));
-                row.appendChild(element('td', '', device.ingress || '-'));
+                row.appendChild(element('td', '', ingressLabel(device.ingress)));
                 var binding = element('td');
                 var select = element('select', 'cbi-input-select');
                 var unboundOption = element('option', '', '不绑定');
@@ -744,7 +854,7 @@
                 row.appendChild(element('td', '', pending.ipv4));
                 row.appendChild(element('td', '', '-'));
                 row.appendChild(element('td', '', pending.node_name));
-                row.appendChild(element('td', 'pp-v2-state pp-v2-state-queued', pending.error_code || pending.state));
+                row.appendChild(element('td', 'pp-v2-state pp-v2-state-queued', pending.error_code ? errorLabel(pending.error_code) : pending.state));
                 body.appendChild(row);
             });
             if (!state.devices.length && !state.pendingBindings.length) {
@@ -761,7 +871,7 @@
             target.textContent = '';
             visibleJobs(state.jobs, state.trackedJobIds).slice(0, 20).forEach(function(job) {
                 var card = element('div', 'pp-v2-job');
-                card.appendChild(element('strong', '', job.kind + ' · ' + job.id));
+                card.appendChild(element('strong', '', jobKindLabel(job.kind) + ' · ' + job.id));
                 card.appendChild(element('span', 'pp-v2-job-summary', jobSummary(job)));
                 target.appendChild(card);
             });
@@ -778,10 +888,10 @@
                 target.appendChild(element('span', '', '尚未生成诊断包。诊断内容会自动脱敏并在 15 分钟后过期。'));
                 return;
             }
-            target.appendChild(element('strong', '', '诊断包：' + model.state));
-            if (model.error_code) target.appendChild(element('span', 'pp-v2-job-summary', model.error_code));
+            target.appendChild(element('strong', '', '诊断包：' + stateLabel('diagnostic', model.state)));
+            if (model.error_code) target.appendChild(element('span', 'pp-v2-job-summary', errorLabel(model.error_code)));
             if (model.can_download) {
-                var detail = model.filename + ' · ' + model.size + ' bytes';
+                var detail = model.filename + ' · ' + model.size + ' 字节';
                 target.appendChild(element('span', 'pp-v2-job-summary', detail));
                 target.appendChild(actionButton('下载一次', function() {
                     var form = document.getElementById('pp-v2-diagnostics-download-form');
@@ -872,6 +982,35 @@
             }
             document.getElementById('pp-v2-node-modal').hidden = true;
             mutate('node_save', validation.params);
+        });
+        document.getElementById('pp-v2-binding-search').addEventListener('input', renderBindingEditor);
+        document.getElementById('pp-v2-binding-cancel').addEventListener('click', closeBindingEditor);
+        document.getElementById('pp-v2-binding-save').addEventListener('click', function() {
+            if (!bindingNodeID || bindingSaving) return;
+            var replacement = buildBindingReplacement(bindingRows, selectedBindingIDs(), bindingRevision);
+            if (!replacement.changed) {
+                closeBindingEditor();
+                return;
+            }
+            var migrationLines = replacement.migrations.map(function(item) { return item.device_name + '：' + item.from_node + ' → ' + item.to_node; });
+            if (migrationLines.length && !environment.confirm('确认迁移以下设备：\n' + migrationLines.join('\n') + '\n迁移时会先从原节点移除，再绑定到当前节点。')) return;
+            bindingSaving = true;
+            renderBindingEditor();
+            showError(null);
+            apiCall('bindings_replace', {
+                node_id: bindingNodeID,
+                device_ids_json: JSON.stringify(replacement.device_ids),
+                expected_revision: bindingRevision
+            }, true).then(function(result) {
+                var targetNodeID = bindingNodeID;
+                bindingSaving = false;
+                closeBindingEditor();
+                return trackMutation(result, { node_id: targetNodeID });
+            }).catch(function(error) {
+                bindingSaving = false;
+                renderBindingEditor();
+                showError(error);
+            });
         });
         document.getElementById('pp-v2-import-open').addEventListener('click', function() {
             importGeneration++;

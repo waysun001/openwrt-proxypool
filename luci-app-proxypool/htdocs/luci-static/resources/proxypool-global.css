@@ -98,3 +98,10 @@ html.pp-wide-layout #maincontent {
     html.pp-wide-layout #maincontent { padding: 0 12px; }
     #proxypool-global-menu .menu-links a { padding: 6px 12px; font-size: 13px; }
 }
+
+@media (max-width: 760px) {
+    #proxypool-global-menu { height: auto; min-height: 52px; padding: 8px 10px; align-items: flex-start; gap: 8px; flex-direction: column; }
+    #proxypool-global-menu .menu-links { height: auto; }
+    #proxypool-global-menu .menu-links a { padding: 6px 9px; }
+    #proxypool-global-menu .menu-stats { padding-left: 9px; }
+}

@@ -1,5 +1,22 @@
 <%+header%>
+<link rel="stylesheet" href="<%=resource%>/proxypool-global.css" />
 <link rel="stylesheet" href="<%=resource%>/proxypool-v2.css" />
+
+<nav id="proxypool-global-menu"
+     data-status-url="<%=url([[admin]], [[services]], [[proxypool]], [[api]], [[read]])%>?action=status"
+     aria-label="ProxyPool 管理导航">
+    <div class="menu-links">
+        <a class="active" href="<%=url([[admin]], [[services]], [[proxypool]])%>">ProxyPool</a>
+        <a href="<%=url([[admin]], [[system]], [[flash]])%>">备份与升级</a>
+        <a href="<%=url([[admin]], [[network]], [[wireless]])%>">无线设置</a>
+        <a href="<%=url([[admin]], [[system]], [[reboot]])%>">重启</a>
+    </div>
+    <div class="menu-stats" aria-label="节点状态">
+        <span>节点 <strong id="pp-stat-total">-</strong></span>
+        <span class="stat-connected">在线 <strong id="pp-stat-connected">-</strong></span>
+        <span class="stat-disconnected">离线 <strong id="pp-stat-disconnected">-</strong></span>
+    </div>
+</nav>
 
 <div id="pp-v2-app" class="pp-v2-app"
      data-api-read="<%=url([[admin]], [[services]], [[proxypool]], [[api]], [[read]])%>"
@@ -39,7 +56,7 @@
         </div>
         <div class="pp-v2-table-wrap">
             <table class="table pp-v2-table">
-                <thead><tr><th>名称</th><th>服务器</th><th>协议</th><th>状态</th><th>错误</th><th>重试</th><th>绑定数</th><th>策略</th><th>操作</th></tr></thead>
+                <thead><tr><th>名称</th><th>服务器</th><th>协议</th><th>状态</th><th>错误</th><th>重试</th><th>已绑定设备</th><th>策略</th><th>操作</th></tr></thead>
                 <tbody id="pp-v2-node-list"></tbody>
             </table>
         </div>
@@ -93,6 +110,23 @@
         </div>
     </div>
 
+    <div id="pp-v2-binding-modal" class="pp-v2-modal" hidden>
+        <div class="pp-v2-dialog pp-v2-binding-dialog" role="dialog" aria-modal="true" aria-labelledby="pp-v2-binding-title">
+            <h3 id="pp-v2-binding-title">绑定设备</h3>
+            <p id="pp-v2-binding-context" class="pp-v2-dialog-note"></p>
+            <label class="pp-v2-search-label">搜索设备
+                <input id="pp-v2-binding-search" type="search" autocomplete="off" placeholder="名称、IP、MAC、LAN/WiFi 或当前节点" />
+            </label>
+            <div id="pp-v2-binding-count" class="pp-v2-binding-count"></div>
+            <div id="pp-v2-binding-list" class="pp-v2-binding-list" role="group" aria-label="可绑定设备"></div>
+            <div id="pp-v2-binding-migrations" class="pp-v2-binding-migrations" hidden></div>
+            <div class="pp-v2-dialog-actions">
+                <button id="pp-v2-binding-cancel" type="button" class="cbi-button">取消</button>
+                <button id="pp-v2-binding-save" type="button" class="cbi-button cbi-button-save">保存绑定</button>
+            </div>
+        </div>
+    </div>
+
     <div id="pp-v2-import-modal" class="pp-v2-modal" hidden>
         <div class="pp-v2-dialog" role="dialog" aria-modal="true" aria-labelledby="pp-v2-import-title">
             <h3 id="pp-v2-import-title">批量导入 L2TP 节点</h3>
@@ -109,5 +143,6 @@
     </div>
 </div>
 
+<script type="text/javascript" src="<%=resource%>/proxypool-global.js"></script>
 <script type="text/javascript" src="<%=resource%>/proxypool-v2.js"></script>
 <%+footer%>
