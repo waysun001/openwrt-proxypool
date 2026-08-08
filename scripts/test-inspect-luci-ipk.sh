@@ -108,8 +108,9 @@ make_ipk() {
 		"$data/usr/lib/lua/luci/view/proxypool/main.htm" \
 		"$data/usr/lib/lua/luci/view/proxypool/locked.htm" \
 		"$data/usr/lib/lua/luci/view/proxypool/lease.htm"
-	chmod 644 "$data/www/luci-static/resources/proxypool-v2.js" \
-		"$data/www/luci-static/resources/proxypool-v2.css"
+	chmod 644 "$data/www/luci-static/resources/proxypool-v2.js"
+	[ ! -e "$data/www/luci-static/resources/proxypool-v2.css" ] ||
+		chmod 644 "$data/www/luci-static/resources/proxypool-v2.css"
 	[ "$kind" != group_writable ] ||
 		chmod 664 "$data/usr/lib/lua/luci/controller/proxypool.lua"
 
