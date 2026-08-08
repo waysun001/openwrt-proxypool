@@ -121,6 +121,8 @@ make_ipk() {
 		"$data/www/luci-static/resources/proxypool-v2.css"
 	[ ! -e "$data/www/luci-static/resources/proxypool-global.css" ] ||
 		chmod 644 "$data/www/luci-static/resources/proxypool-global.css"
+	[ "$kind" != group_writable ] ||
+		chmod 664 "$data/usr/lib/lua/luci/controller/proxypool.lua"
 
 	printf '2.0\n' >"$outer/debian-binary"
 	tar -czf "$outer/control.tar.gz" -C "$control" .
@@ -133,6 +135,14 @@ run_inspector() {
 	wrong_mode=${2:-}
 	PROXYPOOL_TEST_WRONG_MODE="$wrong_mode" PATH="$TEST_TMP/bin:$PATH" \
 		sh "$INSPECTOR" "$TEST_TMP/$name.ipk" >"$TEST_TMP/$name.log" 2>&1
+}
+
+run_inspector_real_modes() {
+	name=$1
+	(
+		umask 0022
+		sh "$INSPECTOR" "$TEST_TMP/$name.ipk" >"$TEST_TMP/$name.log" 2>&1
+	)
 }
 
 make_ipk valid valid
@@ -162,6 +172,12 @@ if run_inspector wrong_mode uci-default; then
 	exit 1
 fi
 
+make_ipk group_writable group_writable
+if run_inspector_real_modes group_writable; then
+	echo 'group-writable LuCI payload passed inspection under umask 0022' >&2
+	exit 1
+fi
+
 grep -Fq 'unexpected package architecture metadata' "$TEST_TMP/bad_arch.log"
 grep -Fq 'missing required dependency: proxypool-core' "$TEST_TMP/missing_core_dep.log"
 grep -Fq 'unexpected LuCI package payload' "$TEST_TMP/missing_css.log"
@@ -170,5 +186,6 @@ grep -Fq 'unexpected LuCI package payload' "$TEST_TMP/extra_uci_default.log"
 grep -Fq 'uci-default contains router provisioning or global LuCI mutation' "$TEST_TMP/unsafe_default.log"
 grep -Fq 'main view does not load packaged V2 assets' "$TEST_TMP/missing_resource_load.log"
 grep -Fq 'unexpected mode for /etc/uci-defaults/luci-proxypool' "$TEST_TMP/wrong_mode.log"
+grep -Fq 'unexpected mode for /usr/lib/lua/luci/controller/proxypool.lua' "$TEST_TMP/group_writable.log"
 
 echo 'LuCI IPK fixture inspection: PASS'

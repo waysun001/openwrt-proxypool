@@ -12,13 +12,13 @@ package=$1
 inspect_tmp=$(mktemp -d)
 trap 'rm -rf "$inspect_tmp"' EXIT HUP INT TERM
 mkdir "$inspect_tmp/outer" "$inspect_tmp/data" "$inspect_tmp/control"
-tar -xzf "$package" -C "$inspect_tmp/outer"
+tar --same-permissions -xzf "$package" -C "$inspect_tmp/outer"
 [ "$(tr -d '\r\n' <"$inspect_tmp/outer/debian-binary")" = 2.0 ] || {
 	echo 'invalid IPK format version' >&2
 	exit 1
 }
-tar -xzf "$inspect_tmp/outer/data.tar.gz" -C "$inspect_tmp/data"
-tar -xzf "$inspect_tmp/outer/control.tar.gz" -C "$inspect_tmp/control"
+tar --same-permissions -xzf "$inspect_tmp/outer/data.tar.gz" -C "$inspect_tmp/data"
+tar --same-permissions -xzf "$inspect_tmp/outer/control.tar.gz" -C "$inspect_tmp/control"
 
 control="$inspect_tmp/control/control"
 grep -Fqx 'Package: luci-app-proxypool' "$control" || {
