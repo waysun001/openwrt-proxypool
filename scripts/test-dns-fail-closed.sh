@@ -415,8 +415,12 @@ test_luci_status_contract_exposes_dns_failure() {
 			fail "LuCI directly mutates DNS or UCI state: $forbidden" || return 1
 		fi
 	done
-	grep -Fq '/api/read?action=status' "$GLOBAL_JS" ||
-		fail 'global menu does not use the read-only V2 status route'
+	grep -Fq 'data-status-url="<%=url([[admin]], [[services]], [[proxypool]], [[api]], [[read]])%>?action=status"' "$MAIN_VIEW" ||
+		fail 'global menu template does not generate the read-only V2 status route' || return 1
+	grep -Fq "menu.getAttribute('data-status-url')" "$GLOBAL_JS" ||
+		fail 'global menu script does not read the template-generated status route' || return 1
+	grep -Fq 'window.fetch(statusURL' "$GLOBAL_JS" ||
+		fail 'global menu script does not request the template-generated status route'
 }
 
 failures=0
