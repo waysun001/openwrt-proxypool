@@ -105,7 +105,7 @@ func (scheduler *Scheduler) Run(ctx context.Context) error {
 			scheduler.mu.Lock()
 			delete(scheduler.submitted, job.ID)
 			scheduler.mu.Unlock()
-			if job.Kind == "device.bind" && len(job.Nodes) > 1 {
+			if (job.Kind == "device.bind" || job.Kind == "device.bindings.replace") && len(job.Nodes) > 1 {
 				scheduler.workers.Add(1)
 				go func(job Job) {
 					defer scheduler.workers.Done()
@@ -203,7 +203,7 @@ func (scheduler *Scheduler) runNode(ctx context.Context, work scheduledNode) {
 		return
 	}
 	if exists && status.State == model.StateOnline && job.Kind != "node.reconnect" && job.Kind != "node.save" {
-		if job.Kind == "device.bind" {
+		if job.Kind == "device.bind" || job.Kind == "device.bindings.replace" {
 			status = scheduler.prepareReconnect(ctx, work, node, status)
 			if status.State == model.StateQueued {
 				scheduler.startNode(ctx, work, node, status)

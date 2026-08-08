@@ -58,7 +58,7 @@ func TestRunPreservesVersionAndStrictlyRequiresShadow(t *testing.T) {
 
 func TestLiveControlMethodsExposeTypedNodeMutations(t *testing.T) {
 	methods := liveControlMethods()
-	for _, method := range []string{"node.save", "node.delete", "node.action", "diagnostics.create", "diagnostics.get", "diagnostics.claim", "diagnostics.release"} {
+	for _, method := range []string{"node.save", "node.delete", "node.action", "device.bindings.replace", "diagnostics.create", "diagnostics.get", "diagnostics.claim", "diagnostics.release"} {
 		if _, exists := methods[method]; !exists {
 			t.Fatalf("live daemon method allowlist omitted %q", method)
 		}

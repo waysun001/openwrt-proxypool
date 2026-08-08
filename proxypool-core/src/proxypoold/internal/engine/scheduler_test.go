@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"strings"
 	"sync"
 	"testing"
@@ -627,6 +628,64 @@ func TestSchedulerRebindRefreshesOldNodeBeforeOpeningNewNode(t *testing.T) {
 	case <-newEntered:
 	case <-time.After(time.Second):
 		t.Fatal("new node did not open after old node refresh")
+	}
+}
+
+func TestSchedulerBatchRebindRefreshesOldNodeBeforeOpeningTarget(t *testing.T) {
+	desired := controllerConfig()
+	runtime := &memoryRuntimePersistence{
+		exists: true,
+		snapshot: RuntimeSnapshot{
+			SchemaVersion: RuntimeSnapshotSchemaVersion, ConfigRevision: desired.Revision,
+			NodeStatuses: []NodeStatus{
+				{NodeID: "node_a", JobID: "old-a", Generation: 7, State: model.StateOnline, UpdatedAt: stateTestEpoch},
+				{NodeID: "node_b", JobID: "old-b", Generation: 8, State: model.StateOnline, UpdatedAt: stateTestEpoch},
+			},
+		},
+	}
+	controller, err := NewController(
+		&memoryDesiredStore{cfg: desired}, runtime, NewMachine(nil), NewJobStore(),
+		WithControllerJobIDSource(func() string { return "job-ordered-batch-rebind" }),
+		WithDeviceServices(&controllerDeviceSource{devices: []platform.DiscoveredDevice{{
+			ID: "device_a", MAC: "00:11:22:33:44:55", IPv4: netip.MustParseAddr("192.168.9.10"), Hostname: "Device A", Confirmed: true,
+		}}}, &controllerLeaseManager{}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldEntered := make(chan struct{})
+	newEntered := make(chan struct{})
+	releaseOld := make(chan struct{})
+	defer func() {
+		select {
+		case <-releaseOld:
+		default:
+			close(releaseOld)
+		}
+	}()
+	gate := &orderedRebindGate{oldEntered: oldEntered, newEntered: newEntered, releaseOld: releaseOld}
+	scheduler := NewScheduler(controller, &schedulerAdapter{}, SchedulerConfig{}, gate)
+	controller.AttachScheduler(scheduler)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go scheduler.Run(ctx)
+	assertControllerSuccess(t, controller.Handle(context.Background(), controllerRequest("ordered-batch-rebind", "device.bindings.replace", `{"node_id":"node_b","device_ids":["device_a"],"expected_revision":3}`)))
+	select {
+	case <-oldEntered:
+	case <-time.After(time.Second):
+		t.Fatal("old node refresh did not start")
+	}
+	select {
+	case <-newEntered:
+		t.Fatal("batch target opened before old node authorization was refreshed")
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(releaseOld)
+	waitForJobState(t, controller.jobs, "job-ordered-batch-rebind", JobSucceeded)
+	select {
+	case <-newEntered:
+	case <-time.After(time.Second):
+		t.Fatal("batch target did not open after old node refresh")
 	}
 }
 

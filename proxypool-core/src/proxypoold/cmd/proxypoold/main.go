@@ -147,7 +147,7 @@ func runLive(ctx context.Context, options daemonOptions, endpointLease *api.Endp
 
 func liveControlMethods() map[string]struct{} {
 	return map[string]struct{}{
-		"status.get": {}, "device.list": {}, "device.bind": {}, "device.unbind": {},
+		"status.get": {}, "device.list": {}, "device.bind": {}, "device.unbind": {}, "device.bindings.replace": {},
 		"node.save": {}, "node.delete": {}, "node.action": {}, "import.preview": {}, "import.commit": {},
 		"job.get": {}, "job.list": {}, "system.events": {}, "system.interface_event": {},
 		"diagnostics.create": {}, "diagnostics.get": {}, "diagnostics.claim": {}, "diagnostics.release": {},

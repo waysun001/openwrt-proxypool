@@ -202,6 +202,15 @@ func TestServerGoodRequestAndSocketMode(t *testing.T) {
 	}
 }
 
+func TestServerDefaultMethodsAllowAtomicDeviceBindingReplacement(t *testing.T) {
+	h := &recordingHandler{}
+	path, _ := startServer(t, h, nil)
+	response := exchange(t, path, []byte(`{"version":1,"id":"replace","method":"device.bindings.replace","params":{"node_id":"node_a","device_ids":[],"expected_revision":1}}`+"\n"))
+	if response.Error != nil || h.calls.Load() != 1 {
+		t.Fatalf("atomic binding replacement rejected: response=%#v handler_calls=%d", response, h.calls.Load())
+	}
+}
+
 func TestServerRejectsInvalidRequestsWithoutCallingHandler(t *testing.T) {
 	cases := []struct {
 		name, payload, id, code string

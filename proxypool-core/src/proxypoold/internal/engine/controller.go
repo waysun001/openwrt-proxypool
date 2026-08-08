@@ -470,6 +470,8 @@ func (controller *Controller) Handle(ctx context.Context, request api.Request) a
 		return controller.handleDeviceBind(ctx, request)
 	case "device.unbind":
 		return controller.handleDeviceUnbind(ctx, request)
+	case "device.bindings.replace":
+		return controller.handleDeviceBindingsReplace(ctx, request)
 	case "node.save":
 		return controller.handleNodeSave(ctx, request)
 	case "node.delete":
@@ -512,6 +514,12 @@ type bindParams struct {
 type unbindParams struct {
 	DeviceID         string  `json:"device_id"`
 	ExpectedRevision *uint64 `json:"expected_revision"`
+}
+
+type replaceDeviceBindingsParams struct {
+	NodeID           string   `json:"node_id"`
+	DeviceIDs        []string `json:"device_ids"`
+	ExpectedRevision *uint64  `json:"expected_revision"`
 }
 
 type nodeActionParams struct {
@@ -849,6 +857,159 @@ func (controller *Controller) handleDeviceUnbind(ctx context.Context, request ap
 		return controllerModelError(request.ID, err)
 	}
 	return controller.finishMutationLocked(ctx, request, digest, stored, "device.unbind", nodeIDs)
+}
+
+func (controller *Controller) handleDeviceBindingsReplace(ctx context.Context, request api.Request) api.Response {
+	var params replaceDeviceBindingsParams
+	if decodeControllerParams(request.Params, &params) != nil || request.ID == "" || params.NodeID == "" || params.ExpectedRevision == nil || *params.ExpectedRevision == 0 || len(params.DeviceIDs) > 60 {
+		return controllerError(request.ID, ErrorCodeInvalidRequest)
+	}
+	selected := make(map[string]struct{}, len(params.DeviceIDs))
+	for _, deviceID := range params.DeviceIDs {
+		if deviceID == "" {
+			return controllerError(request.ID, ErrorCodeInvalidRequest)
+		}
+		if _, exists := selected[deviceID]; exists {
+			return controllerError(request.ID, ErrorCodeInvalidRequest)
+		}
+		selected[deviceID] = struct{}{}
+	}
+	digest := controllerDigest(request.Method, params)
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	if response, handled := controller.replayLocked(request, digest); handled {
+		return response
+	}
+	if contextDone(ctx) != nil {
+		return controllerError(request.ID, "operation_timeout")
+	}
+	current, err := controller.desiredStore.Load()
+	if err != nil {
+		return controllerError(request.ID, ErrorCodeInternal)
+	}
+	if current.Revision != *params.ExpectedRevision {
+		return controllerError(request.ID, ErrorCodeRevisionConflict)
+	}
+	target, exists := current.Nodes[params.NodeID]
+	if !exists {
+		return controllerError(request.ID, ErrorCodeNotFound)
+	}
+	if !current.Global.Enabled || !target.Enabled {
+		return controllerError(request.ID, ErrorCodeInvalidConfig)
+	}
+	discovered := make(map[string]platform.DiscoveredDevice)
+	if controller.deviceSource != nil {
+		listed, listErr := controller.deviceSource.List(ctx)
+		if listErr != nil {
+			return controllerError(request.ID, ErrorCodeInternal)
+		}
+		for _, device := range listed {
+			if device.ID != "" {
+				discovered[device.ID] = device
+			}
+		}
+	}
+	next := cloneControllerConfig(current)
+	oldNodes := make(map[string]struct{})
+	targetChanged := false
+	for id, device := range current.Devices {
+		if device.NodeID != params.NodeID {
+			continue
+		}
+		if _, keep := selected[id]; keep {
+			continue
+		}
+		device.NodeID = ""
+		device.Enabled = false
+		next.Devices[id] = device
+		targetChanged = true
+	}
+	for _, id := range params.DeviceIDs {
+		device, configured := current.Devices[id]
+		observed, found := discovered[id]
+		if controller.deviceSource != nil {
+			if !found {
+				return controllerError(request.ID, ErrorCodeNotFound)
+			}
+			if !observed.Confirmed || !observed.IPv4.Is4() || observed.MAC == "" {
+				return controllerError(request.ID, ErrorCodeInvalidConfig)
+			}
+			if configured && device.MAC != observed.MAC {
+				return controllerError(request.ID, ErrorCodeInvalidConfig)
+			}
+		}
+		if !configured {
+			if controller.deviceSource == nil {
+				return controllerError(request.ID, ErrorCodeNotFound)
+			}
+			device = model.Device{ID: observed.ID, MAC: observed.MAC, Hostname: observed.Hostname, FixedIPv4: observed.IPv4}
+		}
+		if device.NodeID == params.NodeID && device.Enabled {
+			continue
+		}
+		if device.NodeID != "" && device.NodeID != params.NodeID {
+			oldNodes[device.NodeID] = struct{}{}
+		}
+		device.NodeID = params.NodeID
+		device.Enabled = true
+		next.Devices[id] = device
+		targetChanged = true
+	}
+	if !targetChanged && len(oldNodes) == 0 {
+		return controller.finishMutationLocked(ctx, request, digest, current, "device.bindings.replace", nil)
+	}
+	beforeLeases := activeLeaseDevices(current)
+	afterLeases := activeLeaseDevices(next)
+	projectionManager, ok := controller.leaseManager.(platform.LeaseProjectionManager)
+	if !ok {
+		return controllerError(request.ID, ErrorCodeInternal)
+	}
+	if err := projectionManager.Replace(ctx, beforeLeases, afterLeases, current.Revision+1); err != nil {
+		return controllerError(request.ID, ErrorCodeInternal)
+	}
+	stored, err := controller.desiredStore.Replace(ctx, current.Revision, next)
+	if err != nil {
+		observed, observeErr := controller.desiredStore.Load()
+		if observeErr == nil && controllerConfigMatchesStoredMutation(current, next, observed) {
+			return controller.finishObservedMutationLocked(request, digest, observed, "device.bindings.replace", orderedBindingNodeIDs(oldNodes, params.NodeID, targetChanged))
+		}
+		if observeErr == nil && controllerConfigsEqual(observed, current) {
+			rollbackCtx, cancel := context.WithTimeout(context.Background(), controller.leaseRollbackTimeout)
+			_ = projectionManager.Replace(rollbackCtx, afterLeases, beforeLeases, current.Revision+1)
+			cancel()
+		}
+		return controllerModelError(request.ID, err)
+	}
+	return controller.finishMutationLocked(ctx, request, digest, stored, "device.bindings.replace", orderedBindingNodeIDs(oldNodes, params.NodeID, targetChanged))
+}
+
+func activeLeaseDevices(cfg model.DesiredConfig) []model.Device {
+	ids := make([]string, 0, len(cfg.Devices))
+	for id, device := range cfg.Devices {
+		if device.Enabled && device.NodeID != "" {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	devices := make([]model.Device, 0, len(ids))
+	for _, id := range ids {
+		devices = append(devices, cfg.Devices[id])
+	}
+	return devices
+}
+
+func orderedBindingNodeIDs(oldNodes map[string]struct{}, target string, targetChanged bool) []string {
+	ids := make([]string, 0, len(oldNodes)+1)
+	for nodeID := range oldNodes {
+		if nodeID != target {
+			ids = append(ids, nodeID)
+		}
+	}
+	sort.Strings(ids)
+	if targetChanged {
+		ids = append(ids, target)
+	}
+	return ids
 }
 
 func (controller *Controller) handleNodeAction(ctx context.Context, request api.Request) api.Response {

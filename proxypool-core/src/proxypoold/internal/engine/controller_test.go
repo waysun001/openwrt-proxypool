@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -179,6 +180,136 @@ func TestControllerBindPersistsConfigJobAndIdempotencyAcrossRestart(t *testing.T
 	}
 	if job, exists := restartedJobs.Get("job-bind-1"); !exists || job.ConfigRevision != 4 {
 		t.Fatalf("restart lost job: %#v exists=%t", job, exists)
+	}
+}
+
+func TestControllerReplaceDeviceBindingsPersistsOneAtomicRevision(t *testing.T) {
+	cfg := controllerConfig()
+	cfg.Devices["device_b"] = model.Device{ID: "device_b", MAC: "00:11:22:33:44:66", Hostname: "Device B", FixedIPv4: netip.MustParseAddr("192.168.9.11"), NodeID: "node_b", Enabled: true}
+	configPath := writeControllerConfig(t, cfg)
+	jobs := NewJobStore()
+	leases := &controllerLeaseManager{}
+	source := &controllerDeviceSource{devices: []platform.DiscoveredDevice{
+		{ID: "device_a", MAC: "00:11:22:33:44:55", IPv4: netip.MustParseAddr("192.168.9.10"), Hostname: "Device A", Confirmed: true},
+		{ID: "device_c", MAC: "00:11:22:33:44:77", IPv4: netip.MustParseAddr("192.168.9.12"), Hostname: "Device C", Confirmed: true},
+	}}
+	controller, err := NewController(
+		config.NewStore(configPath), NewRuntimeStore(filepath.Join(t.TempDir(), "runtime.json")), NewMachine(nil), jobs,
+		WithControllerJobIDSource(func() string { return "job-replace-bindings" }),
+		WithDeviceServices(source, leases),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := controllerRequest("replace-bindings-1", "device.bindings.replace", `{"node_id":"node_b","device_ids":["device_a","device_c"],"expected_revision":3}`)
+	response := controller.Handle(context.Background(), request)
+	assertControllerSuccess(t, response)
+	if !bytes.Contains(response.Result, []byte(`"job_id":"job-replace-bindings"`)) || !bytes.Contains(response.Result, []byte(`"config_revision":4`)) {
+		t.Fatalf("replace result = %s", response.Result)
+	}
+	stored, err := config.NewStore(configPath).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Revision != 4 || stored.Devices["device_a"].NodeID != "node_b" || !stored.Devices["device_a"].Enabled || stored.Devices["device_c"].NodeID != "node_b" || !stored.Devices["device_c"].Enabled || stored.Devices["device_b"].NodeID != "" || stored.Devices["device_b"].Enabled {
+		t.Fatalf("stored replacement = revision %d devices %#v", stored.Revision, stored.Devices)
+	}
+	if leases.replaceCalls != 1 || deviceIDs(leases.replacedBefore) != "device_a,device_b" || deviceIDs(leases.replacedAfter) != "device_a,device_c" {
+		t.Fatalf("lease replacement calls=%d before=%s after=%s", leases.replaceCalls, deviceIDs(leases.replacedBefore), deviceIDs(leases.replacedAfter))
+	}
+	job, exists := jobs.Get("job-replace-bindings")
+	if !exists || len(job.Nodes) != 2 || job.Nodes[0].NodeID != "node_a" || job.Nodes[1].NodeID != "node_b" || job.Kind != "device.bindings.replace" {
+		t.Fatalf("replacement job = %#v exists=%t", job, exists)
+	}
+	replayed := controller.Handle(context.Background(), request)
+	if !reflect.DeepEqual(replayed, response) || leases.replaceCalls != 1 {
+		t.Fatalf("replacement replay=%#v calls=%d, want original response and one call", replayed, leases.replaceCalls)
+	}
+}
+
+func TestControllerReplaceDeviceBindingsRejectsInvalidBatchWithoutMutation(t *testing.T) {
+	tooMany := make([]string, 61)
+	for index := range tooMany {
+		tooMany[index] = fmt.Sprintf("device_%02d", index)
+	}
+	encodedTooMany, _ := json.Marshal(tooMany)
+	tests := []struct {
+		name, params, code string
+	}{
+		{name: "duplicate", params: `{"node_id":"node_b","device_ids":["device_a","device_a"],"expected_revision":3}`, code: ErrorCodeInvalidRequest},
+		{name: "too many", params: fmt.Sprintf(`{"node_id":"node_b","device_ids":%s,"expected_revision":3}`, encodedTooMany), code: ErrorCodeInvalidRequest},
+		{name: "missing target", params: `{"node_id":"missing","device_ids":["device_a"],"expected_revision":3}`, code: ErrorCodeNotFound},
+		{name: "unknown device", params: `{"node_id":"node_b","device_ids":["missing"],"expected_revision":3}`, code: ErrorCodeNotFound},
+		{name: "stale revision", params: `{"node_id":"node_b","device_ids":["device_a"],"expected_revision":2}`, code: ErrorCodeRevisionConflict},
+		{name: "unknown field", params: `{"node_id":"node_b","device_ids":[],"expected_revision":3,"future":true}`, code: ErrorCodeInvalidRequest},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := controllerConfig()
+			configPath := writeControllerConfig(t, cfg)
+			leases := &controllerLeaseManager{}
+			controller, err := NewController(config.NewStore(configPath), NewRuntimeStore(filepath.Join(t.TempDir(), "runtime.json")), NewMachine(nil), NewJobStore(), WithDeviceServices(&controllerDeviceSource{}, leases))
+			if err != nil {
+				t.Fatal(err)
+			}
+			response := controller.Handle(context.Background(), controllerRequest("invalid-replace", "device.bindings.replace", test.params))
+			assertControllerError(t, response, test.code)
+			stored, _ := config.NewStore(configPath).Load()
+			if stored.Revision != 3 || stored.Devices["device_a"].NodeID != "node_a" || leases.replaceCalls != 0 {
+				t.Fatalf("invalid replacement mutated state: revision=%d device=%#v calls=%d", stored.Revision, stored.Devices["device_a"], leases.replaceCalls)
+			}
+		})
+	}
+}
+
+func TestControllerReplaceDeviceBindingsLeaseFailurePreservesDesiredState(t *testing.T) {
+	cfg := controllerConfig()
+	configPath := writeControllerConfig(t, cfg)
+	leases := &controllerLeaseManager{replaceErr: errors.New("dnsmasq reload failed")}
+	jobs := NewJobStore()
+	controller, err := NewController(
+		config.NewStore(configPath), NewRuntimeStore(filepath.Join(t.TempDir(), "runtime.json")), NewMachine(nil), jobs,
+		WithDeviceServices(&controllerDeviceSource{devices: []platform.DiscoveredDevice{{
+			ID: "device_a", MAC: "00:11:22:33:44:55", IPv4: netip.MustParseAddr("192.168.9.10"), Hostname: "Device A", Confirmed: true,
+		}}}, leases),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := controller.Handle(context.Background(), controllerRequest("replace-lease-failure", "device.bindings.replace", `{"node_id":"node_b","device_ids":["device_a"],"expected_revision":3}`))
+	assertControllerError(t, response, ErrorCodeInternal)
+	stored, loadErr := config.NewStore(configPath).Load()
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if stored.Revision != 3 || stored.Devices["device_a"].NodeID != "node_a" || leases.replaceCalls != 1 || len(jobs.List()) != 0 {
+		t.Fatalf("lease failure changed desired state: revision=%d device=%#v calls=%d jobs=%#v", stored.Revision, stored.Devices["device_a"], leases.replaceCalls, jobs.List())
+	}
+}
+
+func TestControllerReplaceDeviceBindingsPersistenceFailureRollsBackLeases(t *testing.T) {
+	desired := &failingDesiredStore{cfg: controllerConfig(), replaceErr: errors.New("storage unavailable")}
+	leases := &controllerLeaseManager{}
+	controller, err := NewController(
+		desired, &memoryRuntimePersistence{}, NewMachine(nil), NewJobStore(),
+		WithDeviceServices(&controllerDeviceSource{devices: []platform.DiscoveredDevice{{
+			ID: "device_a", MAC: "00:11:22:33:44:55", IPv4: netip.MustParseAddr("192.168.9.10"), Hostname: "Device A", Confirmed: true,
+		}}}, leases),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := controller.Handle(context.Background(), controllerRequest("replace-store-failure", "device.bindings.replace", `{"node_id":"node_b","device_ids":["device_a"],"expected_revision":3}`))
+	assertControllerError(t, response, ErrorCodeInternal)
+	stored, loadErr := desired.Load()
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if stored.Revision != 3 || stored.Devices["device_a"].NodeID != "node_a" || leases.replaceCalls != 2 {
+		t.Fatalf("persistence failure rollback = revision=%d device=%#v calls=%d", stored.Revision, stored.Devices["device_a"], leases.replaceCalls)
+	}
+	if deviceIDs(leases.replacedBefore) != "device_a" || leases.replacedBefore[0].NodeID != "node_b" || deviceIDs(leases.replacedAfter) != "device_a" || leases.replacedAfter[0].NodeID != "node_a" {
+		t.Fatalf("rollback projection before=%s after=%s", deviceIDs(leases.replacedBefore), deviceIDs(leases.replacedAfter))
 	}
 }
 
@@ -1352,6 +1483,10 @@ type controllerLeaseManager struct {
 	applyErr            error
 	removeErr           error
 	applyWaitForContext bool
+	replacedBefore      []model.Device
+	replacedAfter       []model.Device
+	replaceCalls        int
+	replaceErr          error
 }
 
 type controllerSchedulerRecorder struct{ jobs []Job }
@@ -1372,6 +1507,22 @@ func (manager *controllerLeaseManager) Apply(ctx context.Context, device model.D
 func (manager *controllerLeaseManager) Remove(_ context.Context, device model.Device, _ uint64) error {
 	manager.removed = append(manager.removed, device)
 	return manager.removeErr
+}
+
+func (manager *controllerLeaseManager) Replace(_ context.Context, before, after []model.Device, _ uint64) error {
+	manager.replaceCalls++
+	manager.replacedBefore = append([]model.Device(nil), before...)
+	manager.replacedAfter = append([]model.Device(nil), after...)
+	return manager.replaceErr
+}
+
+func deviceIDs(devices []model.Device) string {
+	ids := make([]string, 0, len(devices))
+	for _, device := range devices {
+		ids = append(ids, device.ID)
+	}
+	sort.Strings(ids)
+	return strings.Join(ids, ",")
 }
 
 type failingDesiredStore struct {
