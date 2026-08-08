@@ -14,6 +14,7 @@ local READ_ACTIONS = {
 local WRITE_ACTIONS = {
     bind = "device.bind",
     unbind = "device.unbind",
+    bindings_replace = "device.bindings.replace",
     node_save = "node.save",
     node_delete = "node.delete",
     node_action = "node.action",
@@ -132,6 +133,32 @@ local function node_save_params(http)
     }
 end
 
+local function device_bindings_replace_params(http, revision)
+    local node = exact_id(http.formvalue("node_id"))
+    local raw = tostring(http.formvalue("device_ids_json") or "")
+    if not node or not revision or #raw < 2 or #raw > 8192 then return nil end
+
+    local json = require "luci.jsonc"
+    local ok, decoded = pcall(json.parse, raw)
+    if not ok or type(decoded) ~= "table" then return nil end
+    local count = 0
+    for key, _ in pairs(decoded) do
+        if type(key) ~= "number" or key < 1 or key ~= math.floor(key) then return nil end
+        count = count + 1
+    end
+    if count > 60 or #decoded ~= count then return nil end
+
+    local devices = {}
+    local seen = {}
+    for index = 1, count do
+        local device = exact_id(decoded[index])
+        if not device or seen[device] then return nil end
+        seen[device] = true
+        devices[index] = device
+    end
+    return { node_id = node, device_ids = devices, expected_revision = revision }
+end
+
 local function write_params(action, http)
     if action == "node_save" then return node_save_params(http) end
     if action == "diagnostics_create" then return {} end
@@ -149,6 +176,9 @@ local function write_params(action, http)
         local hash = exact_hash(http.formvalue("preview_hash"))
         if not preview or not hash or not revision then return nil end
         return { preview_id = preview, preview_hash = hash, expected_revision = revision }
+    end
+    if action == "bindings_replace" then
+        return device_bindings_replace_params(http, revision)
     end
 
     local device = exact_id(http.formvalue("device_id"))

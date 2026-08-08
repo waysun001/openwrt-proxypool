@@ -40,6 +40,15 @@ test('controller separates GET reads from LuCI protected POST writes', () => {
   assert.match(source, /node_delete\s*=\s*"node\.delete"/);
 });
 
+test('atomic device membership writes accept one bounded dense JSON array', () => {
+  assert.match(source, /bindings_replace\s*=\s*"device\.bindings\.replace"/);
+  assert.match(source, /formvalue\("device_ids_json"\)/);
+  assert.match(source, /pcall\(json\.parse,\s*raw\)/);
+  assert.match(source, /count\s*>\s*60/);
+  assert.match(source, /type\(key\)\s*~\=\s*"number"/);
+  assert.match(source, /seen\[device\]/);
+});
+
 test('read and write handlers have disjoint action maps', () => {
   assert.match(source, /local READ_ACTIONS\s*=/);
   assert.match(source, /local WRITE_ACTIONS\s*=/);
