@@ -1000,6 +1000,32 @@ func TestControllerStatusReturnsEditableNonSecretNodeFields(t *testing.T) {
 	}
 }
 
+func TestControllerStatusReturnsLiveTrafficWithoutPersistingIt(t *testing.T) {
+	runtime := &memoryRuntimePersistence{}
+	controller, err := NewController(&memoryDesiredStore{cfg: controllerConfig()}, runtime, NewMachine(nil), NewJobStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	reporter := &controllerTrafficReporter{traffic: map[string]TrafficSnapshot{
+		"node_a": {DownloadBytes: 1024, UploadBytes: 512, DownloadBytesPerSecond: 256, UploadBytesPerSecond: 128, SampledAt: "2030-01-02T03:04:05Z"},
+	}}
+	controller.AttachScheduler(reporter)
+	response := controller.Handle(context.Background(), controllerRequest("traffic-status", "status.get", `{}`))
+	assertControllerSuccess(t, response)
+	for _, required := range []string{`"download_bytes":1024`, `"upload_bytes":512`, `"download_bytes_per_second":256`, `"upload_bytes_per_second":128`} {
+		if !bytes.Contains(response.Result, []byte(required)) {
+			t.Fatalf("status omitted traffic field %s: %s", required, response.Result)
+		}
+	}
+	persisted, err := json.Marshal(RuntimeSnapshot{SchemaVersion: RuntimeSnapshotSchemaVersion, NodeStatuses: []NodeStatus{{NodeID: "node_a", State: model.StateOnline}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(persisted, []byte(`"traffic"`)) {
+		t.Fatalf("runtime snapshot persisted traffic: %s", persisted)
+	}
+}
+
 func TestControllerStatusReturnsPublicRuntimeFailureAndRetryMetadata(t *testing.T) {
 	cfg := controllerConfig()
 	controller, err := NewController(&memoryDesiredStore{cfg: cfg}, &memoryRuntimePersistence{}, NewMachine(nil), NewJobStore())
@@ -1552,6 +1578,16 @@ type controllerSchedulerRecorder struct{ jobs []Job }
 
 func (recorder *controllerSchedulerRecorder) Submit(job Job) {
 	recorder.jobs = append(recorder.jobs, cloneJob(job))
+}
+
+type controllerTrafficReporter struct {
+	traffic map[string]TrafficSnapshot
+}
+
+func (reporter *controllerTrafficReporter) Submit(Job) {}
+
+func (reporter *controllerTrafficReporter) Traffic(nodeID string) TrafficSnapshot {
+	return reporter.traffic[nodeID]
 }
 
 func (manager *controllerLeaseManager) Apply(ctx context.Context, device model.Device, _ uint64) error {

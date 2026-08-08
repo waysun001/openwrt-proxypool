@@ -59,6 +59,62 @@ func TestSchedulerPersistsBeforeStartAndRequiresProbeAndEveryGate(t *testing.T) 
 	}
 }
 
+func TestSchedulerTrafficFollowsValidatedSessionLifecycle(t *testing.T) {
+	jobIDs := []string{"job-traffic-connect", "job-traffic-reconnect", "job-traffic-stop"}
+	controller, err := NewController(
+		&memoryDesiredStore{cfg: controllerConfig()}, &memoryRuntimePersistence{}, NewMachine(nil), NewJobStore(),
+		WithControllerJobIDSource(func() string {
+			id := jobIDs[0]
+			jobIDs = jobIDs[1:]
+			return id
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader := &schedulerTrafficReader{}
+	reader.set(platform.InterfaceCounters{RXBytes: 100, TXBytes: 200}, nil)
+	scheduler := NewSchedulerWithTraffic(controller, &schedulerAdapter{}, reader, SchedulerConfig{TrafficSampleInterval: 5 * time.Millisecond})
+	controller.AttachScheduler(scheduler)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- scheduler.Run(ctx) }()
+
+	assertControllerSuccess(t, controller.Handle(context.Background(), controllerRequest("traffic-connect", "node.action", `{"node_id":"node_a","action":"connect","expected_revision":3}`)))
+	waitForJobState(t, controller.jobs, "job-traffic-connect", JobSucceeded)
+	waitForTraffic(t, scheduler, "node_a", func(snapshot TrafficSnapshot) bool { return snapshot.SampledAt != "" })
+	if got := scheduler.Traffic("node_a"); got.DownloadBytes != 0 || got.UploadBytes != 0 {
+		t.Fatalf("initial online traffic = %#v", got)
+	}
+
+	reader.set(platform.InterfaceCounters{RXBytes: 612, TXBytes: 456}, nil)
+	waitForTraffic(t, scheduler, "node_a", func(snapshot TrafficSnapshot) bool {
+		return snapshot.DownloadBytes == 512 && snapshot.UploadBytes == 256 && snapshot.DownloadBytesPerSecond > 0 && snapshot.UploadBytesPerSecond > 0
+	})
+	reader.set(platform.InterfaceCounters{}, errors.New("sysfs temporarily unavailable"))
+	waitForTraffic(t, scheduler, "node_a", func(snapshot TrafficSnapshot) bool {
+		return snapshot.DownloadBytes == 512 && snapshot.UploadBytes == 256 && snapshot.DownloadBytesPerSecond == 0 && snapshot.UploadBytesPerSecond == 0
+	})
+	if status, exists := controller.schedulerStatus("node_a"); !exists || status.State != model.StateOnline {
+		t.Fatalf("traffic read failure changed node status: %#v exists=%t", status, exists)
+	}
+
+	reader.set(platform.InterfaceCounters{RXBytes: 700, TXBytes: 500}, nil)
+	assertControllerSuccess(t, controller.Handle(context.Background(), controllerRequest("traffic-reconnect", "node.action", `{"node_id":"node_a","action":"reconnect","expected_revision":3}`)))
+	waitForJobState(t, controller.jobs, "job-traffic-reconnect", JobSucceeded)
+	waitForTraffic(t, scheduler, "node_a", func(snapshot TrafficSnapshot) bool {
+		return snapshot.SampledAt != "" && snapshot.DownloadBytes == 0 && snapshot.UploadBytes == 0
+	})
+
+	assertControllerSuccess(t, controller.Handle(context.Background(), controllerRequest("traffic-stop", "node.action", `{"node_id":"node_a","action":"stop","expected_revision":3}`)))
+	waitForJobState(t, controller.jobs, "job-traffic-stop", JobSucceeded)
+	waitForTraffic(t, scheduler, "node_a", func(snapshot TrafficSnapshot) bool { return snapshot == (TrafficSnapshot{}) })
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
+
 func TestSchedulerNodeSaveReconnectsChangedOnlineNodeAndStopsDisabledNode(t *testing.T) {
 	jobIDs := []string{"job-connect-before-save", "job-save-reconnect", "job-save-disable"}
 	controller, err := NewController(
@@ -1009,6 +1065,37 @@ type schedulerAdapter struct {
 	stopCalls              int
 	stopGenerationMismatch bool
 	saveCountAtStart       int
+}
+
+type schedulerTrafficReader struct {
+	mu       sync.Mutex
+	counters platform.InterfaceCounters
+	err      error
+}
+
+func (reader *schedulerTrafficReader) set(counters platform.InterfaceCounters, err error) {
+	reader.mu.Lock()
+	defer reader.mu.Unlock()
+	reader.counters = counters
+	reader.err = err
+}
+
+func (reader *schedulerTrafficReader) ReadInterfaceCounters(string) (platform.InterfaceCounters, error) {
+	reader.mu.Lock()
+	defer reader.mu.Unlock()
+	return reader.counters, reader.err
+}
+
+func waitForTraffic(t *testing.T, scheduler *Scheduler, nodeID string, ready func(TrafficSnapshot) bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if snapshot := scheduler.Traffic(nodeID); ready(snapshot) {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("traffic for %s did not reach expected state: %#v", nodeID, scheduler.Traffic(nodeID))
 }
 
 func (adapter *schedulerAdapter) Start(ctx context.Context, request platform.NodeRequest) (platform.Session, error) {
