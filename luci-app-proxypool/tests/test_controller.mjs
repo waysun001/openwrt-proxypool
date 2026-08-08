@@ -18,10 +18,6 @@ const v2Script = await readFile(
   new URL('../htdocs/luci-static/resources/proxypool-v2.js', import.meta.url),
   'utf8',
 );
-const globalScript = await readFile(
-  new URL('../htdocs/luci-static/resources/proxypool-global.js', import.meta.url),
-  'utf8',
-);
 
 test('controller contains no direct system mutation or socket implementation', () => {
   for (const forbidden of [
@@ -80,14 +76,9 @@ test('main page sends reads and writes to their defined endpoints', () => {
   assert.match(v2Script, /target\s*=\s*mutation\s*\?\s*apiWrite\s*:\s*apiRead/);
 });
 
-test('main page renders a package-local navigation bar with LuCI-generated links', () => {
-  assert.match(mainView, /proxypool-global\.css/);
-  assert.match(mainView, /id="proxypool-global-menu"/);
-  assert.match(mainView, /<%=url\(\[\[admin\]\],\s*\[\[system\]\],\s*\[\[flash\]\]\)%>/);
-  assert.match(mainView, /<%=url\(\[\[admin\]\],\s*\[\[network\]\],\s*\[\[wireless\]\]\)%>/);
-  assert.match(mainView, /<%=url\(\[\[admin\]\],\s*\[\[system\]\],\s*\[\[reboot\]\]\)%>/);
-  assert.match(mainView, /proxypool-global\.js/);
-  assert.match(globalScript, /getAttribute\('data-status-url'\)/);
+test('main page delegates global navigation to the active theme', () => {
+  assert.doesNotMatch(mainView, /proxypool-global\.(css|js)/);
+  assert.doesNotMatch(mainView, /id="proxypool-global-menu"/);
 });
 
 test('node page exposes searchable multi-device membership with migration confirmation', () => {
