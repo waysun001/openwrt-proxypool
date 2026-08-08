@@ -551,6 +551,39 @@ func TestControllerNodeSavePreservesBlankPasswordAndReplacesExplicitSecret(t *te
 	}
 }
 
+func TestControllerNodeSaveMetadataDoesNotSubmitRuntimeWork(t *testing.T) {
+	configPath := writeControllerConfig(t, controllerConfig())
+	jobs := NewJobStore()
+	recorder := &controllerSchedulerRecorder{}
+	controller, err := NewController(
+		config.NewStore(configPath), NewRuntimeStore(filepath.Join(t.TempDir(), "runtime.json")), NewMachine(nil), jobs,
+		WithControllerJobIDSource(func() string { return "job-node-metadata" }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.AttachScheduler(recorder)
+	response := controller.Handle(context.Background(), controllerRequest(
+		"node-metadata", "node.save", `{"node_id":"node_a","name":"香港节点","note":"微信专用","protocol":"l2tp","enabled":true,"server":"a.example","port":1701,"username":"","password":"","expected_revision":3}`,
+	))
+	assertControllerSuccess(t, response)
+	stored, err := config.NewStore(configPath).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated := stored.Nodes["node_a"]
+	if stored.Revision != 4 || updated.Name != "香港节点" || updated.Note != "微信专用" || updated.Username != "user-a" || updated.Password != "password-a" {
+		t.Fatalf("metadata update = revision %d node %#v", stored.Revision, updated)
+	}
+	if len(recorder.jobs) != 0 {
+		t.Fatalf("metadata-only update submitted runtime jobs: %#v", recorder.jobs)
+	}
+	job, exists := jobs.Get("job-node-metadata")
+	if !exists || job.State != JobSucceeded || len(job.Nodes) != 0 {
+		t.Fatalf("metadata-only job = %#v exists=%t", job, exists)
+	}
+}
+
 func TestControllerStoredMutationMatchIncludesNodeSecrets(t *testing.T) {
 	current := controllerConfig()
 	next := cloneControllerConfig(current)
@@ -946,6 +979,7 @@ func TestControllerStatusReturnsEditableNonSecretNodeFields(t *testing.T) {
 	expires := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
 	node := cfg.Nodes["node_a"]
 	node.ExpiresAt = &expires
+	node.Note = "香港微信专用"
 	cfg.Nodes[node.ID] = node
 	controller, err := NewController(&memoryDesiredStore{cfg: cfg}, &memoryRuntimePersistence{}, NewMachine(nil), NewJobStore())
 	if err != nil {
@@ -954,7 +988,7 @@ func TestControllerStatusReturnsEditableNonSecretNodeFields(t *testing.T) {
 	response := controller.Handle(context.Background(), controllerRequest("editable-status", "status.get", `{}`))
 	assertControllerSuccess(t, response)
 	encoded := string(response.Result)
-	for _, required := range []string{`"server":"a.example"`, `"port":1701`, `"has_username":true`, `"has_password":true`, `"expires_at":"2030-01-02T03:04:05Z"`, `"revision":3`} {
+	for _, required := range []string{`"note":"香港微信专用"`, `"server":"a.example"`, `"port":1701`, `"has_username":true`, `"has_password":true`, `"expires_at":"2030-01-02T03:04:05Z"`, `"revision":3`} {
 		if !strings.Contains(encoded, required) {
 			t.Fatalf("status omitted editable field %s: %s", required, response.Result)
 		}

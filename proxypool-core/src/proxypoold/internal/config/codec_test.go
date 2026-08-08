@@ -99,6 +99,38 @@ func TestCodecDeletePendingIsBackwardCompatibleAndRoundTrips(t *testing.T) {
 	}
 }
 
+func TestCodecNodeNoteIsOptionalAndRoundTrips(t *testing.T) {
+	input, err := os.ReadFile("testdata/v2-valid.uci")
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := Decode(bytes.NewReader(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.Nodes["node_a"].Note != "" {
+		t.Fatalf("legacy node note = %q, want empty", legacy.Nodes["node_a"].Note)
+	}
+
+	node := legacy.Nodes["node_a"]
+	node.Note = "香港微信专用"
+	legacy.Nodes[node.ID] = node
+	var encoded bytes.Buffer
+	if err := Encode(&encoded, legacy); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(encoded.Bytes(), []byte("option note '香港微信专用'")) {
+		t.Fatalf("encoded config omitted note:\n%s", encoded.Bytes())
+	}
+	roundTrip, err := Decode(bytes.NewReader(encoded.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if roundTrip.Nodes["node_a"].Note != node.Note {
+		t.Fatalf("round-trip note = %q, want %q", roundTrip.Nodes["node_a"].Note, node.Note)
+	}
+}
+
 func TestConfigEqualityIncludesDeletePending(t *testing.T) {
 	left := validConfig()
 	right := cloneConfig(left)

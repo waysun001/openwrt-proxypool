@@ -607,6 +607,38 @@ func TestValidateDeletePendingNodeMustBeDisabledAndUnreferenced(t *testing.T) {
 	assertCode(t, model.Validate(cfg), "invalid_config")
 }
 
+func TestValidateNodeNote(t *testing.T) {
+	tests := []struct {
+		name    string
+		note    string
+		wantErr bool
+	}{
+		{name: "empty", note: ""},
+		{name: "unicode", note: "香港微信专用节点"},
+		{name: "two hundred unicode runes", note: strings.Repeat("界", 200)},
+		{name: "leading whitespace is not canonical", note: " 香港节点", wantErr: true},
+		{name: "trailing whitespace is not canonical", note: "香港节点 ", wantErr: true},
+		{name: "more than two hundred unicode runes", note: strings.Repeat("界", 201), wantErr: true},
+		{name: "newline", note: "第一行\n第二行", wantErr: true},
+		{name: "control character", note: "节点\u0007备注", wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := validConfig()
+			node := cfg.Nodes["node-01"]
+			node.Note = test.note
+			cfg.Nodes[node.ID] = node
+			err := model.Validate(cfg)
+			if test.wantErr && err == nil {
+				t.Fatal("Validate() error = nil")
+			}
+			if !test.wantErr && err != nil {
+				t.Fatalf("Validate() error = %v", err)
+			}
+		})
+	}
+}
+
 func validConfigWithNodes(count int) model.DesiredConfig {
 	nodes := make(map[string]model.Node, count)
 	for i := 1; i <= count; i++ {
