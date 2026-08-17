@@ -59,6 +59,10 @@ done
 if grep -Eq '<header>|class="brand"' "$HEADER"; then
 	fail 'theme still renders the native OpenWrt header bar'
 fi
+grep -Fq '#topmenu, #indicators {' "$CSS" ||
+	fail 'theme does not keep LuCI native header mounts hidden after menu rendering'
+grep -Fq 'display: none !important;' "$CSS" ||
+	fail 'theme allows LuCI to reveal the native OpenWrt header mounts'
 grep -Fq '>ZeanLink</a>' "$HEADER" || fail 'global navigation does not show the ZeanLink brand'
 grep -Fq '<h2>ZeanLink V2</h2>' "$MAIN_VIEW" || fail 'main page does not show the ZeanLink brand'
 grep -Fq '<h2>ZeanLink 服务暂时不可用</h2>' "$LOCKED_VIEW" ||

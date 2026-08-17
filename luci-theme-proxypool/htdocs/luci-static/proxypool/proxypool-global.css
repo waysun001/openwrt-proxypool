@@ -1,3 +1,7 @@
+#topmenu, #indicators {
+	display: none !important;
+}
+
 #proxypool-global-menu {
 	display: flex;
 	justify-content: space-between;
