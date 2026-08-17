@@ -6,14 +6,14 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-theme-proxypool
-PKG_VERSION:=2.1.0
+PKG_VERSION:=2.2.0
 PKG_RELEASE:=1
 
 PKG_LICENSE:=Apache-2.0
 PKG_MAINTAINER:=ProxyPool contributors
 
-LUCI_TITLE:=ProxyPool global LuCI theme
-LUCI_DESCRIPTION:=Bootstrap-based LuCI theme with a persistent ProxyPool management bar
+LUCI_TITLE:=ZeanLink global LuCI theme
+LUCI_DESCRIPTION:=Bootstrap-based LuCI theme with a persistent ZeanLink management bar
 LUCI_DEPENDS:=+luci-base +luci-theme-bootstrap
 LUCI_PKGARCH:=all
 PKG_FILE_MODES:=/etc/uci-defaults/30_luci-theme-proxypool:root:root:0755 \

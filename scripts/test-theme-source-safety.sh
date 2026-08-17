@@ -10,13 +10,18 @@ FOOTER="$THEME/ucode/template/themes/proxypool/footer.ut"
 SYSAUTH="$THEME/ucode/template/themes/proxypool/sysauth.ut"
 CSS="$THEME/htdocs/luci-static/proxypool/proxypool-global.css"
 JS="$THEME/htdocs/luci-static/proxypool/proxypool-global.js"
+APP_CSS="$ROOT/luci-app-proxypool/htdocs/luci-static/resources/proxypool-v2.css"
+MAIN_VIEW="$ROOT/luci-app-proxypool/luasrc/view/proxypool/main.htm"
+LOCKED_VIEW="$ROOT/luci-app-proxypool/luasrc/view/proxypool/locked.htm"
+CONTROLLER="$ROOT/luci-app-proxypool/luasrc/controller/proxypool.lua"
 
 fail() {
 	printf 'ProxyPool theme source safety: %s\n' "$*" >&2
 	exit 1
 }
 
-for file in "$MAKEFILE" "$DEFAULT" "$HEADER" "$FOOTER" "$SYSAUTH" "$CSS" "$JS"; do
+for file in "$MAKEFILE" "$DEFAULT" "$HEADER" "$FOOTER" "$SYSAUTH" "$CSS" "$JS" \
+	"$APP_CSS" "$MAIN_VIEW" "$LOCKED_VIEW" "$CONTROLLER"; do
 	[ -f "$file" ] && [ ! -L "$file" ] || fail "missing regular file: ${file#$ROOT/}"
 done
 if find "$THEME" -type l -print -quit | grep -q .; then
@@ -46,11 +51,24 @@ for route in \
 	"dispatcher.build_url('admin', 'system', 'reboot')"; do
 	grep -Fq "$route" "$HEADER" || fail "missing navigation route: $route"
 done
-for marker in 'id="proxypool-global-menu"' 'aria-label="ProxyPool 管理导航"' 'aria-current="page"' \
+for marker in 'id="proxypool-global-menu"' 'aria-label="ZeanLink 管理导航"' 'aria-current="page"' \
 	'id="pp-stat-total"' 'id="pp-stat-connected"' 'id="pp-stat-disconnected"' \
 	'/luci-static/proxypool/proxypool-global.css' '/luci-static/proxypool/proxypool-global.js' 'ctx.request_path'; do
 	grep -Fq "$marker" "$HEADER" || fail "header is missing: $marker"
 done
+if grep -Eq '<header>|class="brand"' "$HEADER"; then
+	fail 'theme still renders the native OpenWrt header bar'
+fi
+grep -Fq '>ZeanLink</a>' "$HEADER" || fail 'global navigation does not show the ZeanLink brand'
+grep -Fq '<h2>ZeanLink V2</h2>' "$MAIN_VIEW" || fail 'main page does not show the ZeanLink brand'
+grep -Fq '<h2>ZeanLink 服务暂时不可用</h2>' "$LOCKED_VIEW" ||
+	fail 'locked page does not show the ZeanLink brand'
+grep -Fq '_("ZeanLink")' "$CONTROLLER" || fail 'LuCI menu does not show the ZeanLink brand'
+grep -Fq 'body[data-page="admin-services-proxypool"] #maincontent.container' "$CSS" ||
+	fail 'theme does not scope the near-full-width layout to the ZeanLink page'
+grep -Fq 'max-width: none' "$CSS" || fail 'theme keeps a desktop max-width on the ZeanLink page'
+grep -Fq '.pp-v2-app { max-width: none;' "$APP_CSS" ||
+	fail 'ZeanLink app content retains its old width cap'
 grep -Fq ':focus-visible' "$CSS" || fail 'theme lacks keyboard focus styling'
 grep -Fq '@media' "$CSS" || fail 'theme lacks mobile styling'
 grep -Fq "getAttribute('data-status-url')" "$JS" || fail 'theme script does not use the generated status URL'

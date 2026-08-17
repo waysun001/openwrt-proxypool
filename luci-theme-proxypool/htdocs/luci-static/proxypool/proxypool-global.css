@@ -52,6 +52,16 @@
 #proxypool-global-menu .menu-stats .stat-disconnected,
 #proxypool-global-menu .menu-stats .stat-disconnected strong { color: #ef9a9a; }
 
+body[data-page="admin-services-proxypool"] #maincontent.container {
+	box-sizing: border-box;
+	width: calc(100% - 24px);
+	max-width: none;
+	margin-right: 12px;
+	margin-left: 12px;
+	padding-right: 0;
+	padding-left: 0;
+}
+
 @media (max-width: 900px) {
 	#proxypool-global-menu {
 		align-items: flex-start;
@@ -61,4 +71,9 @@
 	}
 	#proxypool-global-menu .menu-links a { padding: 6px 10px; }
 	#proxypool-global-menu .menu-stats { padding-left: 10px; }
+	body[data-page="admin-services-proxypool"] #maincontent.container {
+		width: calc(100% - 16px);
+		margin-right: 8px;
+		margin-left: 8px;
+	}
 }

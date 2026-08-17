@@ -16,8 +16,8 @@ fail() {
 [ -f "$HOTPLUG" ] || fail 'missing LAN isolation hotplug wrapper'
 [ -f "$WIRELESS_DEFAULT" ] || fail 'missing image wireless default'
 
-if grep -Eq "disabled=['\"]?0|encryption=['\"]?none|delete[[:space:]]+wireless\..*\.key" "$WIRELESS_DEFAULT"; then
-	fail 'image overlay enables or weakens an unauthenticated wireless network'
+if grep -Eq "encryption=['\"]?none|delete[[:space:]]+wireless\..*\.key" "$WIRELESS_DEFAULT"; then
+	fail 'image overlay weakens an unauthenticated wireless network'
 fi
 grep -Fq '/usr/lib/proxypool/lan-isolation.sh' "$WIRELESS_DEFAULT" ||
 	fail 'image wireless default does not delegate to the audited isolation helper'
@@ -462,9 +462,76 @@ cat >"$BIN/default-wifi" <<'EOF_DEFAULT_WIFI'
 set -eu
 [ "$#" -eq 1 ] && [ "$1" = config ] || exit 2
 printf 'default:wifi:config\n' >>"$PROXYPOOL_TEST_TRACE"
-printf 'stock-wireless\n' >"$PROXYPOOL_TEST_DEFAULT_CONFIG"
+cat >"$PROXYPOOL_TEST_DEFAULT_CONFIG" <<'EOF_STOCK_WIRELESS'
+wireless.radio0=wifi-device
+wireless.radio0.band=2g
+wireless.radio0.disabled=1
+wireless.default_radio0=wifi-iface
+wireless.default_radio0.device=radio0
+wireless.default_radio0.mode=ap
+wireless.default_radio0.network=lan
+wireless.default_radio0.encryption=none
+wireless.radio1=wifi-device
+wireless.radio1.band=5g
+wireless.radio1.disabled=1
+wireless.default_radio1=wifi-iface
+wireless.default_radio1.device=radio1
+wireless.default_radio1.mode=ap
+wireless.default_radio1.network=lan
+wireless.default_radio1.encryption=none
+EOF_STOCK_WIRELESS
 printf '644\n' >"$PROXYPOOL_TEST_DEFAULT_MODE_STATE"
 EOF_DEFAULT_WIFI
+
+cat >"$BIN/default-uci" <<'EOF_DEFAULT_UCI'
+#!/bin/sh
+set -eu
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		-q) shift ;;
+		*) break ;;
+	esac
+done
+[ "$#" -ge 1 ] || exit 2
+command=$1
+shift
+config=$PROXYPOOL_TEST_DEFAULT_CONFIG
+case "$command" in
+	show)
+		[ "$#" -eq 1 ] && [ "$1" = wireless ] || exit 2
+		cat "$config"
+		;;
+	get)
+		[ "$#" -eq 1 ] || exit 2
+		key=$1
+		value=$(sed -n "s/^$key=//p" "$config")
+		[ -n "$value" ] || exit 1
+		[ "$(printf '%s\n' "$value" | wc -l | tr -d '[:space:]')" -eq 1 ] || exit 2
+		printf '%s\n' "$value"
+		;;
+	set)
+		[ "$#" -eq 1 ] || exit 2
+		assignment=$1
+		key=${assignment%%=*}
+		value=${assignment#*=}
+		[ "$key" != "$assignment" ] || exit 2
+		printf '%s\n' "$key" | grep -Eq '^wireless\.[A-Za-z0-9_]+\.[A-Za-z0-9_]+$' || exit 2
+		next="$config.next"
+		awk -v key="$key" -v value="$value" '
+			BEGIN { found = 0 }
+			index($0, key "=") == 1 { print key "=" value; found = 1; next }
+			{ print }
+			END { if (!found) print key "=" value }
+		' "$config" >"$next"
+		mv -f "$next" "$config"
+		;;
+	commit)
+		[ "$#" -eq 1 ] && [ "$1" = wireless ] || exit 2
+		printf 'default:uci:commit\n' >>"$PROXYPOOL_TEST_TRACE"
+		;;
+	*) exit 2 ;;
+esac
+EOF_DEFAULT_UCI
 
 cat >"$BIN/default-chmod" <<'EOF_DEFAULT_CHMOD'
 #!/bin/sh
@@ -480,6 +547,25 @@ cat >"$BIN/default-helper" <<'EOF_DEFAULT_HELPER'
 set -eu
 [ "$#" -eq 1 ] && [ "$1" = boot ] || exit 2
 [ "$(cat "$PROXYPOOL_TEST_DEFAULT_MODE_STATE")" = 600 ] || exit 95
+if [ "${PROXYPOOL_TEST_EXPECT_FACTORY_WIFI:-0}" -eq 1 ]; then
+	for expected in \
+		'wireless.radio0.disabled=0' \
+		'wireless.radio1.disabled=0' \
+		'wireless.default_radio0.disabled=0' \
+		'wireless.default_radio1.disabled=0' \
+		'wireless.default_radio0.ssid=ZeanLink-2.4G' \
+		'wireless.default_radio1.ssid=ZeanLink-5G' \
+		'wireless.default_radio0.encryption=psk2' \
+		'wireless.default_radio1.encryption=psk2' \
+		'wireless.default_radio0.key=12345678' \
+		'wireless.default_radio1.key=12345678' \
+		'wireless.default_radio0.isolate=1' \
+		'wireless.default_radio1.isolate=1' \
+		'wireless.default_radio0.bridge_isolate=1' \
+		'wireless.default_radio1.bridge_isolate=1'; do
+		grep -Fxq "$expected" "$PROXYPOOL_TEST_DEFAULT_CONFIG" || exit 96
+	done
+fi
 printf 'default:helper:boot\n' >>"$PROXYPOOL_TEST_TRACE"
 EOF_DEFAULT_HELPER
 
@@ -493,12 +579,13 @@ mv -f "$1" "$2"
 EOF_INSTALL_WIRELESS
 chmod 755 "$BIN/uci" "$BIN/stat" "$BIN/id" "$BIN/staged-apply" "$BIN/bridge" "$BIN/wifi" \
 	"$BIN/wireless-down-probe" "$BIN/sleep" "$BIN/default-wifi" "$BIN/default-chmod" \
-	"$BIN/ubus" "$BIN/default-helper" "$BIN/install-wireless"
+	"$BIN/ubus" "$BIN/default-uci" "$BIN/default-helper" "$BIN/install-wireless"
 
 run_wireless_default() {
 	env \
 		PROXYPOOL_WIRELESS_CONFIG="$DEFAULT_CONFIG" \
 		PROXYPOOL_WIFI="$BIN/default-wifi" \
+		PROXYPOOL_UCI="$BIN/default-uci" \
 		PROXYPOOL_LAN_ISOLATION="$BIN/default-helper" \
 		PROXYPOOL_STAT="$BIN/stat" \
 		PROXYPOOL_CHMOD="$BIN/default-chmod" \
@@ -515,13 +602,16 @@ run_wireless_default() {
 # is allowed to read or stage credentials.
 rm -f "$DEFAULT_CONFIG" "$DEFAULT_MODE_STATE"
 : >"$TRACE"
-run_wireless_default || fail 'fresh stock wireless config was not safely converged'
+run_wireless_default PROXYPOOL_TEST_EXPECT_FACTORY_WIFI=1 ||
+	fail 'fresh stock wireless config was not securely enabled'
 [ "$(cat "$DEFAULT_MODE_STATE")" = 600 ] || fail 'fresh wireless config remained world-readable'
 expected_default_trace='default:wifi:config
 default:chmod:600
+default:uci:commit
+default:chmod:600
 default:helper:boot'
 [ "$(cat "$TRACE")" = "$expected_default_trace" ] ||
-	fail 'fresh wireless default used the wrong permission/helper order'
+	fail 'fresh wireless default used the wrong generation/security/helper order'
 
 printf 'existing-wireless\n' >"$DEFAULT_CONFIG"
 printf '644\n' >"$DEFAULT_MODE_STATE"

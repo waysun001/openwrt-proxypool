@@ -58,17 +58,14 @@
 
 	<body class="lang_{{ dispatcher.lang }} {{ entityencode(striptags(node?.title ?? ''), true) }}" data-page="{{ entityencode(join('-', ctx.request_path), true) }}">
 		{% if (!blank_page): %}
-		<header>
-			<a class="brand" href="/">{{ striptags(boardinfo.hostname ?? '?') }}</a>
-			<ul class="nav" id="topmenu" style="display:none"></ul>
-			<div id="indicators" class="pull-right"></div>
-		</header>
+		<ul class="nav" id="topmenu" style="display:none" aria-hidden="true"></ul>
+		<div id="indicators" style="display:none" aria-hidden="true"></div>
 
 		<nav id="proxypool-global-menu"
 			 data-status-url="{{ dispatcher.build_url('admin', 'services', 'proxypool', 'api', 'read') }}?action=status"
-			 aria-label="ProxyPool 管理导航">
+			 aria-label="ZeanLink 管理导航">
 			<div class="menu-links">
-				<a class="{{ proxypool_active ? 'active' : '' }}"{% if (proxypool_active): %} aria-current="page"{% endif %} href="{{ dispatcher.build_url('admin', 'services', 'proxypool') }}">ProxyPool</a>
+				<a class="{{ proxypool_active ? 'active' : '' }}"{% if (proxypool_active): %} aria-current="page"{% endif %} href="{{ dispatcher.build_url('admin', 'services', 'proxypool') }}">ZeanLink</a>
 				<a class="{{ network_active ? 'active' : '' }}"{% if (network_active): %} aria-current="page"{% endif %} href="{{ dispatcher.build_url('admin', 'network') }}">网络</a>
 				<a class="{{ wireless_active ? 'active' : '' }}"{% if (wireless_active): %} aria-current="page"{% endif %} href="{{ dispatcher.build_url('admin', 'network', 'wireless') }}">无线</a>
 				<a class="{{ system_active ? 'active' : '' }}"{% if (system_active): %} aria-current="page"{% endif %} href="{{ dispatcher.build_url('admin', 'system') }}">系统</a>

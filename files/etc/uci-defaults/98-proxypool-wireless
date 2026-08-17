@@ -1,19 +1,21 @@
 #!/bin/sh
 set -eu
 
-# Generate the target's stock wireless configuration if it is absent, but do
-# not enable a radio or create an unauthenticated network.  The administrator
-# may configure credentials later; every LAN AP is pre-armed with both hostapd
-# station isolation and netifd bridge-port isolation before it can be admitted.
+# Generate the target's stock wireless configuration if it is absent.  On a
+# fresh GL-MT6000 image only, configure the two stock APs with authenticated
+# ZeanLink credentials and both hostapd and bridge-port station isolation
+# before enabling either radio.  Existing user wireless configuration is never
+# overwritten during package upgrades or later boots.
 
 WIRELESS_CONFIG="${PROXYPOOL_WIRELESS_CONFIG:-/etc/config/wireless}"
 WIFI="${PROXYPOOL_WIFI:-/sbin/wifi}"
+UCI="${PROXYPOOL_UCI:-/sbin/uci}"
 LAN_ISOLATION="${PROXYPOOL_LAN_ISOLATION:-/usr/lib/proxypool/lan-isolation.sh}"
 STAT="${PROXYPOOL_STAT:-/bin/stat}"
 CHMOD="${PROXYPOOL_CHMOD:-/bin/chmod}"
 
 fail() {
-	echo "ProxyPool wireless default: $*" >&2
+	echo "ZeanLink wireless default: $*" >&2
 	exit 1
 }
 
@@ -23,9 +25,11 @@ case "$WIRELESS_CONFIG" in
 esac
 [ "$WIRELESS_CONFIG" != / ] || fail 'refusing filesystem-root wireless config path'
 
+FRESH_CONFIG=0
 if [ ! -e "$WIRELESS_CONFIG" ] && [ ! -L "$WIRELESS_CONFIG" ]; then
 	[ -x "$WIFI" ] || fail "wifi is not executable: $WIFI"
 	"$WIFI" config 2>/dev/null || fail 'cannot generate the stock wireless config'
+	FRESH_CONFIG=1
 fi
 
 [ -f "$WIRELESS_CONFIG" ] && [ ! -L "$WIRELESS_CONFIG" ] ||
@@ -52,6 +56,56 @@ links=${rest#* }
 metadata=$("$STAT" -c '%a %u %h' "$WIRELESS_CONFIG" 2>/dev/null) ||
 	fail 'cannot verify wireless config permissions'
 [ "$metadata" = '600 0 1' ] || fail 'wireless config did not converge to private single-link root ownership'
+
+validate_factory_ap() {
+	radio=$1
+	expected_band=$2
+	iface=$3
+
+	[ "$("$UCI" -q get "wireless.$radio" 2>/dev/null)" = wifi-device ] ||
+		fail "fresh wireless config is missing $radio"
+	[ "$("$UCI" -q get "wireless.$radio.band" 2>/dev/null)" = "$expected_band" ] ||
+		fail "fresh wireless config has an unexpected band for $radio"
+	[ "$("$UCI" -q get "wireless.$iface" 2>/dev/null)" = wifi-iface ] ||
+		fail "fresh wireless config is missing $iface"
+	[ "$("$UCI" -q get "wireless.$iface.device" 2>/dev/null)" = "$radio" ] ||
+		fail "fresh wireless interface $iface uses the wrong radio"
+	[ "$("$UCI" -q get "wireless.$iface.mode" 2>/dev/null)" = ap ] ||
+		fail "fresh wireless interface $iface is not an AP"
+	[ "$("$UCI" -q get "wireless.$iface.network" 2>/dev/null)" = lan ] ||
+		fail "fresh wireless interface $iface is not attached only to LAN"
+}
+
+apply_factory_ap() {
+	radio=$1
+	iface=$2
+	ssid=$3
+	"$UCI" -q set "wireless.$iface.ssid=$ssid" &&
+		"$UCI" -q set "wireless.$iface.encryption=psk2" &&
+		"$UCI" -q set "wireless.$iface.key=12345678" &&
+		"$UCI" -q set "wireless.$iface.isolate=1" &&
+		"$UCI" -q set "wireless.$iface.bridge_isolate=1" &&
+		"$UCI" -q set "wireless.$iface.disabled=0" &&
+		"$UCI" -q set "wireless.$radio.disabled=0"
+}
+
+if [ "$FRESH_CONFIG" -eq 1 ]; then
+	[ -x "$UCI" ] || fail "uci is not executable: $UCI"
+	validate_factory_ap radio0 2g default_radio0
+	validate_factory_ap radio1 5g default_radio1
+	if ! apply_factory_ap radio0 default_radio0 ZeanLink-2.4G ||
+		! apply_factory_ap radio1 default_radio1 ZeanLink-5G ||
+		! "$UCI" -q commit wireless; then
+		"$UCI" -q revert wireless >/dev/null 2>&1 || :
+		fail 'cannot atomically configure the fresh authenticated wireless APs'
+	fi
+	# Recheck after libuci rewrites the file so credentials never become
+	# world-readable even under an unexpectedly permissive first-boot umask.
+	"$CHMOD" 600 "$WIRELESS_CONFIG" || fail 'cannot protect committed wireless credentials'
+	metadata=$("$STAT" -c '%a %u %h' "$WIRELESS_CONFIG" 2>/dev/null) ||
+		fail 'cannot verify committed wireless config permissions'
+	[ "$metadata" = '600 0 1' ] || fail 'committed wireless credentials are not root-only'
+fi
 
 [ -x "$LAN_ISOLATION" ] || fail "LAN isolation helper is not executable: $LAN_ISOLATION"
 

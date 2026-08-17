@@ -24,7 +24,7 @@ local WRITE_ACTIONS = {
 }
 
 function index()
-    entry({"admin", "services", "proxypool"}, call("main_page"), _("ProxyPool"), 1).dependent = false
+    entry({"admin", "services", "proxypool"}, call("main_page"), _("ZeanLink"), 1).dependent = false
     entry({"admin", "services", "proxypool", "locked"}, call("locked_page")).leaf = true
     entry({"admin", "services", "proxypool", "lease"}, call("lease_page")).leaf = true
     entry({"admin", "services", "proxypool", "api", "read"}, call("api_read")).leaf = true
@@ -218,7 +218,7 @@ local function write_error(http, json, err)
     err = err or {}
     local code = tostring(err.code or "bad_gateway")
     local status = tonumber(err.http_status) or 502
-    http.status(status, "ProxyPool API Error")
+    http.status(status, "ZeanLink API Error")
     write_json(http, json, {
         success = false,
         error = {
