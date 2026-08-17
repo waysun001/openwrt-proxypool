@@ -71,6 +71,21 @@ grep -Fq '_("ZeanLink")' "$CONTROLLER" || fail 'LuCI menu does not show the Zean
 grep -Fq 'body[data-page="admin-services-proxypool"] #maincontent.container' "$CSS" ||
 	fail 'theme does not scope the near-full-width layout to the ZeanLink page'
 grep -Fq 'max-width: none' "$CSS" || fail 'theme keeps a desktop max-width on the ZeanLink page'
+for centered_layout in \
+	'grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);' \
+	'grid-column: 2;' \
+	'justify-content: center;' \
+	'grid-column: 3;' \
+	'justify-self: end;'; do
+	grep -Fq "$centered_layout" "$CSS" ||
+		fail "global navigation is not viewport-centered: $centered_layout"
+done
+grep -Fq 'width: calc(100% - 48px);' "$CSS" ||
+	fail 'ZeanLink desktop content does not retain the requested narrow side gutters'
+grep -Fq 'margin-right: 24px;' "$CSS" ||
+	fail 'ZeanLink desktop content lacks its right gutter'
+grep -Fq 'margin-left: 24px;' "$CSS" ||
+	fail 'ZeanLink desktop content lacks its left gutter'
 grep -Fq '.pp-v2-app { max-width: none;' "$APP_CSS" ||
 	fail 'ZeanLink app content retains its old width cap'
 grep -Fq ':focus-visible' "$CSS" || fail 'theme lacks keyboard focus styling'

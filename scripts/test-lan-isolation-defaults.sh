@@ -470,6 +470,7 @@ wireless.default_radio0=wifi-iface
 wireless.default_radio0.device=radio0
 wireless.default_radio0.mode=ap
 wireless.default_radio0.network=lan
+wireless.default_radio0.ssid=OpenWrt
 wireless.default_radio0.encryption=none
 wireless.radio1=wifi-device
 wireless.radio1.band=5g
@@ -478,6 +479,7 @@ wireless.default_radio1=wifi-iface
 wireless.default_radio1.device=radio1
 wireless.default_radio1.mode=ap
 wireless.default_radio1.network=lan
+wireless.default_radio1.ssid=OpenWrt
 wireless.default_radio1.encryption=none
 EOF_STOCK_WIRELESS
 printf '644\n' >"$PROXYPOOL_TEST_DEFAULT_MODE_STATE"
@@ -553,8 +555,6 @@ if [ "${PROXYPOOL_TEST_EXPECT_FACTORY_WIFI:-0}" -eq 1 ]; then
 		'wireless.radio1.disabled=0' \
 		'wireless.default_radio0.disabled=0' \
 		'wireless.default_radio1.disabled=0' \
-		'wireless.default_radio0.ssid=ZeanLink-2.4G' \
-		'wireless.default_radio1.ssid=ZeanLink-5G' \
 		'wireless.default_radio0.encryption=psk2' \
 		'wireless.default_radio1.encryption=psk2' \
 		'wireless.default_radio0.key=12345678' \
@@ -565,6 +565,10 @@ if [ "${PROXYPOOL_TEST_EXPECT_FACTORY_WIFI:-0}" -eq 1 ]; then
 		'wireless.default_radio1.bridge_isolate=1'; do
 		grep -Fxq "$expected" "$PROXYPOOL_TEST_DEFAULT_CONFIG" || exit 96
 	done
+	[ "$(sed -n 's/^wireless.default_radio0.ssid=//p' "$PROXYPOOL_TEST_DEFAULT_CONFIG")" = \
+		"${PROXYPOOL_TEST_EXPECT_SSID0:-ZeanLink-2.4G}" ] || exit 96
+	[ "$(sed -n 's/^wireless.default_radio1.ssid=//p' "$PROXYPOOL_TEST_DEFAULT_CONFIG")" = \
+		"${PROXYPOOL_TEST_EXPECT_SSID1:-ZeanLink-5G}" ] || exit 96
 fi
 printf 'default:helper:boot\n' >>"$PROXYPOOL_TEST_TRACE"
 EOF_DEFAULT_HELPER
@@ -612,6 +616,48 @@ default:chmod:600
 default:helper:boot'
 [ "$(cat "$TRACE")" = "$expected_default_trace" ] ||
 	fail 'fresh wireless default used the wrong generation/security/helper order'
+
+# On the real OpenWrt boot path, mac80211.hotplug runs during S10 kmodloader
+# and creates the stock wireless file before /etc/uci-defaults is evaluated.
+# That exact generated configuration is still factory state: the image default
+# must recognize and configure it without invoking `wifi config` a second time.
+rm -f "$DEFAULT_CONFIG" "$DEFAULT_MODE_STATE"
+PROXYPOOL_TEST_DEFAULT_CONFIG="$DEFAULT_CONFIG" \
+	PROXYPOOL_TEST_DEFAULT_MODE_STATE="$DEFAULT_MODE_STATE" \
+	PROXYPOOL_TEST_TRACE="$TRACE" \
+	"$BIN/default-wifi" config
+: >"$TRACE"
+run_wireless_default PROXYPOOL_TEST_EXPECT_FACTORY_WIFI=1 ||
+	fail 'hotplug-generated stock wireless config was not securely enabled'
+[ "$(cat "$DEFAULT_MODE_STATE")" = 600 ] ||
+	fail 'hotplug-generated stock wireless config remained world-readable'
+expected_hotplug_trace='default:chmod:600
+default:uci:commit
+default:chmod:600
+default:helper:boot'
+[ "$(cat "$TRACE")" = "$expected_hotplug_trace" ] ||
+	fail 'hotplug-generated stock wireless default was regenerated or configured in the wrong order'
+
+# Radio numbering is assigned from runtime phy enumeration and is not a stable
+# band identity.  A stock image with the two bands enumerated in the opposite
+# order must still receive the SSID that corresponds to each radio's band.
+rm -f "$DEFAULT_CONFIG" "$DEFAULT_MODE_STATE"
+PROXYPOOL_TEST_DEFAULT_CONFIG="$DEFAULT_CONFIG" \
+	PROXYPOOL_TEST_DEFAULT_MODE_STATE="$DEFAULT_MODE_STATE" \
+	PROXYPOOL_TEST_TRACE="$TRACE" \
+	"$BIN/default-wifi" config
+sed -i \
+	-e 's/^wireless.radio0.band=2g$/wireless.radio0.band=5g/' \
+	-e 's/^wireless.radio1.band=5g$/wireless.radio1.band=2g/' \
+	"$DEFAULT_CONFIG"
+: >"$TRACE"
+run_wireless_default \
+	PROXYPOOL_TEST_EXPECT_FACTORY_WIFI=1 \
+	PROXYPOOL_TEST_EXPECT_SSID0=ZeanLink-5G \
+	PROXYPOOL_TEST_EXPECT_SSID1=ZeanLink-2.4G ||
+	fail 'reversed factory radio enumeration was not configured by band'
+[ "$(cat "$TRACE")" = "$expected_hotplug_trace" ] ||
+	fail 'reversed factory radio enumeration was regenerated or configured in the wrong order'
 
 printf 'existing-wireless\n' >"$DEFAULT_CONFIG"
 printf '644\n' >"$DEFAULT_MODE_STATE"

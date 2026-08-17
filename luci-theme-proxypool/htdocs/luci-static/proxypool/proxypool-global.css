@@ -3,8 +3,8 @@
 }
 
 #proxypool-global-menu {
-	display: flex;
-	justify-content: space-between;
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
 	align-items: center;
 	min-height: 52px;
 	padding: 0 24px;
@@ -15,7 +15,9 @@
 
 #proxypool-global-menu .menu-links {
 	display: flex;
+	grid-column: 2;
 	align-items: center;
+	justify-content: center;
 	flex-wrap: wrap;
 	gap: 4px;
 }
@@ -44,7 +46,9 @@
 
 #proxypool-global-menu .menu-stats {
 	display: flex;
+	grid-column: 3;
 	align-items: center;
+	justify-self: end;
 	gap: 16px;
 	white-space: nowrap;
 }
@@ -58,26 +62,31 @@
 
 body[data-page="admin-services-proxypool"] #maincontent.container {
 	box-sizing: border-box;
-	width: calc(100% - 24px);
+	width: calc(100% - 48px);
 	max-width: none;
-	margin-right: 12px;
-	margin-left: 12px;
+	margin-right: 24px;
+	margin-left: 24px;
 	padding-right: 0;
 	padding-left: 0;
 }
 
 @media (max-width: 900px) {
 	#proxypool-global-menu {
-		align-items: flex-start;
+		display: flex;
+		align-items: center;
 		flex-direction: column;
 		gap: 8px;
 		padding: 9px 12px;
 	}
 	#proxypool-global-menu .menu-links a { padding: 6px 10px; }
-	#proxypool-global-menu .menu-stats { padding-left: 10px; }
+	#proxypool-global-menu .menu-links { justify-content: center; }
+	#proxypool-global-menu .menu-stats {
+		justify-self: auto;
+		padding-left: 0;
+	}
 	body[data-page="admin-services-proxypool"] #maincontent.container {
-		width: calc(100% - 16px);
-		margin-right: 8px;
-		margin-left: 8px;
+		width: calc(100% - 20px);
+		margin-right: 10px;
+		margin-left: 10px;
 	}
 }

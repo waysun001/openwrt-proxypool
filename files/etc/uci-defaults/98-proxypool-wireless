@@ -57,15 +57,64 @@ metadata=$("$STAT" -c '%a %u %h' "$WIRELESS_CONFIG" 2>/dev/null) ||
 	fail 'cannot verify wireless config permissions'
 [ "$metadata" = '600 0 1' ] || fail 'wireless config did not converge to private single-link root ownership'
 
+factory_stock_config() {
+	sections=$("$UCI" -q show wireless 2>/dev/null |
+		sed -n 's/^wireless\.\([^.=]*\)=[^=]*$/\1/p') || return 1
+	[ "$(printf '%s\n' "$sections" | sed '/^$/d' | wc -l | tr -d '[:space:]')" = 4 ] ||
+		return 1
+	for expected_section in radio0 default_radio0 radio1 default_radio1; do
+		printf '%s\n' "$sections" | grep -Fxq "$expected_section" || return 1
+	done
+
+	[ "$("$UCI" -q get wireless.radio0 2>/dev/null)" = wifi-device ] || return 1
+	radio0_band=$("$UCI" -q get wireless.radio0.band 2>/dev/null) || return 1
+	[ "$("$UCI" -q get wireless.radio0.disabled 2>/dev/null)" = 1 ] || return 1
+	[ "$("$UCI" -q get wireless.radio1 2>/dev/null)" = wifi-device ] || return 1
+	radio1_band=$("$UCI" -q get wireless.radio1.band 2>/dev/null) || return 1
+	case "$radio0_band:$radio1_band" in
+		2g:5g|5g:2g) : ;;
+		*) return 1 ;;
+	esac
+	[ "$("$UCI" -q get wireless.radio1.disabled 2>/dev/null)" = 1 ] || return 1
+	for radio in radio0 radio1; do
+		iface="default_$radio"
+		[ "$("$UCI" -q get "wireless.$iface" 2>/dev/null)" = wifi-iface ] || return 1
+		[ "$("$UCI" -q get "wireless.$iface.device" 2>/dev/null)" = "$radio" ] || return 1
+		[ "$("$UCI" -q get "wireless.$iface.mode" 2>/dev/null)" = ap ] || return 1
+		[ "$("$UCI" -q get "wireless.$iface.network" 2>/dev/null)" = lan ] || return 1
+		[ "$("$UCI" -q get "wireless.$iface.ssid" 2>/dev/null)" = OpenWrt ] || return 1
+		[ "$("$UCI" -q get "wireless.$iface.encryption" 2>/dev/null)" = none ] || return 1
+		if "$UCI" -q get "wireless.$iface.disabled" >/dev/null 2>&1 ||
+			"$UCI" -q get "wireless.$iface.key" >/dev/null 2>&1 ||
+			"$UCI" -q get "wireless.$iface.isolate" >/dev/null 2>&1 ||
+			"$UCI" -q get "wireless.$iface.bridge_isolate" >/dev/null 2>&1; then
+			return 1
+		fi
+	done
+	return 0
+}
+
+# mac80211.hotplug normally generates and commits the stock wireless package
+# during S10 kmodloader, before /etc/uci-defaults runs.  A path-existence test
+# alone therefore cannot distinguish factory state from preserved user state.
+# Recognize only the exact disabled, open, two-radio stock topology; any extra
+# section or user-visible change remains untouched.
+FACTORY_CONFIG=$FRESH_CONFIG
+[ -x "$UCI" ] || fail "uci is not executable: $UCI"
+if [ "$FACTORY_CONFIG" -eq 0 ] && factory_stock_config; then
+	FACTORY_CONFIG=1
+fi
+
 validate_factory_ap() {
 	radio=$1
-	expected_band=$2
-	iface=$3
+	iface=$2
 
 	[ "$("$UCI" -q get "wireless.$radio" 2>/dev/null)" = wifi-device ] ||
 		fail "fresh wireless config is missing $radio"
-	[ "$("$UCI" -q get "wireless.$radio.band" 2>/dev/null)" = "$expected_band" ] ||
-		fail "fresh wireless config has an unexpected band for $radio"
+	case "$("$UCI" -q get "wireless.$radio.band" 2>/dev/null)" in
+		2g|5g) : ;;
+		*) fail "fresh wireless config has an unexpected band for $radio" ;;
+	esac
 	[ "$("$UCI" -q get "wireless.$iface" 2>/dev/null)" = wifi-iface ] ||
 		fail "fresh wireless config is missing $iface"
 	[ "$("$UCI" -q get "wireless.$iface.device" 2>/dev/null)" = "$radio" ] ||
@@ -74,6 +123,14 @@ validate_factory_ap() {
 		fail "fresh wireless interface $iface is not an AP"
 	[ "$("$UCI" -q get "wireless.$iface.network" 2>/dev/null)" = lan ] ||
 		fail "fresh wireless interface $iface is not attached only to LAN"
+}
+
+factory_ssid() {
+	case "$("$UCI" -q get "wireless.$1.band" 2>/dev/null)" in
+		2g) printf '%s\n' ZeanLink-2.4G ;;
+		5g) printf '%s\n' ZeanLink-5G ;;
+		*) return 1 ;;
+	esac
 }
 
 apply_factory_ap() {
@@ -89,12 +146,14 @@ apply_factory_ap() {
 		"$UCI" -q set "wireless.$radio.disabled=0"
 }
 
-if [ "$FRESH_CONFIG" -eq 1 ]; then
-	[ -x "$UCI" ] || fail "uci is not executable: $UCI"
-	validate_factory_ap radio0 2g default_radio0
-	validate_factory_ap radio1 5g default_radio1
-	if ! apply_factory_ap radio0 default_radio0 ZeanLink-2.4G ||
-		! apply_factory_ap radio1 default_radio1 ZeanLink-5G ||
+if [ "$FACTORY_CONFIG" -eq 1 ]; then
+	validate_factory_ap radio0 default_radio0
+	validate_factory_ap radio1 default_radio1
+	radio0_ssid=$(factory_ssid radio0) || fail 'cannot classify the factory radio0 band'
+	radio1_ssid=$(factory_ssid radio1) || fail 'cannot classify the factory radio1 band'
+	[ "$radio0_ssid" != "$radio1_ssid" ] || fail 'factory radios do not expose distinct bands'
+	if ! apply_factory_ap radio0 default_radio0 "$radio0_ssid" ||
+		! apply_factory_ap radio1 default_radio1 "$radio1_ssid" ||
 		! "$UCI" -q commit wireless; then
 		"$UCI" -q revert wireless >/dev/null 2>&1 || :
 		fail 'cannot atomically configure the fresh authenticated wireless APs'
