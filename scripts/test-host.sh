@@ -1,5 +1,6 @@
 #!/usr/bin/env sh
 set -eu
+umask 0077
 
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 cd "$ROOT/proxypool-core/src/proxypoold"
