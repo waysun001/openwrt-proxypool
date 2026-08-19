@@ -462,7 +462,8 @@ cat >"$BIN/default-wifi" <<'EOF_DEFAULT_WIFI'
 set -eu
 [ "$#" -eq 1 ] && [ "$1" = config ] || exit 2
 printf 'default:wifi:config\n' >>"$PROXYPOOL_TEST_TRACE"
-cat >"$PROXYPOOL_TEST_DEFAULT_CONFIG" <<'EOF_STOCK_WIRELESS'
+stock_config="$PROXYPOOL_TEST_DEFAULT_CONFIG.hotplug"
+cat >"$stock_config" <<'EOF_STOCK_WIRELESS'
 wireless.radio0=wifi-device
 wireless.radio0.band=2g
 wireless.radio0.disabled=1
@@ -482,6 +483,12 @@ wireless.default_radio1.network=lan
 wireless.default_radio1.ssid=OpenWrt
 wireless.default_radio1.encryption=none
 EOF_STOCK_WIRELESS
+if [ "${PROXYPOOL_TEST_DEFAULT_WIFI_EMPTY_FIRST:-0}" -eq 1 ]; then
+	: >"$PROXYPOOL_TEST_DEFAULT_CONFIG"
+	printf '0\n' >"$PROXYPOOL_TEST_DEFAULT_CONFIG.hotplug-count"
+else
+	mv -f "$stock_config" "$PROXYPOOL_TEST_DEFAULT_CONFIG"
+fi
 printf '644\n' >"$PROXYPOOL_TEST_DEFAULT_MODE_STATE"
 EOF_DEFAULT_WIFI
 
@@ -501,6 +508,15 @@ config=$PROXYPOOL_TEST_DEFAULT_CONFIG
 case "$command" in
 	show)
 		[ "$#" -eq 1 ] && [ "$1" = wireless ] || exit 2
+		if [ -f "$config.hotplug" ] && [ -f "$config.hotplug-count" ]; then
+			count=$(cat "$config.hotplug-count")
+			count=$((count + 1))
+			printf '%s\n' "$count" >"$config.hotplug-count"
+			if [ "$count" -ge 2 ]; then
+				mv -f "$config.hotplug" "$config"
+				rm -f "$config.hotplug-count"
+			fi
+		fi
 		cat "$config"
 		;;
 	get)
@@ -616,6 +632,28 @@ default:chmod:600
 default:helper:boot'
 [ "$(cat "$TRACE")" = "$expected_default_trace" ] ||
 	fail 'fresh wireless default used the wrong generation/security/helper order'
+
+# kmodloader does not wait for the mac80211 hotplug worker.  On real first
+# boot, the direct `wifi config` call can therefore create an empty file before
+# the PHY appears; the asynchronous hotplug worker fills in the stock radios a
+# moment later.  The image default must wait for that real stock topology
+# instead of validating the transient empty file and aborting the first boot.
+rm -f "$DEFAULT_CONFIG" "$DEFAULT_CONFIG.hotplug" "$DEFAULT_CONFIG.hotplug-count" \
+	"$DEFAULT_MODE_STATE"
+: >"$TRACE"
+run_wireless_default \
+	PROXYPOOL_TEST_DEFAULT_WIFI_EMPTY_FIRST=1 \
+	PROXYPOOL_WIRELESS_SLEEP="$BIN/sleep" \
+	PROXYPOOL_TEST_EXPECT_FACTORY_WIFI=1 ||
+	fail 'delayed hotplug stock wireless config was not securely enabled on first boot'
+expected_delayed_hotplug_trace='default:wifi:config
+default:chmod:600
+wifi:sleep
+default:uci:commit
+default:chmod:600
+default:helper:boot'
+[ "$(cat "$TRACE")" = "$expected_delayed_hotplug_trace" ] ||
+	fail 'delayed hotplug stock wireless config used the wrong wait/configure order'
 
 # On the real OpenWrt boot path, mac80211.hotplug runs during S10 kmodloader
 # and creates the stock wireless file before /etc/uci-defaults is evaluated.

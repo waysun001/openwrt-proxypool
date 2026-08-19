@@ -13,6 +13,7 @@ UCI="${PROXYPOOL_UCI:-/sbin/uci}"
 LAN_ISOLATION="${PROXYPOOL_LAN_ISOLATION:-/usr/lib/proxypool/lan-isolation.sh}"
 STAT="${PROXYPOOL_STAT:-/bin/stat}"
 CHMOD="${PROXYPOOL_CHMOD:-/bin/chmod}"
+SLEEP="${PROXYPOOL_WIRELESS_SLEEP:-/bin/sleep}"
 
 fail() {
 	echo "ZeanLink wireless default: $*" >&2
@@ -94,14 +95,31 @@ factory_stock_config() {
 	return 0
 }
 
-# mac80211.hotplug normally generates and commits the stock wireless package
-# during S10 kmodloader, before /etc/uci-defaults runs.  A path-existence test
-# alone therefore cannot distinguish factory state from preserved user state.
-# Recognize only the exact disabled, open, two-radio stock topology; any extra
-# section or user-visible change remains untouched.
-FACTORY_CONFIG=$FRESH_CONFIG
+wait_for_factory_stock_config() {
+	attempt=1
+	while [ "$attempt" -le 30 ]; do
+		factory_stock_config && return 0
+		[ "$attempt" -lt 30 ] || return 1
+		"$SLEEP" 1 || return 1
+		attempt=$((attempt + 1))
+	done
+	return 1
+}
+
+# mac80211.hotplug starts during S10 kmodloader, but its worker is asynchronous:
+# it may commit the stock wireless package before this script or shortly after
+# an early `wifi config` has only touched an empty file.  A path-existence test
+# therefore cannot distinguish factory state from preserved user state.  Wait
+# only on the fresh-file path, and recognize only the exact disabled, open,
+# two-radio stock topology; any user-visible change remains untouched.
 [ -x "$UCI" ] || fail "uci is not executable: $UCI"
-if [ "$FACTORY_CONFIG" -eq 0 ] && factory_stock_config; then
+FACTORY_CONFIG=0
+if [ "$FRESH_CONFIG" -eq 1 ]; then
+	[ -x "$SLEEP" ] || fail "sleep is not executable: $SLEEP"
+	wait_for_factory_stock_config ||
+		fail 'timed out waiting for mac80211 to generate the stock wireless config'
+	FACTORY_CONFIG=1
+elif factory_stock_config; then
 	FACTORY_CONFIG=1
 fi
 
