@@ -35,6 +35,10 @@ fi
 
 [ -f "$WIRELESS_CONFIG" ] && [ ! -L "$WIRELESS_CONFIG" ] ||
 	fail 'wireless config is missing, linked, or not a regular file'
+# mac80211.hotplug touches this file before PHY enumeration.  An empty regular
+# file during the image's one-shot default phase is therefore still transient
+# factory state, even when the hotplug worker won the path-creation race.
+[ -s "$WIRELESS_CONFIG" ] || FRESH_CONFIG=1
 [ -x "$STAT" ] || fail "stat is not executable: $STAT"
 metadata=$("$STAT" -c '%a %u %h' "$WIRELESS_CONFIG" 2>/dev/null) ||
 	fail 'cannot inspect wireless config ownership'

@@ -655,6 +655,30 @@ default:helper:boot'
 [ "$(cat "$TRACE")" = "$expected_delayed_hotplug_trace" ] ||
 	fail 'delayed hotplug stock wireless config used the wrong wait/configure order'
 
+# The hotplug worker itself touches /etc/config/wireless before it scans the
+# PHYs.  If S10 reaches the image default inside that window, the path already
+# exists but is still empty.  This is the same fresh-boot state and must use the
+# bounded wait without launching a competing second `wifi config` process.
+rm -f "$DEFAULT_CONFIG" "$DEFAULT_CONFIG.hotplug" "$DEFAULT_CONFIG.hotplug-count" \
+	"$DEFAULT_MODE_STATE"
+PROXYPOOL_TEST_DEFAULT_WIFI_EMPTY_FIRST=1 \
+	PROXYPOOL_TEST_DEFAULT_CONFIG="$DEFAULT_CONFIG" \
+	PROXYPOOL_TEST_DEFAULT_MODE_STATE="$DEFAULT_MODE_STATE" \
+	PROXYPOOL_TEST_TRACE="$TRACE" \
+	"$BIN/default-wifi" config
+: >"$TRACE"
+run_wireless_default \
+	PROXYPOOL_WIRELESS_SLEEP="$BIN/sleep" \
+	PROXYPOOL_TEST_EXPECT_FACTORY_WIFI=1 ||
+	fail 'pre-touched delayed hotplug wireless config was not enabled on first boot'
+expected_pretouched_hotplug_trace='default:chmod:600
+wifi:sleep
+default:uci:commit
+default:chmod:600
+default:helper:boot'
+[ "$(cat "$TRACE")" = "$expected_pretouched_hotplug_trace" ] ||
+	fail 'pre-touched delayed hotplug wireless config launched a duplicate detector or used the wrong order'
+
 # On the real OpenWrt boot path, mac80211.hotplug runs during S10 kmodloader
 # and creates the stock wireless file before /etc/uci-defaults is evaluated.
 # That exact generated configuration is still factory state: the image default
