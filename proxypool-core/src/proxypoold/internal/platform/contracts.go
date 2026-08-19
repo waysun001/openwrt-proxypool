@@ -45,6 +45,12 @@ type InterfaceTrafficReader interface {
 	ReadInterfaceCounters(interfaceName string) (InterfaceCounters, error)
 }
 
+// WANStatusSource returns the authoritative routed-uplink state. An error is
+// treated as unavailable so new sessions remain fail-closed.
+type WANStatusSource interface {
+	Available(context.Context) (bool, error)
+}
+
 // LeaseProjectionManager atomically replaces a complete set of owned DHCP
 // reservations. It is separate from LeaseManager so existing single-device
 // integrations retain their API contract.
@@ -87,6 +93,13 @@ type NodeAdapter interface {
 type SessionGate interface {
 	Open(context.Context, NodeRequest, Session) error
 	Close(context.Context, NodeRequest, Session) error
+}
+
+// SessionGateVerifier is implemented by gates whose live dataplane state can
+// be re-proved without mutating it. The scheduler treats any failed proof as a
+// fail-closed session failure and revokes authorization before reconnecting.
+type SessionGateVerifier interface {
+	Verify(context.Context, NodeRequest, Session) error
 }
 
 type AuthorizationLease struct {

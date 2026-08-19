@@ -107,6 +107,7 @@ test('all ordinary runtime labels are Chinese and unknown codes stay hidden', ()
   assert.equal(ui.errorLabel('future_code'), '未知错误');
   assert.equal(ui.jobKindLabel('device.bindings.replace'), '更新节点设备绑定');
   assert.equal(ui.jobKindLabel('future.kind'), '未知任务');
+  assert.equal(ui.jobStepLabel('retry_scheduled'), '已转入后台重试');
   assert.equal(ui.formatError({ code: 'future_code', message: 'raw failure detail' }), '未知错误');
 });
 

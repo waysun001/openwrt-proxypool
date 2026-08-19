@@ -21,6 +21,7 @@ require "$MAIN" 'openwrtplatform.NewL2TPAdapter' 'live daemon does not assemble 
 require "$MAIN" 'live.NewRouteGate' 'live daemon does not install the route gate'
 require "$MAIN" 'live.NewDNSGate' 'live daemon does not install the node DNS gate'
 require "$MAIN" 'live.NewAuthorizationGate' 'live daemon does not install the authorization gate'
+require "$MAIN" 'openwrtplatform.NewWANStatusSource' 'live daemon does not supervise the authoritative WAN state'
 require "$MAIN" 'controller.ReconcileStartup' 'live daemon does not reconcile restart state'
 require "$SCHEDULER" 'func (scheduler *Scheduler) refreshNode' 'online nodes cannot refresh expiring leases'
 require "$SCHEDULER" 'func (scheduler *Scheduler) Shutdown' 'graceful shutdown cannot remove owned sessions'

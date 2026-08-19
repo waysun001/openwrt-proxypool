@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -497,6 +498,209 @@ func TestSchedulerCompletesSixtyNodeImportWithFourConcurrentStarts(t *testing.T)
 	adapter.mu.Unlock()
 	if starts != 60 {
 		t.Fatalf("60-node import starts = %d", starts)
+	}
+}
+
+func TestSchedulerEndsImportAttemptWhileBackgroundRecoveryKeepsRetrying(t *testing.T) {
+	desired := controllerConfig()
+	desired.Nodes = map[string]model.Node{}
+	desired.Devices = map[string]model.Device{}
+	jobIDs := []string{"job-import-attempt", "job-background-recovery"}
+	imports := importer.New(importer.WithIDSource(func() string { return "preview-retry" }))
+	controller, err := NewController(
+		&memoryDesiredStore{cfg: desired}, &memoryRuntimePersistence{}, NewMachine(nil), NewJobStore(),
+		WithImporter(imports), WithControllerJobIDSource(func() string {
+			id := jobIDs[0]
+			jobIDs = jobIDs[1:]
+			return id
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	adapter := &schedulerAdapter{startRelease: release}
+	scheduler := NewScheduler(controller, adapter, SchedulerConfig{ConnectTimeout: time.Second, StopTimeout: time.Second})
+	controller.AttachScheduler(scheduler)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go scheduler.Run(ctx)
+
+	previewResponse := controller.Handle(context.Background(), controllerRequest(
+		"preview-retry", "import.preview", `{"protocol":"l2tp","raw":"unreachable.example|user|password","expected_revision":3}`,
+	))
+	assertControllerSuccess(t, previewResponse)
+	var preview importer.Preview
+	if err := json.Unmarshal(previewResponse.Result, &preview); err != nil {
+		t.Fatal(err)
+	}
+	commitResponse := controller.Handle(context.Background(), controllerRequest(
+		"commit-retry", "import.commit", fmt.Sprintf(`{"preview_id":%q,"preview_hash":%q,"expected_revision":3}`, preview.ID, preview.Hash),
+	))
+	assertControllerSuccess(t, commitResponse)
+	waitForActiveStarts(t, adapter, 1)
+	stored, err := controller.desiredStore.Load()
+	if err != nil || len(stored.Nodes) != 1 {
+		t.Fatalf("imported desired nodes = %d, error = %v", len(stored.Nodes), err)
+	}
+	for nodeID := range stored.Nodes {
+		adapter.failNode = nodeID
+	}
+	close(release)
+
+	waitForJobState(t, controller.jobs, "job-import-attempt", JobFailed)
+	status, exists := onlySchedulerStatus(controller)
+	if !exists || status.State != model.StateBackoff {
+		t.Fatalf("retryable import runtime = %#v exists=%t, want backoff", status, exists)
+	}
+	recovery, exists := controller.jobs.Get("job-background-recovery")
+	if !exists || recovery.Kind != "system.recover" || recovery.State != JobRunning || len(recovery.Nodes) != 1 {
+		t.Fatalf("background recovery job = %#v exists=%t", recovery, exists)
+	}
+}
+
+func TestSchedulerHealthFailureRevokesAndReconnectsWithoutManualAction(t *testing.T) {
+	jobIDs := []string{"job-connect", "job-health-recovery"}
+	controller, err := NewController(
+		&memoryDesiredStore{cfg: controllerConfig()}, &memoryRuntimePersistence{}, NewMachine(nil), NewJobStore(),
+		WithControllerJobIDSource(func() string {
+			id := jobIDs[0]
+			jobIDs = jobIDs[1:]
+			return id
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var orderMu sync.Mutex
+	order := []string{}
+	adapter := &schedulerAdapter{onStop: func() {
+		orderMu.Lock()
+		order = append(order, "stop")
+		orderMu.Unlock()
+	}}
+	route := &schedulerGate{name: "route", order: &order, orderMu: &orderMu}
+	dns := &schedulerGate{name: "dns", order: &order, orderMu: &orderMu}
+	authorization := &schedulerGate{name: "authorization", order: &order, orderMu: &orderMu}
+	scheduler := NewScheduler(controller, adapter, SchedulerConfig{
+		ConnectTimeout: time.Second, StopTimeout: time.Second, HealthCheckInterval: 5 * time.Millisecond,
+	}, route, dns, authorization)
+	controller.AttachScheduler(scheduler)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- scheduler.Run(ctx) }()
+
+	assertControllerSuccess(t, controller.Handle(context.Background(), controllerRequest(
+		"connect", "node.action", `{"node_id":"node_a","action":"connect","expected_revision":3}`,
+	)))
+	waitForJobState(t, controller.jobs, "job-connect", JobSucceeded)
+	orderMu.Lock()
+	order = nil
+	orderMu.Unlock()
+	adapter.failNextProbes(1)
+
+	waitForJobState(t, controller.jobs, "job-health-recovery", JobSucceeded)
+	waitForNodeState(t, controller, "node_a", model.StateOnline)
+	adapter.mu.Lock()
+	starts, stops := adapter.startCalls, adapter.stopCalls
+	adapter.mu.Unlock()
+	if starts != 2 || stops != 1 {
+		t.Fatalf("automatic health recovery start/stop calls = %d/%d, want 2/1", starts, stops)
+	}
+	orderMu.Lock()
+	gotOrder := append([]string(nil), order...)
+	orderMu.Unlock()
+	wantPrefix := []string{"close:authorization", "close:dns", "close:route", "stop"}
+	if len(gotOrder) < len(wantPrefix) || !reflect.DeepEqual(gotOrder[:len(wantPrefix)], wantPrefix) {
+		t.Fatalf("health failure cleanup order = %v, want prefix %v", gotOrder, wantPrefix)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
+
+func TestSchedulerWaitsForAuthoritativeWANAndWakesRecoveryOnReturn(t *testing.T) {
+	jobIDs := []string{"job-wan-attempt", "job-wan-recovery"}
+	controller, err := NewController(
+		&memoryDesiredStore{cfg: controllerConfig()}, &memoryRuntimePersistence{}, NewMachine(nil), NewJobStore(),
+		WithControllerJobIDSource(func() string {
+			id := jobIDs[0]
+			jobIDs = jobIDs[1:]
+			return id
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wan := &schedulerWANSource{}
+	adapter := &schedulerAdapter{}
+	scheduler := NewScheduler(controller, adapter, SchedulerConfig{
+		ConnectTimeout: time.Second, StopTimeout: time.Second, WANCheckInterval: 5 * time.Millisecond,
+	})
+	scheduler.SetWANStatusSource(wan)
+	controller.AttachScheduler(scheduler)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go scheduler.Run(ctx)
+
+	assertControllerSuccess(t, controller.Handle(context.Background(), controllerRequest(
+		"wan-connect", "node.action", `{"node_id":"node_a","action":"connect","expected_revision":3}`,
+	)))
+	waitForJobState(t, controller.jobs, "job-wan-attempt", JobFailed)
+	waitForNodeState(t, controller, "node_a", model.StateBackoff)
+	adapter.mu.Lock()
+	startsWhileDown := adapter.startCalls
+	adapter.mu.Unlock()
+	if startsWhileDown != 0 {
+		t.Fatalf("adapter starts while WAN is down = %d", startsWhileDown)
+	}
+	wan.set(true, nil)
+	waitForJobState(t, controller.jobs, "job-wan-recovery", JobSucceeded)
+	waitForNodeState(t, controller, "node_a", model.StateOnline)
+	adapter.mu.Lock()
+	startsAfterReturn := adapter.startCalls
+	adapter.mu.Unlock()
+	if startsAfterReturn != 1 {
+		t.Fatalf("adapter starts after WAN return = %d, want 1", startsAfterReturn)
+	}
+}
+
+func TestSchedulerInterfaceEventClosesOwnedSessionBeforeRecreatingIt(t *testing.T) {
+	jobIDs := []string{"job-before-ifdown", "job-ifdown-recovery"}
+	controller, err := NewController(
+		&memoryDesiredStore{cfg: controllerConfig()}, &memoryRuntimePersistence{}, NewMachine(nil), NewJobStore(),
+		WithControllerJobIDSource(func() string {
+			id := jobIDs[0]
+			jobIDs = jobIDs[1:]
+			return id
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := &schedulerAdapter{}
+	gate := &schedulerGate{}
+	scheduler := NewScheduler(controller, adapter, SchedulerConfig{ConnectTimeout: time.Second, StopTimeout: time.Second}, gate)
+	controller.AttachScheduler(scheduler)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go scheduler.Run(ctx)
+
+	assertControllerSuccess(t, controller.Handle(context.Background(), controllerRequest(
+		"before-ifdown", "node.action", `{"node_id":"node_a","action":"connect","expected_revision":3}`,
+	)))
+	waitForJobState(t, controller.jobs, "job-before-ifdown", JobSucceeded)
+	assertControllerSuccess(t, controller.Handle(context.Background(), controllerRequest(
+		"ifdown", "system.interface_event", `{"interface":"ppv20001","action":"ifdown"}`,
+	)))
+	waitForJobState(t, controller.jobs, "job-ifdown-recovery", JobSucceeded)
+	adapter.mu.Lock()
+	starts, stops := adapter.startCalls, adapter.stopCalls
+	adapter.mu.Unlock()
+	if starts != 2 || stops != 1 || gate.closeCalls != 1 {
+		t.Fatalf("ifdown recovery start/stop/gate-close = %d/%d/%d, want 2/1/1", starts, stops, gate.closeCalls)
 	}
 }
 
@@ -1062,6 +1266,7 @@ type schedulerAdapter struct {
 	maxActive              int
 	startCalls             int
 	probeCalls             int
+	probeFailures          int
 	stopCalls              int
 	stopGenerationMismatch bool
 	saveCountAtStart       int
@@ -1071,6 +1276,25 @@ type schedulerTrafficReader struct {
 	mu       sync.Mutex
 	counters platform.InterfaceCounters
 	err      error
+}
+
+type schedulerWANSource struct {
+	mu        sync.Mutex
+	available bool
+	err       error
+}
+
+func (source *schedulerWANSource) set(available bool, err error) {
+	source.mu.Lock()
+	source.available = available
+	source.err = err
+	source.mu.Unlock()
+}
+
+func (source *schedulerWANSource) Available(context.Context) (bool, error) {
+	source.mu.Lock()
+	defer source.mu.Unlock()
+	return source.available, source.err
 }
 
 func (reader *schedulerTrafficReader) set(counters platform.InterfaceCounters, err error) {
@@ -1131,7 +1355,17 @@ func (adapter *schedulerAdapter) Probe(_ context.Context, _ platform.NodeRequest
 	adapter.mu.Lock()
 	defer adapter.mu.Unlock()
 	adapter.probeCalls++
+	if adapter.probeFailures > 0 {
+		adapter.probeFailures--
+		return errors.New("isolated health probe failure")
+	}
 	return nil
+}
+
+func (adapter *schedulerAdapter) failNextProbes(count int) {
+	adapter.mu.Lock()
+	adapter.probeFailures = count
+	adapter.mu.Unlock()
 }
 
 func (adapter *schedulerAdapter) Stop(_ context.Context, request platform.NodeRequest, session platform.Session) error {
@@ -1279,4 +1513,13 @@ func waitForNodeStateOneOf(t *testing.T, controller *Controller, id string, want
 	}
 	status, _ := controller.schedulerStatus(id)
 	t.Fatalf("node %q state = %q, want one of %v", id, status.State, wants)
+}
+
+func onlySchedulerStatus(controller *Controller) (NodeStatus, bool) {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	for _, status := range controller.statuses {
+		return cloneNodeStatus(status), true
+	}
+	return NodeStatus{}, false
 }

@@ -37,6 +37,11 @@ source_image_authorization="$source_dir/usr/lib/proxypool/v2-image-activation-au
 	printf 'source full-image activation authorization is missing or invalid: %s\n' "$source_image_authorization" >&2
 	exit 1
 }
+source_l2tp="$source_dir/lib/netifd/proto/l2tp.sh"
+[ -f "$source_l2tp" ] && [ ! -L "$source_l2tp" ] || {
+	printf 'source bounded L2TP netifd overlay is missing or unsafe: %s\n' "$source_l2tp" >&2
+	exit 1
+}
 
 mkdir -p "$destination_dir"
 cp -a "$source_dir/." "$destination_dir/"
@@ -69,3 +74,10 @@ image_authorization="$destination_dir/usr/lib/proxypool/v2-image-activation-auth
 	exit 1
 }
 chmod 644 "$image_authorization"
+
+l2tp_overlay="$destination_dir/lib/netifd/proto/l2tp.sh"
+[ -f "$l2tp_overlay" ] && [ ! -L "$l2tp_overlay" ] || {
+	printf 'staged bounded L2TP netifd overlay is missing or unsafe: %s\n' "$l2tp_overlay" >&2
+	exit 1
+}
+chmod 755 "$l2tp_overlay"

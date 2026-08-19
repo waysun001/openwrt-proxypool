@@ -20,6 +20,8 @@ type SchedulerConfig struct {
 	ConnectTimeout        time.Duration
 	StopTimeout           time.Duration
 	TrafficSampleInterval time.Duration
+	HealthCheckInterval   time.Duration
+	WANCheckInterval      time.Duration
 }
 
 type scheduledNode struct {
@@ -45,6 +47,11 @@ type Scheduler struct {
 	l2tp      chan struct{}
 	proxy     chan struct{}
 	workers   sync.WaitGroup
+	health    chan struct{}
+	healthRun chan struct{}
+	wanSource platform.WANStatusSource
+	wanKnown  bool
+	wanUp     bool
 }
 
 func NewScheduler(controller *Controller, adapter platform.NodeAdapter, config SchedulerConfig, gates ...platform.SessionGate) *Scheduler {
@@ -67,6 +74,12 @@ func NewSchedulerWithTraffic(controller *Controller, adapter platform.NodeAdapte
 	if config.TrafficSampleInterval <= 0 {
 		config.TrafficSampleInterval = time.Second
 	}
+	if config.HealthCheckInterval <= 0 {
+		config.HealthCheckInterval = 10 * time.Second
+	}
+	if config.WANCheckInterval <= 0 {
+		config.WANCheckInterval = 5 * time.Second
+	}
 	return &Scheduler{
 		controller:    controller,
 		adapter:       adapter,
@@ -80,7 +93,27 @@ func NewSchedulerWithTraffic(controller *Controller, adapter platform.NodeAdapte
 		sessions:      make(map[string]platform.Session),
 		l2tp:          make(chan struct{}, config.L2TPConcurrency),
 		proxy:         make(chan struct{}, config.ProxyConcurrency),
+		health:        make(chan struct{}, config.L2TPConcurrency),
+		healthRun:     make(chan struct{}, 1),
+		wanKnown:      true,
+		wanUp:         true,
 	}
+}
+
+func (scheduler *Scheduler) SetWANStatusSource(source platform.WANStatusSource) {
+	if scheduler == nil {
+		return
+	}
+	scheduler.mu.Lock()
+	scheduler.wanSource = source
+	if source != nil {
+		scheduler.wanKnown = false
+		scheduler.wanUp = false
+	} else {
+		scheduler.wanKnown = true
+		scheduler.wanUp = true
+	}
+	scheduler.mu.Unlock()
 }
 
 // Submit is intentionally memory-only and non-blocking at the side-effect
@@ -103,6 +136,12 @@ func (scheduler *Scheduler) Run(ctx context.Context) error {
 	if scheduler == nil || scheduler.controller == nil || scheduler.adapter == nil {
 		return errors.New("scheduler dependencies are missing")
 	}
+	scheduler.mu.Lock()
+	wanSource := scheduler.wanSource
+	scheduler.mu.Unlock()
+	if wanSource != nil {
+		scheduler.refreshWAN(ctx, wanSource)
+	}
 	for _, job := range scheduler.controller.jobs.List() {
 		if job.State == JobQueued || job.State == JobRunning {
 			scheduler.Submit(job)
@@ -115,6 +154,15 @@ func (scheduler *Scheduler) Run(ctx context.Context) error {
 		trafficTicks = trafficTicker.C
 		defer trafficTicker.Stop()
 	}
+	healthTicker := time.NewTicker(scheduler.config.HealthCheckInterval)
+	defer healthTicker.Stop()
+	var wanTicker *time.Ticker
+	var wanTicks <-chan time.Time
+	if wanSource != nil {
+		wanTicker = time.NewTicker(scheduler.config.WANCheckInterval)
+		wanTicks = wanTicker.C
+		defer wanTicker.Stop()
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -122,6 +170,10 @@ func (scheduler *Scheduler) Run(ctx context.Context) error {
 			return nil
 		case sampledAt := <-trafficTicks:
 			scheduler.sampleTraffic(sampledAt)
+		case <-healthTicker.C:
+			scheduler.checkSessions(ctx)
+		case <-wanTicks:
+			scheduler.refreshWAN(ctx, wanSource)
 		case job := <-scheduler.queue:
 			scheduler.mu.Lock()
 			delete(scheduler.submitted, job.ID)
@@ -228,6 +280,11 @@ func (scheduler *Scheduler) runNode(ctx context.Context, work scheduledNode) {
 	}
 	if exists && status.State == model.StateOnline && job.Kind != "node.reconnect" && job.Kind != "node.save" {
 		if job.Kind == "device.bind" || job.Kind == "device.bindings.replace" {
+			status = scheduler.prepareReconnect(ctx, work, node, status)
+			if status.State == model.StateQueued {
+				scheduler.startNode(ctx, work, node, status)
+			}
+		} else if scheduler.hasSession(work.nodeID) {
 			status = scheduler.prepareReconnect(ctx, work, node, status)
 			if status.State == model.StateQueued {
 				scheduler.startNode(ctx, work, node, status)
@@ -354,6 +411,10 @@ func (scheduler *Scheduler) refreshNode(ctx context.Context, work scheduledNode,
 	request := platform.NodeRequest{Node: node, JobID: work.jobID, Generation: status.Generation}
 	refreshCtx, cancel := context.WithTimeout(ctx, scheduler.config.ConnectTimeout)
 	defer cancel()
+	if !scheduler.wanUsable() {
+		scheduler.failStart(ctx, work, status, &model.CodeError{Code: ErrorCodeWANDown}, ErrorCodeWANDown)
+		return
+	}
 	session, err := scheduler.adapter.Start(refreshCtx, request)
 	if err != nil {
 		scheduler.cleanupFailedStart(request, session, nil)
@@ -454,6 +515,10 @@ func (scheduler *Scheduler) startNode(ctx context.Context, work scheduledNode, n
 		return
 	}
 	request := platform.NodeRequest{Node: node, JobID: work.jobID, Generation: starting.Generation}
+	if !scheduler.wanUsable() {
+		scheduler.failStart(ctx, work, starting, &model.CodeError{Code: ErrorCodeWANDown}, ErrorCodeWANDown)
+		return
+	}
 	connectCtx, cancel := context.WithTimeout(ctx, scheduler.config.ConnectTimeout)
 	defer cancel()
 	session, err := scheduler.adapter.Start(connectCtx, request)
@@ -511,7 +576,13 @@ func (scheduler *Scheduler) failStart(ctx context.Context, work scheduledNode, s
 	}
 	failed, err := scheduler.controller.schedulerApply(ctx, work.jobID, work.nodeID, status.Generation, kind, &model.CodeError{Code: code}, "failed")
 	if err == nil && failed.State == model.StateBackoff {
-		scheduler.scheduleRetry(ctx, work, failed)
+		retryWork, handoffErr := scheduler.controller.schedulerHandoffRetry(ctx, work, failed)
+		if handoffErr != nil {
+			retryWork = work
+		}
+		if failed.LastError == nil || failed.LastError.Code != ErrorCodeWANDown || !failed.RetryAt.IsZero() {
+			scheduler.scheduleRetry(ctx, retryWork, failed)
+		}
 	}
 }
 
@@ -576,6 +647,175 @@ func (scheduler *Scheduler) takeSession(nodeID string) platform.Session {
 	return session
 }
 
+func (scheduler *Scheduler) currentSession(nodeID string, expected platform.Session) bool {
+	scheduler.mu.Lock()
+	defer scheduler.mu.Unlock()
+	current, exists := scheduler.sessions[nodeID]
+	return exists && current == expected
+}
+
+func (scheduler *Scheduler) hasSession(nodeID string) bool {
+	scheduler.mu.Lock()
+	defer scheduler.mu.Unlock()
+	_, exists := scheduler.sessions[nodeID]
+	return exists
+}
+
+func (scheduler *Scheduler) wanUsable() bool {
+	scheduler.mu.Lock()
+	defer scheduler.mu.Unlock()
+	return scheduler.wanKnown && scheduler.wanUp
+}
+
+func (scheduler *Scheduler) refreshWAN(ctx context.Context, source platform.WANStatusSource) {
+	if source == nil || ctx.Err() != nil {
+		return
+	}
+	probeTimeout := scheduler.config.WANCheckInterval
+	if probeTimeout > 5*time.Second {
+		probeTimeout = 5 * time.Second
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+	available, err := source.Available(probeCtx)
+	cancel()
+	if err != nil {
+		available = false
+	}
+	scheduler.mu.Lock()
+	wasUsable := scheduler.wanKnown && scheduler.wanUp
+	scheduler.wanKnown = true
+	scheduler.wanUp = available
+	scheduler.mu.Unlock()
+	if available && !wasUsable {
+		scheduler.wakeWANRecoveries(ctx)
+	}
+}
+
+type wanRecoveryTarget struct {
+	work   scheduledNode
+	status NodeStatus
+	node   model.Node
+}
+
+func (scheduler *Scheduler) wakeWANRecoveries(ctx context.Context) {
+	for _, target := range scheduler.controller.schedulerWANRecoveries() {
+		scheduler.workers.Add(1)
+		go func(target wanRecoveryTarget) {
+			defer scheduler.workers.Done()
+			lock := scheduler.nodeLock(target.work.nodeID)
+			lock.Lock()
+			defer lock.Unlock()
+			current, exists := scheduler.controller.schedulerStatus(target.work.nodeID)
+			if !exists || current.Generation != target.status.Generation || current.State != model.StateBackoff ||
+				current.LastError == nil || current.LastError.Code != ErrorCodeWANDown || !scheduler.wanUsable() {
+				return
+			}
+			queued, err := scheduler.controller.schedulerApply(ctx, target.work.jobID, target.work.nodeID,
+				current.Generation, EventWANAvailable, nil, "queued")
+			if err != nil {
+				return
+			}
+			scheduler.startNode(ctx, target.work, target.node, queued)
+		}(target)
+	}
+}
+
+func (scheduler *Scheduler) checkSessions(ctx context.Context) {
+	select {
+	case scheduler.healthRun <- struct{}{}:
+	default:
+		return
+	}
+	scheduler.workers.Add(1)
+	go scheduler.runHealthSweep(ctx)
+}
+
+func (scheduler *Scheduler) runHealthSweep(ctx context.Context) {
+	defer scheduler.workers.Done()
+	defer func() { <-scheduler.healthRun }()
+	scheduler.mu.Lock()
+	sessions := make(map[string]platform.Session, len(scheduler.sessions))
+	nodeIDs := make([]string, 0, len(scheduler.sessions))
+	for nodeID, session := range scheduler.sessions {
+		sessions[nodeID] = session
+		nodeIDs = append(nodeIDs, nodeID)
+	}
+	scheduler.mu.Unlock()
+	sort.Strings(nodeIDs)
+	var checks sync.WaitGroup
+	for _, nodeID := range nodeIDs {
+		session := sessions[nodeID]
+		select {
+		case scheduler.health <- struct{}{}:
+		case <-ctx.Done():
+			checks.Wait()
+			return
+		}
+		lock := scheduler.nodeLock(nodeID)
+		if !lock.TryLock() {
+			<-scheduler.health
+			continue
+		}
+		checks.Add(1)
+		go func(nodeID string, session platform.Session, lock *sync.Mutex) {
+			defer checks.Done()
+			defer func() { <-scheduler.health }()
+			defer lock.Unlock()
+			scheduler.checkSession(ctx, nodeID, session)
+		}(nodeID, session, lock)
+	}
+	checks.Wait()
+}
+
+func (scheduler *Scheduler) checkSession(ctx context.Context, nodeID string, session platform.Session) {
+	if ctx.Err() != nil || !scheduler.wanUsable() || !scheduler.currentSession(nodeID, session) {
+		return
+	}
+	node, exists := scheduler.controller.schedulerNode(nodeID)
+	status, statusExists := scheduler.controller.schedulerStatus(nodeID)
+	if !exists || !statusExists || !node.Enabled || status.State != model.StateOnline || status.Generation != session.Generation {
+		return
+	}
+	request := platform.NodeRequest{Node: node, JobID: status.JobID, Generation: session.Generation}
+	probeCtx, cancel := context.WithTimeout(ctx, scheduler.config.ConnectTimeout)
+	err := scheduler.adapter.Probe(probeCtx, request, session)
+	if err == nil {
+		for _, gate := range scheduler.gates {
+			verifier, ok := gate.(platform.SessionGateVerifier)
+			if !ok {
+				continue
+			}
+			if err = verifier.Verify(probeCtx, request, session); err != nil {
+				break
+			}
+		}
+	}
+	cancel()
+	if err == nil {
+		if status.Attempts > 0 {
+			_, _ = scheduler.controller.schedulerMarkStable(ctx, status)
+		}
+		return
+	}
+	if ctx.Err() != nil || !scheduler.currentSession(nodeID, session) {
+		return
+	}
+	work, recovering, err := scheduler.controller.schedulerBeginRecovery(ctx, nodeID, &model.CodeError{Code: ErrorCodeProbeFailed})
+	if err != nil {
+		return
+	}
+	if !scheduler.closeOwnedSession(work, node, session.Generation) {
+		_, _ = scheduler.controller.schedulerApply(ctx, work.jobID, nodeID, recovering.Generation, EventFailure,
+			&model.CodeError{Code: ErrorCodeStopTimeout}, "cleanup_failed")
+		return
+	}
+	queued, err := scheduler.controller.schedulerApply(ctx, work.jobID, nodeID, recovering.Generation, EventRecovered, nil, "queued")
+	if err != nil {
+		return
+	}
+	scheduler.startNode(ctx, work, node, queued)
+}
+
 func (scheduler *Scheduler) Traffic(nodeID string) TrafficSnapshot {
 	if scheduler == nil {
 		return TrafficSnapshot{}
@@ -627,6 +867,172 @@ func (controller *Controller) schedulerNode(nodeID string) (model.Node, bool) {
 	defer controller.mu.Unlock()
 	node, exists := controller.desired.Nodes[nodeID]
 	return node, exists
+}
+
+func (controller *Controller) schedulerBeginRecovery(ctx context.Context, nodeID string, failure *model.CodeError) (scheduledNode, NodeStatus, error) {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	node, exists := controller.desired.Nodes[nodeID]
+	status, statusExists := controller.machine.Status(nodeID)
+	if !exists || !statusExists || !controller.desired.Global.Enabled || !node.Enabled || status.State != model.StateOnline {
+		return scheduledNode{}, NodeStatus{}, errors.New("scheduler recovery target is unavailable")
+	}
+	for _, active := range controller.jobs.List() {
+		if isTerminalJob(active.State) {
+			continue
+		}
+		for _, progress := range active.Nodes {
+			if progress.NodeID == nodeID {
+				return scheduledNode{}, NodeStatus{}, errors.New("scheduler recovery is already queued")
+			}
+		}
+	}
+	jobID := controller.uniqueRecoveryJobIDLocked(status.JobID, nodeID, status.Generation)
+	job := newControllerJob(jobID, "system.recover", controller.now(), controller.desired.Revision, []string{nodeID})
+	beforeJobs := controller.jobs.Snapshot()
+	if err := controller.jobs.Put(job); err != nil {
+		return scheduledNode{}, NodeStatus{}, err
+	}
+	recovering, err := controller.schedulerApplyLocked(ctx, Event{
+		NodeID: nodeID, JobID: jobID, Generation: status.Generation, Kind: EventRecover, Err: failure, At: controller.now(),
+	}, "recovering")
+	if err != nil {
+		_ = controller.jobs.Restore(beforeJobs)
+		return scheduledNode{}, NodeStatus{}, err
+	}
+	return scheduledNode{jobID: jobID, nodeID: nodeID}, recovering, nil
+}
+
+func (controller *Controller) schedulerWANRecoveries() []wanRecoveryTarget {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	targets := make([]wanRecoveryTarget, 0)
+	for nodeID, status := range controller.statuses {
+		if status.State != model.StateBackoff || status.LastError == nil || status.LastError.Code != ErrorCodeWANDown {
+			continue
+		}
+		node, exists := controller.desired.Nodes[nodeID]
+		if !exists || !controller.desired.Global.Enabled || !node.Enabled {
+			continue
+		}
+		var work scheduledNode
+		for _, job := range controller.jobs.List() {
+			if isTerminalJob(job.State) {
+				continue
+			}
+			for _, progress := range job.Nodes {
+				if progress.NodeID == nodeID {
+					work = scheduledNode{jobID: job.ID, nodeID: nodeID}
+					break
+				}
+			}
+			if work.jobID != "" {
+				break
+			}
+		}
+		if work.jobID != "" {
+			targets = append(targets, wanRecoveryTarget{work: work, status: cloneNodeStatus(status), node: node})
+		}
+	}
+	return targets
+}
+
+func (controller *Controller) schedulerHandoffRetry(ctx context.Context, work scheduledNode, status NodeStatus) (scheduledNode, error) {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	job, exists := controller.jobs.Get(work.jobID)
+	if !exists || isTerminalJob(job.State) {
+		return scheduledNode{}, errors.New("scheduler retry job is unavailable")
+	}
+	if job.Kind == "system.recover" {
+		return work, nil
+	}
+	beforeJobs := controller.jobs.Snapshot()
+	attemptOutcome := cloneNodeStatus(status)
+	attemptOutcome.State = model.StateFailed
+	if err := controller.updateJobForStatus(work.jobID, attemptOutcome, "retry_scheduled"); err != nil {
+		return scheduledNode{}, err
+	}
+	recoveryID := controller.uniqueRecoveryJobIDLocked(work.jobID, work.nodeID, status.Generation)
+	recovery := newControllerJob(recoveryID, "system.recover", controller.now(), controller.desired.Revision, []string{work.nodeID})
+	if err := controller.jobs.Put(recovery); err != nil {
+		_ = controller.jobs.Restore(beforeJobs)
+		return scheduledNode{}, err
+	}
+	if err := controller.updateJobForStatus(recoveryID, status, "backoff"); err != nil {
+		_ = controller.jobs.Restore(beforeJobs)
+		return scheduledNode{}, err
+	}
+	if _, err := controller.jobs.AppendEvent(NodeEvent{
+		JobID: recoveryID, NodeID: work.nodeID, Generation: status.Generation, State: status.State,
+		Attempt: status.Attempts, At: controller.now(), Error: status.LastError,
+	}); err != nil {
+		_ = controller.jobs.Restore(beforeJobs)
+		return scheduledNode{}, err
+	}
+	if err := controller.persistLocked(ctx); err != nil {
+		_ = controller.jobs.Restore(beforeJobs)
+		return scheduledNode{}, err
+	}
+	return scheduledNode{jobID: recoveryID, nodeID: work.nodeID}, nil
+}
+
+func (controller *Controller) schedulerMarkStable(ctx context.Context, status NodeStatus) (NodeStatus, error) {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	beforeMachine, machineExists := controller.machine.Status(status.NodeID)
+	beforeStatus, statusExists := controller.statuses[status.NodeID]
+	beforeJobs := controller.jobs.Snapshot()
+	stable, err := controller.machine.Apply(Event{
+		NodeID: status.NodeID, JobID: status.JobID, Generation: status.Generation, Kind: EventStableOnline, At: controller.now(),
+	})
+	if err != nil {
+		return NodeStatus{}, err
+	}
+	controller.statuses[status.NodeID] = cloneNodeStatus(stable)
+	if _, err := controller.jobs.AppendEvent(NodeEvent{
+		JobID: status.JobID, NodeID: status.NodeID, Generation: stable.Generation, State: stable.State,
+		Attempt: stable.Attempts, At: controller.now(), Error: stable.LastError,
+	}); err != nil {
+		_ = controller.jobs.Restore(beforeJobs)
+		controller.machine.restoreNode(status.NodeID, beforeMachine, machineExists)
+		if statusExists {
+			controller.statuses[status.NodeID] = beforeStatus
+		} else {
+			delete(controller.statuses, status.NodeID)
+		}
+		return NodeStatus{}, err
+	}
+	if err := controller.persistLocked(ctx); err != nil {
+		_ = controller.jobs.Restore(beforeJobs)
+		controller.machine.restoreNode(status.NodeID, beforeMachine, machineExists)
+		if statusExists {
+			controller.statuses[status.NodeID] = beforeStatus
+		} else {
+			delete(controller.statuses, status.NodeID)
+		}
+		return NodeStatus{}, err
+	}
+	return stable, nil
+}
+
+func (controller *Controller) uniqueRecoveryJobIDLocked(previousJobID, nodeID string, generation uint64) string {
+	candidate := controller.newJobID()
+	if candidate != "" {
+		if _, exists := controller.jobs.Get(candidate); !exists {
+			return candidate
+		}
+	}
+	base := fmt.Sprintf("%s-recovery-%s-%d", previousJobID, nodeID, generation)
+	for suffix := 0; ; suffix++ {
+		candidate = base
+		if suffix > 0 {
+			candidate = fmt.Sprintf("%s-%d", base, suffix)
+		}
+		if _, exists := controller.jobs.Get(candidate); !exists {
+			return candidate
+		}
+	}
 }
 
 func (controller *Controller) schedulerFinalizeNodeDelete(ctx context.Context, nodeID string) (bool, error) {

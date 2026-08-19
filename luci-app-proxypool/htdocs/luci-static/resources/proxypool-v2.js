@@ -53,7 +53,7 @@
     });
     var JOB_STEP_LABELS = Object.freeze({
         queued: '等待执行', start: '正在启动', validate: '正在验证', done: '已完成', failed: '失败',
-        cancelled: '已取消', replaced: '已替换', cleanup_failed: '清理失败', blocked_by_previous_node: '等待前一节点处理',
+        cancelled: '已取消', replaced: '已替换', cleanup_failed: '清理失败', retry_scheduled: '已转入后台重试', blocked_by_previous_node: '等待前一节点处理',
         shadow_observed: '已确认停用'
     });
 

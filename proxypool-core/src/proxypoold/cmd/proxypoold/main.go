@@ -138,6 +138,7 @@ func runLive(ctx context.Context, options daemonOptions, endpointLease *api.Endp
 		L2TPConcurrency: desired.Global.L2TPConcurrency, ProxyConcurrency: desired.Global.ProxyConcurrency,
 		ConnectTimeout: desired.Global.ConnectTimeout, StopTimeout: desired.Global.StopTimeout,
 	}, routeGate, dnsGate, authorizationGate)
+	scheduler.SetWANStatusSource(openwrtplatform.NewWANStatusSource(runner))
 	controller.AttachScheduler(scheduler)
 	server := &api.Server{
 		Path: options.socketPath, Handler: controller, Lease: endpointLease,

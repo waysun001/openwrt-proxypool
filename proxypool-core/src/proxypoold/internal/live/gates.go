@@ -57,6 +57,17 @@ func (gate *RouteGate) Close(ctx context.Context, request platform.NodeRequest, 
 	return gate.manager.Remove(ctx, lease)
 }
 
+func (gate *RouteGate) Verify(ctx context.Context, request platform.NodeRequest, session platform.Session) error {
+	lease, err := routeLease(request, session)
+	if err != nil || gate == nil || gate.manager == nil {
+		return errors.New("live route gate is invalid")
+	}
+	if err := gate.manager.Verify(ctx, lease); err != nil {
+		return errors.New("live route verification failed")
+	}
+	return nil
+}
+
 func routeCleanupLease(request platform.NodeRequest, session platform.Session) (platform.RouteLease, error) {
 	if session != (platform.Session{}) {
 		return routeLease(request, session)
@@ -159,6 +170,29 @@ func (gate *DNSGate) Close(_ context.Context, request platform.NodeRequest, _ pl
 		return err
 	}
 	gate.server.SetBindings(bindings)
+	return nil
+}
+
+func (gate *DNSGate) Verify(ctx context.Context, request platform.NodeRequest, session platform.Session) error {
+	if gate == nil || gate.source == nil || !exactLiveSession(request, session) {
+		return errors.New("live DNS gate is invalid")
+	}
+	desired, err := gate.source.Load()
+	if err != nil {
+		return errors.New("live DNS configuration is unavailable")
+	}
+	if _, _, err := exactDesiredNode(desired, request); err != nil {
+		return errors.New("live DNS configuration is stale")
+	}
+	gate.mu.Lock()
+	state, exists := gate.bindings[request.Node.ID]
+	gate.mu.Unlock()
+	if !exists || state.generation != request.Generation || state.channel == nil {
+		return errors.New("live DNS channel is unavailable")
+	}
+	if _, err := state.channel.Resolve(ctx, dnsPreflightQuery()); err != nil {
+		return errors.New("live DNS health check failed")
+	}
 	return nil
 }
 

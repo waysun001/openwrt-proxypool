@@ -12,6 +12,7 @@ mkdir -p \
 	"$SOURCE/etc/config" \
 	"$SOURCE/etc/uci-defaults" \
 	"$SOURCE/etc/proxypool" \
+	"$SOURCE/lib/netifd/proto" \
 	"$SOURCE/usr/lib/proxypool"
 printf '%s\n' "config global 'global'" >"$SOURCE/etc/config/proxypool"
 printf '%s\n' "config global 'global'" >"$SOURCE/etc/config/proxypool_v2"
@@ -19,10 +20,12 @@ printf '%s\n' "config global 'global'" >"$SOURCE/etc/config/proxypool_runtime"
 printf '%s\n' image >"$SOURCE/etc/proxypool/v2-activation-request"
 printf '%s\n' v2-image-activation-v1 >"$SOURCE/usr/lib/proxypool/v2-image-activation-authority"
 printf '%s\n' '#!/bin/sh' 'exit 0' >"$SOURCE/etc/uci-defaults/keep"
+printf '%s\n' '#!/bin/sh' 'exit 0' >"$SOURCE/lib/netifd/proto/l2tp.sh"
 chmod 644 "$SOURCE/etc/config/proxypool"
 chmod 644 "$SOURCE/etc/config/proxypool_v2"
 chmod 644 "$SOURCE/etc/config/proxypool_runtime"
 chmod 755 "$SOURCE/etc/uci-defaults/keep"
+chmod 644 "$SOURCE/lib/netifd/proto/l2tp.sh"
 
 sh "$PREPARE" "$SOURCE" "$DESTINATION"
 
@@ -34,6 +37,7 @@ cmp -s \
 	"$SOURCE/usr/lib/proxypool/v2-image-activation-authority" \
 	"$DESTINATION/usr/lib/proxypool/v2-image-activation-authority"
 cmp -s "$SOURCE/etc/uci-defaults/keep" "$DESTINATION/etc/uci-defaults/keep"
+cmp -s "$SOURCE/lib/netifd/proto/l2tp.sh" "$DESTINATION/lib/netifd/proto/l2tp.sh"
 [ "$(stat -c '%a' "$SOURCE/etc/config/proxypool")" = 644 ]
 [ "$(stat -c '%a' "$SOURCE/etc/config/proxypool_v2")" = 644 ]
 [ "$(stat -c '%a' "$SOURCE/etc/config/proxypool_runtime")" = 644 ]
@@ -45,6 +49,7 @@ case "$(uname -s)" in
 		done
 		[ "$(stat -c '%a' "$DESTINATION/etc/proxypool")" = 700 ]
 		[ "$(stat -c '%a' "$DESTINATION/etc/proxypool/v2-activation-request")" = 600 ]
+		[ "$(stat -c '%a' "$DESTINATION/lib/netifd/proto/l2tp.sh")" = 755 ]
 		;;
 	*) echo 'SKIP: staged config mode assertion requires a POSIX filesystem' ;;
 esac
@@ -98,6 +103,7 @@ ROM="$TEST_TMP/rom"
 OLD_V1_BACKUP="$TEST_TMP/old-v1-backup"
 UPGRADED_V1="$TEST_TMP/upgraded-v1"
 sh "$PREPARE" "$ROOT/files" "$ROM"
+[ "$(stat -c '%a' "$ROM/lib/netifd/proto/l2tp.sh")" = 755 ]
 mkdir -p "$OLD_V1_BACKUP/etc/config" "$UPGRADED_V1"
 cp "$ROOT/proxypool-core/files/proxypool.config" "$OLD_V1_BACKUP/etc/config/proxypool"
 cp -a "$ROM/." "$UPGRADED_V1/"

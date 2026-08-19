@@ -71,6 +71,7 @@ for shell_file in \
 	scripts/test-inspect-luci-ipk.sh \
 	scripts/test-inspect-theme-ipk.sh \
 	scripts/test-kernel-isolation-contract.sh \
+	scripts/test-l2tp-netifd-bounded.sh \
 	scripts/test-legacy-quarantine.sh \
 	scripts/test-lan-isolation-defaults.sh \
 	scripts/test-lan-isolation-worker.sh \
@@ -102,6 +103,7 @@ sh scripts/test-inspect-ipk.sh
 sh scripts/test-inspect-luci-ipk.sh
 sh scripts/test-inspect-theme-ipk.sh
 sh scripts/test-kernel-isolation-contract.sh
+sh scripts/test-l2tp-netifd-bounded.sh
 sh scripts/test-legacy-quarantine.sh
 sh scripts/test-lan-isolation-defaults.sh
 sh scripts/test-lan-isolation-worker.sh
