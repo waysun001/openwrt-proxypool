@@ -72,7 +72,7 @@ jobs:
           sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib \
             g++-multilib gettext git libelf-dev libncurses5-dev libssl-dev \
             python3 python3-distutils python3-ply rsync swig unzip zlib1g-dev \
-            file wget xsltproc
+            file qemu-user-static wget xsltproc
 
       - name: Checkout pinned OpenWrt source
         run: |
@@ -175,6 +175,12 @@ jobs:
           mkdir -p build-evidence
           cd openwrt
           make -j"$(nproc)" V=s 2>&1 | tee ../build-evidence/firmware-build.log
+          mapfile -t ucode_bins < <(find staging_dir/target-* -path '*/root-*/usr/bin/ucode' -type f)
+          [ "${#ucode_bins[@]}" -eq 1 ]
+          target_root=${ucode_bins[0]%/usr/bin/ucode}
+          sh ../scripts/test-ucode-l2tp-bridge.sh \
+            /usr/bin/qemu-aarch64-static -L "$target_root" "${ucode_bins[0]}" 2>&1 |
+            tee ../build-evidence/l2tp-ucode-verification.log
           sh ../scripts/verify-openwrt-kernel-isolation.sh . ../openwrt-patches/23.05.3 2>&1 |
             tee ../build-evidence/kernel-isolation-verification.log
           sha256sum ../openwrt-patches/23.05.3/*.patch > ../build-evidence/kernel-patches.sha256

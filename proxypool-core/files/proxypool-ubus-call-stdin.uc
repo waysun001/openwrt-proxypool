@@ -29,9 +29,9 @@ catch (error) {
 }
 
 if (type(request) != "object" || length(request) != 10 ||
-    type(request.name) != "string" || request.name !~ /^ppv2[0-9]{4}$/ ||
+    type(request.name) != "string" || !match(request.name, /^ppv2[0-9]{4}$/) ||
     request.proto != "l2tp" ||
-    type(request.server) != "string" || request.server !~ /^[0-9.]+:[0-9]+$/ ||
+    type(request.server) != "string" || !match(request.server, /^[0-9.]+:[0-9]+$/) ||
     type(request.username) != "string" || length(request.username) == 0 || length(request.username) > 256 ||
     type(request.password) != "string" || length(request.password) == 0 || length(request.password) > 1024 ||
     request.ipv6 != false || request.keepalive != "3 5" || request.mtu != 1400 ||
@@ -48,4 +48,3 @@ connection.disconnect();
 
 if (call_error != null)
 	fail("netifd call failed");
-

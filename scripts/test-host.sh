@@ -78,6 +78,7 @@ for shell_file in \
 	scripts/test-luci-package-source-safety.sh \
 	scripts/test-theme-source-safety.sh \
 	scripts/test-time-sync-defaults.sh \
+	scripts/test-ucode-l2tp-bridge.sh \
 	scripts/test-package-safety-integration.sh \
 	scripts/test-proxypool-dns-admission.sh \
 	scripts/test-proxypool-guard.sh \
