@@ -158,11 +158,15 @@ func liveControlMethods() map[string]struct{} {
 
 func defaultDiagnosticCommands() []diagnostics.Command {
 	return []diagnostics.Command{
+		{Name: "system-info.json", Path: "/bin/ubus", Args: []string{"call", "system", "info"}},
 		{Name: "network-interface.json", Path: "/bin/ubus", Args: []string{"call", "network.interface", "dump"}},
 		{Name: "firewall-nft.json", Path: "/usr/sbin/nft", Args: []string{"-j", "list", "table", "inet", "proxypool_guard"}},
 		{Name: "ipv4-rules.json", Path: "/sbin/ip", Args: []string{"-4", "-j", "rule", "show"}},
 		{Name: "ipv4-routes.json", Path: "/sbin/ip", Args: []string{"-4", "-j", "route", "show", "table", "all"}},
 		{Name: "recent-log.txt", Path: "/sbin/logread", Args: []string{"-e", "proxypool", "-l", "500"}},
+		{Name: "recent-system-log.txt", Path: "/sbin/logread", Args: []string{"-l", "1000"}},
+		{Name: "xl2tpd-status.txt", Path: "/etc/init.d/xl2tpd", Args: []string{"status"}},
+		{Name: "time-client-status.txt", Path: "/etc/init.d/sysntpd", Args: []string{"status"}},
 		{Name: "dhcp-leases.txt", Path: "/bin/cat", Args: []string{"/tmp/dhcp.leases"}},
 	}
 }

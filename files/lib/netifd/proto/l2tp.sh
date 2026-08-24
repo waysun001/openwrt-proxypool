@@ -109,6 +109,7 @@ proto_l2tp_setup() {
 	done
 	[ -n "$serv_addr" ] || {
 		echo "Could not resolve server address" >&2
+		proto_notify_error "$interface" RESOLVE_FAILED
 		proto_setup_failed "$interface"
 		exit 1
 	}
@@ -116,6 +117,7 @@ proto_l2tp_setup() {
 	if [ ! -p /var/run/xl2tpd/l2tp-control ] || [ -z "$(pidof xl2tpd)" ]; then
 		"$PROXYPOOL_L2TP_TIMEOUT" -s KILL 10 /etc/init.d/xl2tpd restart || {
 			echo "Cannot start xl2tpd." >&2
+			proto_notify_error "$interface" XL2TPD_FAILED
 			proto_setup_failed "$interface"
 			exit 1
 		}
@@ -124,6 +126,7 @@ proto_l2tp_setup() {
 			wait_timeout=$((wait_timeout + 1))
 			[ "$wait_timeout" -gt 5 ] && {
 				echo "Cannot find xl2tpd control file." >&2
+				proto_notify_error "$interface" XL2TPD_FAILED
 				proto_setup_failed "$interface"
 				exit 1
 			}
@@ -159,12 +162,14 @@ $pppd_options
 EOF
 	proxypool_l2tp_control add-lac "l2tp-${interface}" "pppoptfile=${optfile}" "lns=${server}" || {
 		echo "xl2tpd-control: Add l2tp-$interface failed" >&2
+		proto_notify_error "$interface" INTERFACE_FAILED
 		proto_setup_failed "$interface"
 		exit 1
 	}
 	proxypool_l2tp_control connect-lac "l2tp-${interface}" || {
 		proxypool_l2tp_control remove-lac "l2tp-${interface}" >/dev/null 2>&1 || true
 		echo "xl2tpd-control: Connect l2tp-$interface failed" >&2
+		proto_notify_error "$interface" CONNECT_FAILED
 		proto_setup_failed "$interface"
 		exit 1
 	}

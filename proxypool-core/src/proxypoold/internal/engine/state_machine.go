@@ -13,22 +13,26 @@ import (
 )
 
 const (
-	ErrorCodeInvalidRequest   = "invalid_request"
-	ErrorCodeInternal         = "internal"
-	ErrorCodeAuthentication   = "auth_failed"
-	ErrorCodeInvalidConfig    = "invalid_config"
-	ErrorCodeUnsupported      = "unsupported"
-	ErrorCodeWANDown          = "wan_down"
-	ErrorCodeConnectTimeout   = "connect_timeout"
-	ErrorCodeStopTimeout      = "stop_timeout"
-	ErrorCodeCapacityExceeded = "capacity_exceeded"
-	ErrorCodeRevisionConflict = "revision_conflict"
-	ErrorCodeDuplicate        = "duplicate"
-	ErrorCodeNotFound         = "not_found"
-	ErrorCodeResolveFailed    = "resolve_failed"
-	ErrorCodeProbeFailed      = "probe_failed"
-	ErrorCodeDataplaneFailed  = "dataplane_failed"
-	ErrorCodeDNSFailed        = "dns_failed"
+	ErrorCodeInvalidRequest        = "invalid_request"
+	ErrorCodeInternal              = "internal"
+	ErrorCodeAuthentication        = "auth_failed"
+	ErrorCodeInvalidConfig         = "invalid_config"
+	ErrorCodeUnsupported           = "unsupported"
+	ErrorCodeWANDown               = "wan_down"
+	ErrorCodeConnectTimeout        = "connect_timeout"
+	ErrorCodeStopTimeout           = "stop_timeout"
+	ErrorCodeCapacityExceeded      = "capacity_exceeded"
+	ErrorCodeRevisionConflict      = "revision_conflict"
+	ErrorCodeDuplicate             = "duplicate"
+	ErrorCodeNotFound              = "not_found"
+	ErrorCodeResolveFailed         = "resolve_failed"
+	ErrorCodeProbeFailed           = "probe_failed"
+	ErrorCodeDataplaneFailed       = "dataplane_failed"
+	ErrorCodeDNSFailed             = "dns_failed"
+	ErrorCodeL2TPInterfaceFailed   = "l2tp_interface_failed"
+	ErrorCodeL2TPDaemonFailed      = "l2tp_daemon_failed"
+	ErrorCodeL2TPNegotiationFailed = "l2tp_negotiation_failed"
+	ErrorCodeL2TPNoAddress         = "l2tp_no_address"
 
 	DefaultStableOnlineWindow = 5 * time.Minute
 )
@@ -756,6 +760,14 @@ func publicErrorForCode(code string) *PublicError {
 		message = "dataplane update failed"
 	case ErrorCodeDNSFailed:
 		message = "DNS validation failed"
+	case ErrorCodeL2TPInterfaceFailed:
+		message = "L2TP interface creation failed"
+	case ErrorCodeL2TPDaemonFailed:
+		message = "L2TP service failed"
+	case ErrorCodeL2TPNegotiationFailed:
+		message = "L2TP negotiation failed"
+	case ErrorCodeL2TPNoAddress:
+		message = "L2TP did not receive an IPv4 address"
 	case ErrorCodeUnsupported:
 		message = "protocol option is unsupported"
 	case ErrorCodeInternal:

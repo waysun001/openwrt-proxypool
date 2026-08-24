@@ -68,6 +68,41 @@ func TestManagerCreatesArtifactAsynchronouslyAndClaimsOnce(t *testing.T) {
 	}
 }
 
+func TestManagerReportsExpiredArtifactWithoutUsingBrowserTime(t *testing.T) {
+	serviceCtx, cancelService := context.WithCancel(context.Background())
+	defer cancelService()
+	now := artifactTestTime
+	store, err := NewArtifactStore(filepath.Join(t.TempDir(), "diagnostics"),
+		WithArtifactClock(func() time.Time { return now }),
+		WithArtifactIDSource(func() string { return "diag-ffffffffffffffff" }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(serviceCtx, store,
+		func(context.Context) (Snapshot, error) {
+			return Snapshot{Entries: map[string][]byte{"status.json": []byte(`{}`)}}, nil
+		},
+		func(ctx context.Context, snapshot Snapshot) ([]Entry, error) {
+			return NewCollector(nil, NewRedactor(nil), nil).Collect(ctx, snapshot.Entries)
+		},
+		WithManagerIDSource(func() string { return "diagnostic-job-expiry" }),
+	)
+	created, err := manager.Create()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready := waitDiagnosticState(t, manager, created.ID, DiagnosticReady)
+	if ready.Artifact == nil {
+		t.Fatal("ready diagnostic omitted artifact")
+	}
+	now = now.Add(defaultArtifactTTL + time.Second)
+	expired, ok := manager.Get(created.ID)
+	if !ok || expired.State != DiagnosticExpired || expired.Artifact != nil {
+		t.Fatalf("expired status = %#v ok=%t", expired, ok)
+	}
+}
+
 func TestManagerFailureIsGenericAndServiceCancellationStopsWork(t *testing.T) {
 	serviceCtx, cancelService := context.WithCancel(context.Background())
 	store, err := NewArtifactStore(filepath.Join(t.TempDir(), "diagnostics"))

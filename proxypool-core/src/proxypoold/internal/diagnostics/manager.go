@@ -14,6 +14,7 @@ const (
 	DiagnosticQueued  = "queued"
 	DiagnosticRunning = "running"
 	DiagnosticReady   = "ready"
+	DiagnosticExpired = "expired"
 	DiagnosticFailed  = "failed"
 
 	MaxConcurrentDiagnosticJobs = 2
@@ -153,9 +154,15 @@ func (manager *Manager) Get(id string) (DiagnosticStatus, bool) {
 		return DiagnosticStatus{}, false
 	}
 	manager.mu.RLock()
-	defer manager.mu.RUnlock()
 	status, exists := manager.jobs[id]
-	return cloneDiagnosticStatus(status), exists
+	status = cloneDiagnosticStatus(status)
+	manager.mu.RUnlock()
+	if exists && status.State == DiagnosticReady && status.Artifact != nil &&
+		!manager.store.Available(status.Artifact.ID) {
+		status.State = DiagnosticExpired
+		status.Artifact = nil
+	}
+	return status, exists
 }
 
 func (manager *Manager) Claim(artifactID string) (ArtifactClaim, error) {

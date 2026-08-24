@@ -136,7 +136,10 @@ func (adapter *L2TPAdapter) Start(ctx context.Context, request platform.NodeRequ
 		return session, errors.New("L2TP dynamic configuration failed")
 	}
 	if _, err := adapter.runner.RunInput(ctx, input, "/usr/bin/ucode", l2tpUbusHelperPath, "network", "add_dynamic"); err != nil {
-		return session, l2tpContextError(ctx, "L2TP dynamic interface creation failed")
+		if contextErr := ctx.Err(); contextErr != nil {
+			return session, fmt.Errorf("L2TP dynamic interface creation failed: %w", contextErr)
+		}
+		return session, l2tpFailure("l2tp_interface_failed", "L2TP dynamic interface creation failed")
 	}
 	if err := adapter.waitReady(ctx, logical, l3Device); err != nil {
 		return session, err
@@ -257,7 +260,10 @@ func (adapter *L2TPAdapter) resolveEndpoint(ctx context.Context, server string) 
 	}
 	address, err := adapter.resolver.ResolveIPv4(ctx, server)
 	if err != nil || !validL2TPEndpoint(address) {
-		return netip.Addr{}, errors.New("L2TP endpoint resolution failed")
+		if contextErr := ctx.Err(); contextErr != nil {
+			return netip.Addr{}, fmt.Errorf("L2TP endpoint resolution failed: %w", contextErr)
+		}
+		return netip.Addr{}, l2tpFailure("resolve_failed", "L2TP endpoint resolution failed")
 	}
 	return address, nil
 }
@@ -279,6 +285,7 @@ type l2tpStatus struct {
 	exists, up, pending, available, dynamic bool
 	protocol, l3Device                      string
 	addresses                               []netip.Addr
+	failureCode                             string
 }
 
 func (status l2tpStatus) ready(l3Device string) bool {
@@ -319,9 +326,13 @@ func (adapter *L2TPAdapter) inspectStatus(ctx context.Context, logical string) (
 		IPv4      []struct {
 			Address string `json:"address"`
 		} `json:"ipv4-address"`
+		Errors []struct {
+			Subsystem string `json:"subsystem"`
+			Code      string `json:"code"`
+		} `json:"errors"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(contents))
-	if err := decoder.Decode(&document); err != nil || len(document.IPv4) > 8 {
+	if err := decoder.Decode(&document); err != nil || len(document.IPv4) > 8 || len(document.Errors) > 16 {
 		return l2tpStatus{}, errors.New("L2TP interface status is invalid")
 	}
 	var trailing any
@@ -329,6 +340,12 @@ func (adapter *L2TPAdapter) inspectStatus(ctx context.Context, logical string) (
 		return l2tpStatus{}, errors.New("L2TP interface status is invalid")
 	}
 	status := l2tpStatus{exists: true, up: document.Up, pending: document.Pending, available: document.Available, dynamic: document.Dynamic, protocol: document.Proto, l3Device: document.L3Device}
+	for _, item := range document.Errors {
+		if code := classifyL2TPStatusError(item.Code); code != "" {
+			status.failureCode = code
+			break
+		}
+	}
 	for _, item := range document.IPv4 {
 		address, err := netip.ParseAddr(item.Address)
 		if err != nil || !address.Is4() || !address.IsGlobalUnicast() {
@@ -350,6 +367,9 @@ func (adapter *L2TPAdapter) waitReady(ctx context.Context, logical, l3Device str
 				return errors.New("shared xl2tpd is unavailable")
 			}
 			return nil
+		}
+		if status.failureCode != "" {
+			return l2tpFailure(status.failureCode, "L2TP interface reported a connection failure")
 		}
 		if err := waitL2TPPoll(ctx, adapter.pollInterval); err != nil {
 			return fmt.Errorf("L2TP connection deadline exceeded: %w", err)
@@ -388,6 +408,32 @@ func l2tpContextError(ctx context.Context, message string) error {
 		return fmt.Errorf("%s: %w", message, err)
 	}
 	return errors.New(message)
+}
+
+func l2tpFailure(code, message string) error {
+	return &model.CodeError{Code: code, Message: message}
+}
+
+func classifyL2TPStatusError(value string) string {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "AUTH_FAILED", "PEER_REFUSED", "AUTHENTICATION_FAILED":
+		return "auth_failed"
+	case "NO_ADDRESS", "IP_CONFIG_FAILED", "ADDRESS_FAILED":
+		return "l2tp_no_address"
+	case "RESOLVE_FAILED", "DNS_FAILED":
+		return "resolve_failed"
+	case "XL2TPD_FAILED", "DAEMON_FAILED":
+		return "l2tp_daemon_failed"
+	case "INTERFACE_FAILED":
+		return "l2tp_interface_failed"
+	case "CONNECT_FAILED", "NEGOTIATION_FAILED":
+		return "l2tp_negotiation_failed"
+	default:
+		if strings.TrimSpace(value) != "" {
+			return "l2tp_negotiation_failed"
+		}
+		return ""
+	}
 }
 
 func exactL2TPSession(request platform.NodeRequest, session platform.Session, l3Device string) bool {

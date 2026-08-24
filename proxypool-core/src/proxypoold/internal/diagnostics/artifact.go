@@ -50,6 +50,7 @@ type artifactRecord struct {
 	artifact Artifact
 	path     string
 	claimed  bool
+	deadline time.Time
 }
 
 type ArtifactStoreOption func(*ArtifactStore)
@@ -143,7 +144,8 @@ func (store *ArtifactStore) Write(ctx context.Context, entries []Entry) (Artifac
 	if _, err := os.Lstat(finalPath); err == nil || !errors.Is(err, os.ErrNotExist) {
 		return Artifact{}, errors.New("diagnostic artifact target already exists")
 	}
-	createdAt := store.now().UTC()
+	createdNow := store.now()
+	createdAt := createdNow.UTC()
 	temporary, err := os.CreateTemp(store.root, ".diagnostic-*")
 	if err != nil {
 		return Artifact{}, errors.New("diagnostic artifact temporary file failed")
@@ -181,7 +183,7 @@ func (store *ArtifactStore) Write(ctx context.Context, entries []Entry) (Artifac
 		ID: id, State: ArtifactReady, Filename: "proxypool-diagnostics-" + id + ".tar.gz",
 		Size: info.Size(), CreatedAt: createdAt, ExpiresAt: createdAt.Add(store.ttl),
 	}
-	store.records[id] = artifactRecord{artifact: artifact, path: finalPath}
+	store.records[id] = artifactRecord{artifact: artifact, path: finalPath, deadline: createdNow.Add(store.ttl)}
 	return artifact, nil
 }
 
@@ -195,7 +197,7 @@ func (store *ArtifactStore) Claim(id string) (ArtifactClaim, error) {
 	if !exists || record.claimed {
 		return ArtifactClaim{}, ErrArtifactNotFound
 	}
-	if !store.now().Before(record.artifact.ExpiresAt) {
+	if !store.now().Before(record.deadline) {
 		delete(store.records, id)
 		_ = os.Remove(record.path)
 		return ArtifactClaim{}, ErrArtifactExpired
@@ -212,6 +214,16 @@ func (store *ArtifactStore) Claim(id string) (ArtifactClaim, error) {
 	record.claimed = true
 	store.records[id] = record
 	return ArtifactClaim{ArtifactID: id, Path: record.path, Filename: record.artifact.Filename, Size: record.artifact.Size}, nil
+}
+
+func (store *ArtifactStore) Available(id string) bool {
+	if store == nil || !artifactIDPattern.MatchString(id) {
+		return false
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	record, exists := store.records[id]
+	return exists && !record.claimed && store.now().Before(record.deadline)
 }
 
 func (store *ArtifactStore) Release(id string) error {
@@ -242,7 +254,7 @@ func (store *ArtifactStore) CleanupExpired() error {
 	defer store.mu.Unlock()
 	now := store.now()
 	for id, record := range store.records {
-		if now.Before(record.artifact.ExpiresAt) {
+		if now.Before(record.deadline) {
 			continue
 		}
 		delete(store.records, id)

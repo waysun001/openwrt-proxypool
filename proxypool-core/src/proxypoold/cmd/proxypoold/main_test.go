@@ -14,6 +14,7 @@ import (
 
 	"proxypoold/internal/api"
 	"proxypoold/internal/buildinfo"
+	"proxypoold/internal/diagnostics"
 )
 
 func TestRunPreservesVersionAndStrictlyRequiresShadow(t *testing.T) {
@@ -84,6 +85,20 @@ func TestDefaultDiagnosticCommandsAreFixedBoundedInputs(t *testing.T) {
 				t.Fatalf("shell-like argument = %q", argument)
 			}
 		}
+	}
+	fullLog, exists := func() (diagnostics.Command, bool) {
+		for _, command := range commands {
+			if command.Name == "recent-system-log.txt" {
+				return command, true
+			}
+		}
+		return diagnostics.Command{}, false
+	}()
+	if !exists {
+		t.Fatal("bounded full system log is absent from diagnostics")
+	}
+	if fullLog.Path != "/sbin/logread" || strings.Join(fullLog.Args, " ") != "-l 1000" {
+		t.Fatalf("full log command = %#v", fullLog)
 	}
 }
 

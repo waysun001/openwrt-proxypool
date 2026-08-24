@@ -1,0 +1,13 @@
+#!/bin/sh
+
+[ "${INTERFACE:-}" = wan ] || exit 0
+case "${ACTION:-}" in
+	ifup|ifupdate) : ;;
+	*) exit 0 ;;
+esac
+
+SYSNTPD="${PROXYPOOL_SYSNTPD:-/etc/init.d/sysntpd}"
+[ -x "$SYSNTPD" ] || exit 0
+"$SYSNTPD" reload >/dev/null 2>&1 || "$SYSNTPD" restart >/dev/null 2>&1 || :
+
+exit 0

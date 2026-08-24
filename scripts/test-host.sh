@@ -77,6 +77,7 @@ for shell_file in \
 	scripts/test-lan-isolation-worker.sh \
 	scripts/test-luci-package-source-safety.sh \
 	scripts/test-theme-source-safety.sh \
+	scripts/test-time-sync-defaults.sh \
 	scripts/test-package-safety-integration.sh \
 	scripts/test-proxypool-dns-admission.sh \
 	scripts/test-proxypool-guard.sh \
@@ -109,6 +110,7 @@ sh scripts/test-lan-isolation-defaults.sh
 sh scripts/test-lan-isolation-worker.sh
 sh scripts/test-luci-package-source-safety.sh
 sh scripts/test-theme-source-safety.sh
+sh scripts/test-time-sync-defaults.sh
 sh scripts/test-package-safety-integration.sh
 sh scripts/test-prepare-sdk-base-packages.sh
 sh scripts/test-proxypool-dns-admission.sh

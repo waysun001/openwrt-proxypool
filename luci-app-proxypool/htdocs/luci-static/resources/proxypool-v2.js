@@ -36,6 +36,8 @@
         connect_timeout: '节点连接超时', stop_timeout: '节点停止超时', capacity_exceeded: '节点数量已达到上限（60）',
         revision_conflict: '配置已变化，请刷新页面后重试', duplicate: '操作重复，请刷新页面后重试',
         not_found: '目标不存在，请刷新页面', resolve_failed: '域名解析失败', probe_failed: '连通性检测失败',
+        l2tp_interface_failed: 'L2TP 接口创建失败', l2tp_daemon_failed: 'L2TP 服务启动失败',
+        l2tp_negotiation_failed: 'L2TP 协商失败', l2tp_no_address: 'L2TP 未获得 IPv4 地址',
         dataplane_failed: '网络通道建立失败', dns_failed: 'DNS 检测失败', service_unavailable: 'ZeanLink 服务暂时不可用',
         bad_gateway: 'ZeanLink 服务响应异常', operation_timeout: '操作超时', unknown_method: '功能接口不可用',
         collection_failed: '诊断包生成失败', collection_cancelled: '诊断包生成已取消', unavailable: '信息不可用',
@@ -545,8 +547,12 @@
         var artifactID = String(artifact.artifact_id || '');
         var expiresAt = String(artifact.expires_at || '');
         var expires = Date.parse(expiresAt);
-        var now = Number.isFinite(nowMilliseconds) ? nowMilliseconds : Date.now();
-        var ready = status.state === 'ready' && ARTIFACT_PATTERN.test(artifactID) && Number.isFinite(expires) && expires > now;
+        // The router is the expiry authority and diagnostics.claim enforces the
+        // TTL on the router. A newly flashed router can temporarily have a
+        // factory wall clock, so comparing this timestamp with the browser
+        // clock would incorrectly hide a freshly generated download.
+        void nowMilliseconds;
+        var ready = status.state === 'ready' && ARTIFACT_PATTERN.test(artifactID) && Number.isFinite(expires);
         return {
             state: status.state === 'ready' && !ready ? 'expired' : String(status.state || 'idle'),
             error_code: String(status.error_code || ''),

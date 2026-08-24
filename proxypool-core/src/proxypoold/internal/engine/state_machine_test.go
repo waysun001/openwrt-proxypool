@@ -143,6 +143,30 @@ func TestMachinePermanentFailureEntersFailedWithoutRetry(t *testing.T) {
 	}
 }
 
+func TestMachinePublishesSafeSpecificL2TPFailures(t *testing.T) {
+	tests := []struct {
+		code    string
+		message string
+	}{
+		{ErrorCodeL2TPInterfaceFailed, "L2TP interface creation failed"},
+		{ErrorCodeL2TPDaemonFailed, "L2TP service failed"},
+		{ErrorCodeL2TPNegotiationFailed, "L2TP negotiation failed"},
+		{ErrorCodeL2TPNoAddress, "L2TP did not receive an IPv4 address"},
+	}
+	for _, test := range tests {
+		t.Run(test.code, func(t *testing.T) {
+			machine := NewMachine(NewRetryPolicy(rand.NewSource(31)))
+			applyMachineEvent(t, machine, "node-a", 1, EventEnable, nil, stateTestEpoch)
+			applyMachineEvent(t, machine, "node-a", 1, EventStart, nil, stateTestEpoch.Add(time.Second))
+			status := applyMachineEvent(t, machine, "node-a", 1, EventFailure,
+				&model.CodeError{Code: test.code, Message: "unsafe adapter detail"}, stateTestEpoch.Add(2*time.Second))
+			if status.LastError == nil || status.LastError.Code != test.code || status.LastError.Message != test.message {
+				t.Fatalf("LastError = %#v", status.LastError)
+			}
+		})
+	}
+}
+
 func TestMachineTimeoutEntersBackoff(t *testing.T) {
 	timedOutAt := stateTestEpoch.Add(2 * time.Second)
 	clock := &manualClock{wall: timedOutAt}

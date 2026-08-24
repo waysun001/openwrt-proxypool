@@ -1,0 +1,29 @@
+#!/bin/sh
+set -eu
+
+# ZeanLink disables the LAN DNS listener and intentionally does not trust LAN
+# clients with control-plane traffic. Numeric NTP peers avoid a DNS/time
+# bootstrap loop while keeping all client UDP blocked by the forwarding guard.
+UCI="${PROXYPOOL_UCI:-/sbin/uci}"
+SYSNTPD="${PROXYPOOL_SYSNTPD:-/etc/init.d/sysntpd}"
+
+[ -x "$UCI" ] || {
+	echo "ZeanLink time defaults: uci is unavailable" >&2
+	exit 1
+}
+[ -x "$SYSNTPD" ] || {
+	echo "ZeanLink time defaults: sysntpd is unavailable" >&2
+	exit 1
+}
+
+"$UCI" -q set system.ntp=timeserver
+"$UCI" -q set system.ntp.enabled=1
+"$UCI" -q set system.ntp.enable_server=0
+"$UCI" -q set system.ntp.use_dhcp=0
+"$UCI" -q delete system.ntp.server >/dev/null 2>&1 || :
+"$UCI" -q add_list system.ntp.server=162.159.200.1
+"$UCI" -q add_list system.ntp.server=162.159.200.123
+"$UCI" -q commit system
+"$SYSNTPD" enable
+
+exit 0

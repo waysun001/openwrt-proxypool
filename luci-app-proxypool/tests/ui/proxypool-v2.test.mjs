@@ -102,6 +102,10 @@ test('all ordinary runtime labels are Chinese and unknown codes stay hidden', ()
   assert.equal(ui.stateLabel('diagnostic', 'ready'), '可下载');
   assert.equal(ui.stateLabel('node', 'future_state'), '未知状态');
   assert.equal(ui.errorLabel('auth_failed'), '节点认证失败');
+  assert.equal(ui.errorLabel('l2tp_interface_failed'), 'L2TP 接口创建失败');
+  assert.equal(ui.errorLabel('l2tp_daemon_failed'), 'L2TP 服务启动失败');
+  assert.equal(ui.errorLabel('l2tp_negotiation_failed'), 'L2TP 协商失败');
+  assert.equal(ui.errorLabel('l2tp_no_address'), 'L2TP 未获得 IPv4 地址');
   assert.equal(ui.errorLabel('dataplane_failed'), '网络通道建立失败');
   assert.equal(ui.errorLabel('dns_failed'), 'DNS 检测失败');
   assert.equal(ui.errorLabel('future_code'), '未知错误');
@@ -271,9 +275,12 @@ test('diagnostic view exposes only safe artifact metadata', () => {
   assert.equal(model.artifact_id, 'diag-0123456789abcdef');
   assert.equal(JSON.stringify(model).includes('/tmp/'), false);
   assert.equal(ui.diagnosticViewModel({ state: 'running' }).can_download, false);
-  assert.equal(ui.diagnosticViewModel({ state: 'ready', artifact: {
+  const skewedClockModel = ui.diagnosticViewModel({ state: 'ready', artifact: {
     artifact_id: 'diag-0123456789abcdef', expires_at: '2029-12-31T23:59:59Z',
-  } }, Date.parse('2030-01-01T00:00:00Z')).state, 'expired');
+  } }, Date.parse('2030-01-01T00:00:00Z'));
+  assert.equal(skewedClockModel.state, 'ready');
+  assert.equal(skewedClockModel.can_download, true);
+  assert.equal(skewedClockModel.artifact_id, 'diag-0123456789abcdef');
 });
 
 test('import preview sends untouched raw text without browser credential parsing', () => {

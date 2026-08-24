@@ -729,6 +729,33 @@ func TestSchedulerDeadlineStopsPartialSessionAndNeverPublishesOnline(t *testing.
 	}
 }
 
+func TestSchedulerPublishesSpecificL2TPStartFailure(t *testing.T) {
+	desired := controllerConfig()
+	controller, err := NewController(
+		&memoryDesiredStore{cfg: desired}, &memoryRuntimePersistence{}, NewMachine(nil), NewJobStore(),
+		WithControllerJobIDSource(func() string { return "job-l2tp-failure" }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := &schedulerAdapter{startErr: &model.CodeError{Code: ErrorCodeL2TPNoAddress, Message: "unsafe ppp detail"}}
+	scheduler := NewScheduler(controller, adapter, SchedulerConfig{ConnectTimeout: time.Second, StopTimeout: time.Second})
+	controller.AttachScheduler(scheduler)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go scheduler.Run(ctx)
+
+	assertControllerSuccess(t, controller.Handle(context.Background(), controllerRequest(
+		"l2tp-failure", "node.action", `{"node_id":"node_a","action":"reconnect","expected_revision":3}`,
+	)))
+	waitForNodeStateOneOf(t, controller, "node_a", model.StateBackoff, model.StateFailed)
+	status, exists := controller.schedulerStatus("node_a")
+	if !exists || status.LastError == nil || status.LastError.Code != ErrorCodeL2TPNoAddress ||
+		status.LastError.Message != "L2TP did not receive an IPv4 address" {
+		t.Fatalf("published L2TP failure = %#v exists=%t", status.LastError, exists)
+	}
+}
+
 func TestSchedulerRecoversPersistedQueuedJobAfterControllerRestart(t *testing.T) {
 	desiredStore := &memoryDesiredStore{cfg: controllerConfig()}
 	runtime := &memoryRuntimePersistence{}
@@ -1260,6 +1287,7 @@ type schedulerAdapter struct {
 	startRelease           <-chan struct{}
 	blockUntilContext      bool
 	failNode               string
+	startErr               error
 	runtimeSaves           func() int
 	onStop                 func()
 	active                 int
@@ -1347,6 +1375,9 @@ func (adapter *schedulerAdapter) Start(ctx context.Context, request platform.Nod
 	}
 	if request.Node.ID == adapter.failNode {
 		return platform.Session{NodeID: request.Node.ID, Generation: request.Generation, Protocol: request.Node.Protocol}, errors.New("isolated start failure")
+	}
+	if adapter.startErr != nil {
+		return platform.Session{NodeID: request.Node.ID, Generation: request.Generation, Protocol: request.Node.Protocol}, adapter.startErr
 	}
 	return platform.Session{NodeID: request.Node.ID, Generation: request.Generation, Protocol: request.Node.Protocol, Interface: "l2tp-test", OwnershipDigest: "owned"}, nil
 }

@@ -102,6 +102,76 @@ func TestL2TPStartFailsClosedWhenCompleteUbusInventoryFails(t *testing.T) {
 	}
 }
 
+func TestL2TPStartReturnsSafeSpecificFailureCodes(t *testing.T) {
+	tests := []struct {
+		name    string
+		prepare func(*l2tpRunner) L2TPEndpointResolver
+		code    string
+	}{
+		{
+			name: "endpoint resolution",
+			prepare: func(_ *l2tpRunner) L2TPEndpointResolver {
+				return &l2tpResolver{err: errors.New("resolver included secret detail")}
+			},
+			code: "resolve_failed",
+		},
+		{
+			name: "dynamic interface creation",
+			prepare: func(runner *l2tpRunner) L2TPEndpointResolver {
+				runner.addErr = errors.New("ubus included secret detail")
+				return &l2tpResolver{address: netip.MustParseAddr("203.0.113.17")}
+			},
+			code: "l2tp_interface_failed",
+		},
+		{
+			name: "PPP authentication",
+			prepare: func(runner *l2tpRunner) L2TPEndpointResolver {
+				runner.statusError = "AUTH_FAILED"
+				return &l2tpResolver{address: netip.MustParseAddr("203.0.113.17")}
+			},
+			code: "auth_failed",
+		},
+		{
+			name: "PPP address allocation",
+			prepare: func(runner *l2tpRunner) L2TPEndpointResolver {
+				runner.statusError = "NO_ADDRESS"
+				return &l2tpResolver{address: netip.MustParseAddr("203.0.113.17")}
+			},
+			code: "l2tp_no_address",
+		},
+		{
+			name: "shared L2TP daemon",
+			prepare: func(runner *l2tpRunner) L2TPEndpointResolver {
+				runner.statusError = "XL2TPD_FAILED"
+				return &l2tpResolver{address: netip.MustParseAddr("203.0.113.17")}
+			},
+			code: "l2tp_daemon_failed",
+		},
+		{
+			name: "unknown negotiation failure",
+			prepare: func(runner *l2tpRunner) L2TPEndpointResolver {
+				runner.statusError = "VENDOR_NEGOTIATION_ERROR"
+				return &l2tpResolver{address: netip.MustParseAddr("203.0.113.17")}
+			},
+			code: "l2tp_negotiation_failed",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runner := newL2TPRunner()
+			adapter := newTestL2TPAdapter(t, runner, test.prepare(runner))
+			_, err := adapter.Start(context.Background(), validL2TPRequest())
+			var coded *model.CodeError
+			if !errors.As(err, &coded) || coded.Code != test.code {
+				t.Fatalf("error = %v, want code %q", err, test.code)
+			}
+			if strings.Contains(err.Error(), "secret detail") {
+				t.Fatalf("unsafe internal failure detail escaped: %v", err)
+			}
+		})
+	}
+}
+
 func TestL2TPRejectsUnsafeCredentialsAndForeignInterfaceBeforeMutation(t *testing.T) {
 	for _, mutate := range []func(*platform.NodeRequest){
 		func(request *platform.NodeRequest) { request.Node.Protocol = model.ProtocolSOCKS5 },
@@ -372,6 +442,8 @@ type l2tpRunner struct {
 	removeSticks           bool
 	exactMissingIsNotFound bool
 	listAllErr             error
+	addErr                 error
+	statusError            string
 }
 
 func newL2TPRunner() *l2tpRunner {
@@ -422,6 +494,9 @@ func (runner *l2tpRunner) Run(_ context.Context, name string, args ...string) ([
 		return nil, errors.New("not found")
 	}
 	status := map[string]any{"up": runner.ready, "pending": !runner.ready, "available": true, "dynamic": true, "proto": "l2tp"}
+	if runner.statusError != "" {
+		status["errors"] = []any{map[string]any{"subsystem": "ppp", "code": runner.statusError}}
+	}
 	if runner.ready {
 		status["l3_device"] = runner.l3Device
 		addresses := []any{}
@@ -445,7 +520,7 @@ func (runner *l2tpRunner) RunInput(_ context.Context, input []byte, name string,
 	runner.inputName = name
 	runner.inputArgs = append([]string(nil), args...)
 	runner.input = append([]byte(nil), input...)
-	return nil, nil
+	return nil, runner.addErr
 }
 
 var _ platform.InputCommandRunner = (*l2tpRunner)(nil)

@@ -131,6 +131,29 @@ func TestArtifactStoreExpiresAndCleansUnclaimedFiles(t *testing.T) {
 	}
 }
 
+func TestArtifactClaimUsesPrivateDeadlineInsteadOfDisplayWallClock(t *testing.T) {
+	now := time.Now()
+	store, err := NewArtifactStore(filepath.Join(t.TempDir(), "diagnostics"),
+		WithArtifactClock(func() time.Time { return now }),
+		WithArtifactIDSource(func() string { return "diag-dddddddddddddddd" }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := store.Write(context.Background(), []Entry{{Name: "safe.txt", Data: []byte("x")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.mu.Lock()
+	record := store.records[artifact.ID]
+	record.artifact.ExpiresAt = now.Add(-time.Hour)
+	store.records[artifact.ID] = record
+	store.mu.Unlock()
+	if _, err := store.Claim(artifact.ID); err != nil {
+		t.Fatalf("wall-clock correction invalidated a live artifact: %v", err)
+	}
+}
+
 func TestArtifactStoreRejectsUnboundedEntryCount(t *testing.T) {
 	store, err := NewArtifactStore(filepath.Join(t.TempDir(), "diagnostics"), WithArtifactIDSource(func() string { return "diag-cccccccccccccccc" }))
 	if err != nil {
