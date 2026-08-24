@@ -151,6 +151,7 @@ func TestMachinePublishesSafeSpecificL2TPFailures(t *testing.T) {
 		{ErrorCodeL2TPInterfaceFailed, "L2TP interface creation failed"},
 		{ErrorCodeL2TPDaemonFailed, "L2TP service failed"},
 		{ErrorCodeL2TPNegotiationFailed, "L2TP negotiation failed"},
+		{ErrorCodeL2TPServerNoResponse, "L2TP server did not respond"},
 		{ErrorCodeL2TPNoAddress, "L2TP did not receive an IPv4 address"},
 	}
 	for _, test := range tests {

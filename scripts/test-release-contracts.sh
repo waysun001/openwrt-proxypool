@@ -63,8 +63,8 @@ workflow_jobs() {
 
 require_fixed "$MAKEFILE" 'PKG_BUILD_DEPENDS:=golang/host'
 require_fixed "$MAKEFILE" 'PKG_VERSION:=2.0.0'
-require_fixed "$MAKEFILE" 'PKG_RELEASE:=17'
-require_fixed "$LUCI_MAKEFILE" 'PKG_VERSION:=2.2.2'
+require_fixed "$MAKEFILE" 'PKG_RELEASE:=18'
+require_fixed "$LUCI_MAKEFILE" 'PKG_VERSION:=2.2.3'
 require_fixed "$LUCI_MAKEFILE" 'PKG_RELEASE:=1'
 require_fixed "$THEME_MAKEFILE" 'PKG_VERSION:=2.2.1'
 require_fixed "$THEME_MAKEFILE" 'PKG_RELEASE:=1'

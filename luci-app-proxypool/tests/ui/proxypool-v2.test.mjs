@@ -105,6 +105,7 @@ test('all ordinary runtime labels are Chinese and unknown codes stay hidden', ()
   assert.equal(ui.errorLabel('l2tp_interface_failed'), 'L2TP 接口创建失败');
   assert.equal(ui.errorLabel('l2tp_daemon_failed'), 'L2TP 服务启动失败');
   assert.equal(ui.errorLabel('l2tp_negotiation_failed'), 'L2TP 协商失败');
+  assert.equal(ui.errorLabel('l2tp_server_no_response'), 'L2TP 服务器无响应，请检查节点地址、端口或上游网络');
   assert.equal(ui.errorLabel('l2tp_no_address'), 'L2TP 未获得 IPv4 地址');
   assert.equal(ui.errorLabel('dataplane_failed'), '网络通道建立失败');
   assert.equal(ui.errorLabel('dns_failed'), 'DNS 检测失败');

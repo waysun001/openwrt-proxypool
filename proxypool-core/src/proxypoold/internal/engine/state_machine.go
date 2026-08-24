@@ -32,6 +32,7 @@ const (
 	ErrorCodeL2TPInterfaceFailed   = "l2tp_interface_failed"
 	ErrorCodeL2TPDaemonFailed      = "l2tp_daemon_failed"
 	ErrorCodeL2TPNegotiationFailed = "l2tp_negotiation_failed"
+	ErrorCodeL2TPServerNoResponse  = "l2tp_server_no_response"
 	ErrorCodeL2TPNoAddress         = "l2tp_no_address"
 
 	DefaultStableOnlineWindow = 5 * time.Minute
@@ -766,6 +767,8 @@ func publicErrorForCode(code string) *PublicError {
 		message = "L2TP service failed"
 	case ErrorCodeL2TPNegotiationFailed:
 		message = "L2TP negotiation failed"
+	case ErrorCodeL2TPServerNoResponse:
+		message = "L2TP server did not respond"
 	case ErrorCodeL2TPNoAddress:
 		message = "L2TP did not receive an IPv4 address"
 	case ErrorCodeUnsupported:

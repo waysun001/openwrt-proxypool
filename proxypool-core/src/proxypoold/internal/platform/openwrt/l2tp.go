@@ -24,11 +24,12 @@ import (
 )
 
 const (
-	defaultL2TPManifestPath = "/var/run/proxypool/l2tp-ownership.json"
-	defaultBootIDPath       = "/proc/sys/kernel/random/boot_id"
-	l2tpUbusHelperPath      = "/usr/lib/proxypool/ubus-call-stdin.uc"
-	maxL2TPManifestBytes    = 128 << 10
-	l2tpManifestSchema      = 1
+	defaultL2TPManifestPath       = "/var/run/proxypool/l2tp-ownership.json"
+	defaultBootIDPath             = "/proc/sys/kernel/random/boot_id"
+	l2tpUbusHelperPath            = "/usr/lib/proxypool/ubus-call-stdin.uc"
+	maxL2TPManifestBytes          = 128 << 10
+	l2tpManifestSchema            = 1
+	defaultL2TPNegotiationTimeout = 20 * time.Second
 )
 
 // L2TPEndpointResolver converts a configured hostname to the exact IPv4
@@ -52,6 +53,14 @@ func WithL2TPPollInterval(interval time.Duration) L2TPOption {
 	}
 }
 
+func WithL2TPNegotiationTimeout(timeout time.Duration) L2TPOption {
+	return func(adapter *L2TPAdapter) {
+		if timeout > 0 {
+			adapter.negotiationTimeout = timeout
+		}
+	}
+}
+
 func WithL2TPClock(clock func() time.Time) L2TPOption {
 	return func(adapter *L2TPAdapter) {
 		if clock != nil {
@@ -61,13 +70,14 @@ func WithL2TPClock(clock func() time.Time) L2TPOption {
 }
 
 type L2TPAdapter struct {
-	runner       platform.InputCommandRunner
-	resolver     L2TPEndpointResolver
-	manifestPath string
-	bootIDPath   string
-	pollInterval time.Duration
-	now          func() time.Time
-	manifestMu   sync.Mutex
+	runner             platform.InputCommandRunner
+	resolver           L2TPEndpointResolver
+	manifestPath       string
+	bootIDPath         string
+	pollInterval       time.Duration
+	negotiationTimeout time.Duration
+	now                func() time.Time
+	manifestMu         sync.Mutex
 }
 
 func NewL2TPAdapter(runner platform.InputCommandRunner, resolver L2TPEndpointResolver, manifestPath string, options ...L2TPOption) *L2TPAdapter {
@@ -76,7 +86,8 @@ func NewL2TPAdapter(runner platform.InputCommandRunner, resolver L2TPEndpointRes
 	}
 	adapter := &L2TPAdapter{
 		runner: runner, resolver: resolver, manifestPath: manifestPath,
-		bootIDPath: defaultBootIDPath, pollInterval: 200 * time.Millisecond, now: time.Now,
+		bootIDPath: defaultBootIDPath, pollInterval: 200 * time.Millisecond,
+		negotiationTimeout: defaultL2TPNegotiationTimeout, now: time.Now,
 	}
 	for _, option := range options {
 		if option != nil {
@@ -197,7 +208,7 @@ func (adapter *L2TPAdapter) Stop(ctx context.Context, request platform.NodeReque
 
 func (adapter *L2TPAdapter) validateRequest(request platform.NodeRequest, requireEnabled bool) (string, string, error) {
 	if adapter == nil || adapter.runner == nil || !filepath.IsAbs(adapter.manifestPath) || !filepath.IsAbs(adapter.bootIDPath) ||
-		adapter.pollInterval <= 0 || adapter.now == nil || !safeOwnershipID.MatchString(request.Node.ID) ||
+		adapter.pollInterval <= 0 || adapter.negotiationTimeout <= 0 || adapter.now == nil || !safeOwnershipID.MatchString(request.Node.ID) ||
 		request.Node.Protocol != model.ProtocolL2TP || (requireEnabled && !request.Node.Enabled) || request.Node.PolicyID == 0 || request.Node.PolicyID > 60 ||
 		request.Node.Port == 0 || request.Node.Revision == 0 || request.Generation == 0 || !validL2TPCredential(request.Node.Username, 256) ||
 		!validL2TPCredential(request.Node.Password, 1024) || !validL2TPServer(request.Node.Server) {
@@ -357,6 +368,10 @@ func (adapter *L2TPAdapter) inspectStatus(ctx context.Context, logical string) (
 }
 
 func (adapter *L2TPAdapter) waitReady(ctx context.Context, logical, l3Device string) error {
+	deadline := time.NewTimer(adapter.negotiationTimeout)
+	defer deadline.Stop()
+	poll := time.NewTicker(adapter.pollInterval)
+	defer poll.Stop()
 	for {
 		status, err := adapter.inspectStatus(ctx, logical)
 		if err != nil {
@@ -371,8 +386,12 @@ func (adapter *L2TPAdapter) waitReady(ctx context.Context, logical, l3Device str
 		if status.failureCode != "" {
 			return l2tpFailure(status.failureCode, "L2TP interface reported a connection failure")
 		}
-		if err := waitL2TPPoll(ctx, adapter.pollInterval); err != nil {
-			return fmt.Errorf("L2TP connection deadline exceeded: %w", err)
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("L2TP connection deadline exceeded: %w", ctx.Err())
+		case <-deadline.C:
+			return l2tpFailure("l2tp_server_no_response", "L2TP server did not respond")
+		case <-poll.C:
 		}
 	}
 }

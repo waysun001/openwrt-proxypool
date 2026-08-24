@@ -256,6 +256,30 @@ func TestL2TPTimeoutReturnsOwnedPartialSessionAndStopUsesInterfaceRemove(t *test
 	}
 }
 
+func TestL2TPStartStopsAnUnansweredHandshakeBeforeTheOuterConnectionDeadline(t *testing.T) {
+	runner := newL2TPRunner()
+	adapter := newTestL2TPAdapter(
+		t,
+		runner,
+		&l2tpResolver{address: netip.MustParseAddr("203.0.113.17")},
+		WithL2TPNegotiationTimeout(5*time.Millisecond),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	session, err := adapter.Start(ctx, validL2TPRequest())
+	var coded *model.CodeError
+	if !errors.As(err, &coded) || coded.Code != "l2tp_server_no_response" {
+		t.Fatalf("unanswered handshake error = %v, want l2tp_server_no_response", err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("adapter consumed the outer connection deadline: %v", err)
+	}
+	if session.Interface != "l2tp-ppv20042" || session.OwnershipDigest == "" {
+		t.Fatalf("unanswered handshake lost cleanup ownership: %#v", session)
+	}
+}
+
 func TestL2TPStopTimeoutKeepsOwnershipForRetry(t *testing.T) {
 	runner := newL2TPRunner()
 	runner.ready = true
@@ -405,14 +429,15 @@ func validL2TPRequest() platform.NodeRequest {
 	}
 }
 
-func newTestL2TPAdapter(t *testing.T, runner *l2tpRunner, resolver L2TPEndpointResolver) *L2TPAdapter {
+func newTestL2TPAdapter(t *testing.T, runner *l2tpRunner, resolver L2TPEndpointResolver, options ...L2TPOption) *L2TPAdapter {
 	t.Helper()
 	directory := t.TempDir()
 	boot := filepath.Join(directory, "boot_id")
 	if err := os.WriteFile(boot, []byte("boot-a\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return NewL2TPAdapter(runner, resolver, filepath.Join(directory, "l2tp.json"), WithL2TPBootIDPath(boot), WithL2TPPollInterval(time.Millisecond))
+	base := []L2TPOption{WithL2TPBootIDPath(boot), WithL2TPPollInterval(time.Millisecond)}
+	return NewL2TPAdapter(runner, resolver, filepath.Join(directory, "l2tp.json"), append(base, options...)...)
 }
 
 type l2tpResolver struct {
