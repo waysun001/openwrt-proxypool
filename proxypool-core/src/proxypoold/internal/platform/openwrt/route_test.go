@@ -19,10 +19,10 @@ func TestRouteManagerInstallsAndVerifiesExactOwnedPolicyPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"/sbin/ip -4 -j rule show", "/sbin/ip -4 -j route show table all",
+		"/sbin/ip -4 -j rule show", "/sbin/ip -4 -N -j route show table all",
 		"/sbin/ip -4 route add table 100042 default dev l2tp-ppv20042 proto 186",
 		"/sbin/ip -4 rule add pref 200042 fwmark 0x005a002a/0x00ffffff lookup 100042",
-		"/sbin/ip -4 -j rule show", "/sbin/ip -4 -j route show table all",
+		"/sbin/ip -4 -j rule show", "/sbin/ip -4 -N -j route show table all",
 	}
 	if !reflect.DeepEqual(runner.calls, want) {
 		t.Fatalf("route calls:\n got %q\nwant %q", runner.calls, want)
@@ -46,6 +46,17 @@ func TestRouteManagerTreatsMissingPolicyTableAsAnEmptyFirstInstall(t *testing.T)
 	}
 	if !runner.installed {
 		t.Fatal("first policy route install did not publish the owned route and rule")
+	}
+}
+
+func TestRouteManagerRequestsNumericProtocolJSON(t *testing.T) {
+	runner := newRouteRunner()
+	runner.namedProtocol = true
+	manager := NewRouteManager(runner)
+	lease := platform.RouteLease{NodeID: "node_a", PolicyID: 42, Generation: 9, Interface: "l2tp-ppv20042"}
+
+	if err := manager.Install(context.Background(), lease); err != nil {
+		t.Fatalf("route installed with kernel protocol 186 was rejected after iproute2 named it bgp: %v", err)
 	}
 }
 
@@ -89,6 +100,7 @@ type routeRunner struct {
 	installed          bool
 	failContains       string
 	missingTargetTable bool
+	namedProtocol      bool
 }
 
 func newRouteRunner() *routeRunner { return &routeRunner{rules: "[]", routes: "[]"} }
@@ -115,7 +127,15 @@ func (runner *routeRunner) Run(_ context.Context, name string, args ...string) (
 		return []byte(runner.routes), nil
 	case "/sbin/ip -4 -j route show table all":
 		if runner.installed {
+			if runner.namedProtocol {
+				return []byte(`[{"dst":"default","dev":"l2tp-ppv20042","table":100042,"protocol":"bgp","scope":"link"}]`), nil
+			}
 			return []byte(`[{"dst":"default","gateway":"192.168.1.1","dev":"eth1","table":254,"protocol":"dhcp"},{"dst":"default","dev":"l2tp-ppv20042","table":100042,"protocol":186,"scope":"link"}]`), nil
+		}
+		return []byte(runner.routes), nil
+	case "/sbin/ip -4 -N -j route show table all":
+		if runner.installed {
+			return []byte(`[{"dst":"default","dev":"l2tp-ppv20042","table":"100042","protocol":"186","scope":"253"}]`), nil
 		}
 		return []byte(runner.routes), nil
 	case "/sbin/ip -4 rule add pref 200042 fwmark 0x005a002a/0x00ffffff lookup 100042":

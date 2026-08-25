@@ -125,7 +125,7 @@ func (manager *RouteManager) inspect(ctx context.Context, lease platform.RouteLe
 	if err != nil {
 		return routeState{}, errors.New("policy rule inspection failed")
 	}
-	routesOutput, err := manager.runner.Run(ctx, ipPath, "-4", "-j", "route", "show", "table", "all")
+	routesOutput, err := manager.runner.Run(ctx, ipPath, "-4", "-N", "-j", "route", "show", "table", "all")
 	if err != nil {
 		return routeState{}, errors.New("policy route inspection failed")
 	}
