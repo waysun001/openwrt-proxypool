@@ -8,6 +8,21 @@ trap 'rm -rf "$TEST_TMP"' EXIT HUP INT TERM
 SOURCE="$TEST_TMP/source"
 DESTINATION="$TEST_TMP/staged"
 
+# A Linux checkout is itself a supported input to the full-source firmware
+# build.  Keep the netifd handler executable even when a caller copies the
+# overlay directly instead of first normalizing it through the staging helper.
+case "$(uname -s)" in
+	Linux*)
+		CHECKOUT="$TEST_TMP/repository-checkout/"
+		mkdir -p "$CHECKOUT"
+		git -C "$ROOT" checkout-index --prefix="$CHECKOUT" -- files/lib/netifd/proto/l2tp.sh
+		[ -x "$CHECKOUT/files/lib/netifd/proto/l2tp.sh" ] || {
+			echo 'repository checkout leaves the L2TP netifd protocol handler non-executable' >&2
+			exit 1
+		}
+		;;
+esac
+
 mkdir -p \
 	"$SOURCE/etc/config" \
 	"$SOURCE/etc/uci-defaults" \

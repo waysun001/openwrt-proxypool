@@ -18,7 +18,7 @@ import (
 const (
 	defaultAuthorizationRenewInterval = 8 * time.Second
 	authorizationLeaseLifetime        = 20 * time.Second
-	dnsChannelAttemptTimeout           = 5 * time.Second
+	dnsChannelAttemptTimeout          = 5 * time.Second
 )
 
 type ConfigSource interface {
