@@ -110,6 +110,24 @@ wait_for_factory_stock_config() {
 	return 1
 }
 
+wait_for_factory_wireless_quiescence() {
+	attempt=1
+	stable_observations=0
+	while [ "$attempt" -le 30 ]; do
+		pending=$("$UCI" -q changes wireless 2>/dev/null) || return 1
+		if [ -z "$pending" ]; then
+			stable_observations=$((stable_observations + 1))
+			[ "$stable_observations" -ge 2 ] && return 0
+		else
+			stable_observations=0
+		fi
+		[ "$attempt" -lt 30 ] || return 1
+		"$SLEEP" 1 || return 1
+		attempt=$((attempt + 1))
+	done
+	return 1
+}
+
 # mac80211.hotplug starts during S10 kmodloader, but its worker is asynchronous:
 # it may commit the stock wireless package before this script or shortly after
 # an early `wifi config` has only touched an empty file.  A path-existence test
@@ -117,6 +135,7 @@ wait_for_factory_stock_config() {
 # only on the fresh-file path, and recognize only the exact disabled, open,
 # two-radio stock topology; any user-visible change remains untouched.
 [ -x "$UCI" ] || fail "uci is not executable: $UCI"
+[ -x "$LAN_ISOLATION" ] || fail "LAN isolation helper is not executable: $LAN_ISOLATION"
 FACTORY_CONFIG=0
 if [ "$FRESH_CONFIG" -eq 1 ]; then
 	[ -x "$SLEEP" ] || fail "sleep is not executable: $SLEEP"
@@ -186,9 +205,13 @@ if [ "$FACTORY_CONFIG" -eq 1 ]; then
 	metadata=$("$STAT" -c '%a %u %h' "$WIRELESS_CONFIG" 2>/dev/null) ||
 		fail 'cannot verify committed wireless config permissions'
 	[ "$metadata" = '600 0 1' ] || fail 'committed wireless credentials are not root-only'
+	[ -x "$SLEEP" ] || fail "sleep is not executable: $SLEEP"
+	if ! wait_for_factory_wireless_quiescence; then
+		echo 'ZeanLink wireless default: mac80211 UCI writes did not quiesce; entering fail-closed isolation' >&2
+		"$LAN_ISOLATION" boot || exit $?
+		exit 0
+	fi
 fi
-
-[ -x "$LAN_ISOLATION" ] || fail "LAN isolation helper is not executable: $LAN_ISOLATION"
 
 # /etc/uci-defaults runs at S10, before netifd registers network.wireless.
 # `boot` permits only that cold-start object-absent proof; a runtime configure

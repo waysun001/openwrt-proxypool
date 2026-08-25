@@ -21,6 +21,8 @@ if grep -Eq "encryption=['\"]?none|delete[[:space:]]+wireless\..*\.key" "$WIRELE
 fi
 grep -Fq '/usr/lib/proxypool/lan-isolation.sh' "$WIRELESS_DEFAULT" ||
 	fail 'image wireless default does not delegate to the audited isolation helper'
+grep -Fq '"$LAN_ISOLATION" boot || exit $?' "$WIRELESS_DEFAULT" ||
+	fail 'image wireless default does not explicitly propagate a fallback isolation failure'
 
 TEST_TMP=${TMPDIR:-/tmp}/proxypool-l2-test.$$
 trap 'rm -rf "$TEST_TMP"' EXIT HUP INT TERM
@@ -547,6 +549,33 @@ case "$command" in
 		[ "$#" -eq 1 ] && [ "$1" = wireless ] || exit 2
 		printf 'default:uci:commit\n' >>"$PROXYPOOL_TEST_TRACE"
 		;;
+	changes)
+		[ "$#" -eq 1 ] && [ "$1" = wireless ] || exit 2
+		sequence_file="$config.pending-sequence"
+		if [ -f "$sequence_file" ]; then
+			sequence_state=$(sed -n '1p' "$sequence_file")
+			sed '1d' "$sequence_file" >"$sequence_file.next" || exit 2
+			mv "$sequence_file.next" "$sequence_file" || exit 2
+			case "$sequence_state" in
+				pending) printf "wireless.radio1.disabled='1'\n" ;;
+				empty) : ;;
+				error) exit 1 ;;
+				*) exit 2 ;;
+			esac
+			exit 0
+		fi
+		if [ -f "$config.pending-forever" ]; then
+			printf "wireless.radio1.disabled='1'\n"
+			exit 0
+		fi
+		pending_file="$config.pending-count"
+		[ -f "$pending_file" ] || exit 0
+		pending_count=$(cat "$pending_file")
+		[ "$pending_count" -gt 0 ] || exit 0
+		printf "wireless.radio1.disabled='1'\n"
+		pending_count=$((pending_count - 1))
+		printf '%s\n' "$pending_count" >"$pending_file"
+		;;
 	*) exit 2 ;;
 esac
 EOF_DEFAULT_UCI
@@ -586,7 +615,12 @@ if [ "${PROXYPOOL_TEST_EXPECT_FACTORY_WIFI:-0}" -eq 1 ]; then
 	[ "$(sed -n 's/^wireless.default_radio1.ssid=//p' "$PROXYPOOL_TEST_DEFAULT_CONFIG")" = \
 		"${PROXYPOOL_TEST_EXPECT_SSID1:-ZeanLink-5G}" ] || exit 96
 fi
+if [ "${PROXYPOOL_TEST_REQUIRE_WIRELESS_SETTLED:-0}" -eq 1 ]; then
+	pending_count=$(cat "$PROXYPOOL_TEST_DEFAULT_CONFIG.pending-count")
+	[ "$pending_count" -eq 0 ] || exit 97
+fi
 printf 'default:helper:boot\n' >>"$PROXYPOOL_TEST_TRACE"
+[ "${PROXYPOOL_TEST_DEFAULT_HELPER_FAIL:-0}" -eq 0 ] || exit 98
 EOF_DEFAULT_HELPER
 
 cat >"$BIN/install-wireless" <<'EOF_INSTALL_WIRELESS'
@@ -614,6 +648,21 @@ run_wireless_default() {
 		PROXYPOOL_TEST_TRACE="$TRACE" \
 		"$@" \
 		sh "$WIRELESS_DEFAULT"
+}
+
+run_wireless_default_sourced_in_and() {
+	env \
+		PROXYPOOL_WIRELESS_CONFIG="$DEFAULT_CONFIG" \
+		PROXYPOOL_WIFI="$BIN/default-wifi" \
+		PROXYPOOL_UCI="$BIN/default-uci" \
+		PROXYPOOL_LAN_ISOLATION="$BIN/default-helper" \
+		PROXYPOOL_STAT="$BIN/stat" \
+		PROXYPOOL_CHMOD="$BIN/default-chmod" \
+		PROXYPOOL_TEST_DEFAULT_CONFIG="$DEFAULT_CONFIG" \
+		PROXYPOOL_TEST_DEFAULT_MODE_STATE="$DEFAULT_MODE_STATE" \
+		PROXYPOOL_TEST_TRACE="$TRACE" \
+		"$@" \
+		sh -c '. "$1" && :' sh "$WIRELESS_DEFAULT"
 }
 
 # OpenWrt's stock `wifi config` creates /etc/config/wireless with the caller's
@@ -651,6 +700,7 @@ default:chmod:600
 wifi:sleep
 default:uci:commit
 default:chmod:600
+wifi:sleep
 default:helper:boot'
 [ "$(cat "$TRACE")" = "$expected_delayed_hotplug_trace" ] ||
 	fail 'delayed hotplug stock wireless config used the wrong wait/configure order'
@@ -675,6 +725,7 @@ expected_pretouched_hotplug_trace='default:chmod:600
 wifi:sleep
 default:uci:commit
 default:chmod:600
+wifi:sleep
 default:helper:boot'
 [ "$(cat "$TRACE")" = "$expected_pretouched_hotplug_trace" ] ||
 	fail 'pre-touched delayed hotplug wireless config launched a duplicate detector or used the wrong order'
@@ -699,6 +750,109 @@ default:chmod:600
 default:helper:boot'
 [ "$(cat "$TRACE")" = "$expected_hotplug_trace" ] ||
 	fail 'hotplug-generated stock wireless default was regenerated or configured in the wrong order'
+
+# The mac80211 detector builds each radio through the shared /tmp/.uci savedir.
+# Seeing the final stock section names is not enough proof that the asynchronous
+# writer has quiesced: a pending delta at the factory/helper handoff makes the
+# fail-closed helper persistently quarantine the newly branded APs.  Require two
+# consecutive empty observations before the helper is allowed to run.
+rm -f "$DEFAULT_CONFIG" "$DEFAULT_MODE_STATE" "$DEFAULT_CONFIG.pending-count"
+PROXYPOOL_TEST_DEFAULT_CONFIG="$DEFAULT_CONFIG" \
+	PROXYPOOL_TEST_DEFAULT_MODE_STATE="$DEFAULT_MODE_STATE" \
+	PROXYPOOL_TEST_TRACE="$TRACE" \
+	"$BIN/default-wifi" config
+printf '2\n' >"$DEFAULT_CONFIG.pending-count"
+: >"$TRACE"
+run_wireless_default \
+	PROXYPOOL_WIRELESS_SLEEP="$BIN/sleep" \
+	PROXYPOOL_TEST_EXPECT_FACTORY_WIFI=1 \
+	PROXYPOOL_TEST_REQUIRE_WIRELESS_SETTLED=1 ||
+	fail 'factory wireless helper ran before mac80211 UCI writes quiesced'
+expected_pending_hotplug_trace='default:chmod:600
+default:uci:commit
+default:chmod:600
+wifi:sleep
+wifi:sleep
+wifi:sleep
+default:helper:boot'
+[ "$(cat "$TRACE")" = "$expected_pending_hotplug_trace" ] ||
+	fail 'factory wireless quiescence did not require two consecutive empty UCI observations'
+rm -f "$DEFAULT_CONFIG.pending-count"
+
+# An empty observation followed by a new delta must reset the debounce window;
+# the helper may run only after two new consecutive empty observations.
+rm -f "$DEFAULT_CONFIG" "$DEFAULT_MODE_STATE"
+PROXYPOOL_TEST_DEFAULT_CONFIG="$DEFAULT_CONFIG" \
+	PROXYPOOL_TEST_DEFAULT_MODE_STATE="$DEFAULT_MODE_STATE" \
+	PROXYPOOL_TEST_TRACE="$TRACE" \
+	"$BIN/default-wifi" config
+printf 'empty\npending\nempty\nempty\n' >"$DEFAULT_CONFIG.pending-sequence"
+: >"$TRACE"
+run_wireless_default PROXYPOOL_WIRELESS_SLEEP="$BIN/sleep" ||
+	fail 'factory wireless quiescence rejected a recoverable pending sequence'
+expected_flapping_hotplug_trace='default:chmod:600
+default:uci:commit
+default:chmod:600
+wifi:sleep
+wifi:sleep
+wifi:sleep
+default:helper:boot'
+[ "$(cat "$TRACE")" = "$expected_flapping_hotplug_trace" ] ||
+	fail 'factory wireless quiescence did not reset after a new pending delta'
+rm -f "$DEFAULT_CONFIG.pending-sequence"
+
+# A bounded wait failure must never exit after enabling the AP but before the
+# fail-closed helper handoff.  Persistent deltas and an unreadable UCI savedir
+# both have to enter that same helper path.
+rm -f "$DEFAULT_CONFIG" "$DEFAULT_MODE_STATE"
+PROXYPOOL_TEST_DEFAULT_CONFIG="$DEFAULT_CONFIG" \
+	PROXYPOOL_TEST_DEFAULT_MODE_STATE="$DEFAULT_MODE_STATE" \
+	PROXYPOOL_TEST_TRACE="$TRACE" \
+	"$BIN/default-wifi" config
+: >"$DEFAULT_CONFIG.pending-forever"
+: >"$TRACE"
+run_wireless_default PROXYPOOL_WIRELESS_SLEEP="$BIN/sleep" ||
+	fail 'persistent factory wireless delta bypassed the fail-closed helper'
+[ "$(grep -Fxc 'wifi:sleep' "$TRACE")" -eq 29 ] ||
+	fail 'persistent factory wireless delta did not use the bounded observation window'
+[ "$(tail -n 1 "$TRACE")" = 'default:helper:boot' ] ||
+	fail 'persistent factory wireless delta exited before the fail-closed helper'
+rm -f "$DEFAULT_CONFIG.pending-forever"
+
+# OpenWrt sources each uci-default as the left side of `&& rm`.  POSIX shells
+# may suppress errexit throughout that sourced command, so the fallback must
+# explicitly propagate a failing helper instead of reaching `exit 0`.
+rm -f "$DEFAULT_CONFIG" "$DEFAULT_MODE_STATE"
+PROXYPOOL_TEST_DEFAULT_CONFIG="$DEFAULT_CONFIG" \
+	PROXYPOOL_TEST_DEFAULT_MODE_STATE="$DEFAULT_MODE_STATE" \
+	PROXYPOOL_TEST_TRACE="$TRACE" \
+	"$BIN/default-wifi" config
+: >"$DEFAULT_CONFIG.pending-forever"
+: >"$TRACE"
+if run_wireless_default_sourced_in_and \
+	PROXYPOOL_WIRELESS_SLEEP="$BIN/sleep" \
+	PROXYPOOL_TEST_DEFAULT_HELPER_FAIL=1; then
+	fail 'factory wireless fallback swallowed a failing isolation helper'
+fi
+[ "$(tail -n 1 "$TRACE")" = 'default:helper:boot' ] ||
+	fail 'factory wireless fallback did not attempt the failing isolation helper'
+rm -f "$DEFAULT_CONFIG.pending-forever"
+
+rm -f "$DEFAULT_CONFIG" "$DEFAULT_MODE_STATE"
+PROXYPOOL_TEST_DEFAULT_CONFIG="$DEFAULT_CONFIG" \
+	PROXYPOOL_TEST_DEFAULT_MODE_STATE="$DEFAULT_MODE_STATE" \
+	PROXYPOOL_TEST_TRACE="$TRACE" \
+	"$BIN/default-wifi" config
+printf 'error\n' >"$DEFAULT_CONFIG.pending-sequence"
+: >"$TRACE"
+run_wireless_default PROXYPOOL_WIRELESS_SLEEP="$BIN/sleep" ||
+	fail 'factory wireless UCI read error bypassed the fail-closed helper'
+[ "$(cat "$TRACE")" = 'default:chmod:600
+default:uci:commit
+default:chmod:600
+default:helper:boot' ] ||
+	fail 'factory wireless UCI read error did not immediately enter the fail-closed helper'
+rm -f "$DEFAULT_CONFIG.pending-sequence"
 
 # Radio numbering is assigned from runtime phy enumeration and is not a stable
 # band identity.  A stock image with the two bands enumerated in the opposite
