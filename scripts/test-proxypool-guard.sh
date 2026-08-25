@@ -221,10 +221,13 @@ reject_regex "$GUARD_NORM" '^table (inet proxypool|ip proxypool_nat)[ ;{]' 'guar
 	fail 'inet and bridge guardians must each have a priority +10 forward base chain'
 [ "$(grep -Fxc 'type filter hook prerouting priority -310; policy accept;' "$GUARD_NORM")" -eq 1 ] ||
 	fail 'guardian must have exactly one br-lan mark scrub chain at priority -310'
+[ "$(grep -Fxc 'type nat hook postrouting priority 100; policy accept;' "$GUARD_NORM")" -eq 1 ] ||
+	fail 'guardian must have exactly one bounded source-NAT chain at priority +100'
 
 extract_chain "$GUARD_NORM" guard_prerouting "$TEST_TMP/guard-prerouting.block"
 extract_chain "$GUARD_NORM" guard_input "$TEST_TMP/guard-input.block"
 extract_chain "$GUARD_NORM" guard_forward "$TEST_TMP/guard-forward.block"
+extract_chain "$GUARD_NORM" guard_postrouting "$TEST_TMP/guard-postrouting.block"
 extract_chain "$GUARD_NORM" guard_l2_forward "$TEST_TMP/guard-l2-forward.block"
 assert_chain_shape "$TEST_TMP/guard-prerouting.block" 2 0 guard_prerouting
 assert_chain_shape "$TEST_TMP/guard-input.block" 10 8 guard_input
@@ -275,6 +278,13 @@ done
 
 MARK_MASK='0x00ff0000'
 MAGIC="meta mark & $MARK_MASK == 0x005a0000"
+require_rule "$TEST_TMP/guard-postrouting.block" 'L2TP source NAT is not limited to the exact admitted IPv4/output tuple' \
+	'meta nfproto ipv4' "$MAGIC" 'meta l4proto tcp' \
+	'ip saddr . oifname @v2_l2tp_return_paths' 'masquerade'
+[ "$(grep -Ec '(^|[[:space:]])masquerade([[:space:]]|$)' "$TEST_TMP/guard-postrouting.block")" -eq 1 ] ||
+	fail 'guardian source NAT must contain exactly one masquerade verdict'
+reject_regex "$TEST_TMP/guard-postrouting.block" 'oifname[[:space:]]+"[^\"]*[+*][^\"]*"' \
+	'guardian source NAT contains a wildcard output-interface match'
 require_rule "$TEST_TMP/guard-prerouting.block" 'br-lan prerouting does not clear the complete ProxyPool policy mark' \
 	'iifname "br-lan"' 'meta mark set meta mark & 0xff000000'
 require_rule "$TEST_TMP/guard-prerouting.block" 'br-lan prerouting does not derive its mark from the admitted MAC+IPv4 map' \

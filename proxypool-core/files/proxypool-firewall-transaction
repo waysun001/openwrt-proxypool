@@ -828,6 +828,10 @@ verify_guard_inet_runtime() {
 			expected["guard_prerouting",3]="iifname \"br-lan\" meta mark set ether saddr . ip saddr map @v2_policy_marks"
 			maximum["guard_prerouting"]=3
 
+			expected["guard_postrouting",1]="type nat hook postrouting priority srcnat; policy accept;"
+			expected["guard_postrouting",2]="meta mark & 0x00ff0000 == 0x005a0000 meta l4proto tcp ip saddr . oifname @v2_l2tp_return_paths masquerade"
+			maximum["guard_postrouting"]=2
+
 			expected["guard_input",1]="type filter hook input priority filter + 10; policy drop;"
 			expected["guard_input",2]="iifname \"br-lan\" meta nfproto ipv4 udp sport 68 udp dport 67 accept"
 			expected["guard_input",3]="iifname \"br-lan\" ip daddr 192.168.9.1 tcp dport { 80, 443 } accept"

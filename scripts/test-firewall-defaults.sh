@@ -1445,6 +1445,10 @@ RUNTIME_GUARD_BODY
 		iifname "br-lan" meta mark set meta mark & 0xff000000
 		iifname "br-lan" meta mark set ether saddr . ip saddr map @v2_policy_marks
 	}
+	chain guard_postrouting {
+		type nat hook postrouting priority srcnat; policy accept;
+		meta mark & 0x00ff0000 == 0x005a0000 meta l4proto tcp ip saddr . oifname @v2_l2tp_return_paths masquerade
+	}
 	chain guard_input {
 		type filter hook input priority filter + 10; policy drop;
 		iifname "br-lan" meta nfproto ipv4 udp sport 68 udp dport 67 accept
