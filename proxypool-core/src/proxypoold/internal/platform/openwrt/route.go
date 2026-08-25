@@ -125,7 +125,7 @@ func (manager *RouteManager) inspect(ctx context.Context, lease platform.RouteLe
 	if err != nil {
 		return routeState{}, errors.New("policy rule inspection failed")
 	}
-	routesOutput, err := manager.runner.Run(ctx, ipPath, "-4", "-j", "route", "show", "table", fmt.Sprint(policyTable(lease.PolicyID)))
+	routesOutput, err := manager.runner.Run(ctx, ipPath, "-4", "-j", "route", "show", "table", "all")
 	if err != nil {
 		return routeState{}, errors.New("policy route inspection failed")
 	}
@@ -187,12 +187,16 @@ func inspectRoutes(contents []byte, lease platform.RouteLease) (exact, foreign b
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return false, false, errors.New("policy route output is invalid")
 	}
+	wantTable := uint64(policyTable(lease.PolicyID))
 	for _, route := range routes {
 		destination, _ := route["dst"].(string)
 		device, _ := route["dev"].(string)
 		table, tableSet := jsonUint(route["table"])
 		protocol, protocolSet := jsonUint(route["protocol"])
-		isExact := destination == "default" && device == lease.Interface && (!tableSet || table == uint64(policyTable(lease.PolicyID))) && protocolSet && protocol == uint64(proxypoolRouteProto)
+		if !tableSet || table != wantTable {
+			continue
+		}
+		isExact := destination == "default" && device == lease.Interface && protocolSet && protocol == uint64(proxypoolRouteProto)
 		if isExact && !exact {
 			exact = true
 		} else {
