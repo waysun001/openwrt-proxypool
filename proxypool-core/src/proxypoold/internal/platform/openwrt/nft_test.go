@@ -35,7 +35,7 @@ func TestAuthorizerPublishesExactExpiringL2TPTupleAndReadsItBack(t *testing.T) {
 	}
 	transaction := inputs[1]
 	for _, exact := range []string{
-		"add element inet proxypool_guard v2_policy_marks { aa:bb:cc:dd:ee:01 . 192.168.9.22 : 0x005a002a timeout 20s }",
+		"add element inet proxypool_guard v2_policy_marks { aa:bb:cc:dd:ee:01 . 192.168.9.22 timeout 20s : 0x005a002a }",
 		"add element inet proxypool_guard v2_dns_clients { aa:bb:cc:dd:ee:01 . 192.168.9.22 timeout 20s }",
 		`add element inet proxypool_guard v2_l2tp_paths { aa:bb:cc:dd:ee:01 . 192.168.9.22 . "l2tp-ppv20042" timeout 20s }`,
 		`add element inet proxypool_guard v2_l2tp_return_paths { 192.168.9.22 . "l2tp-ppv20042" timeout 20s }`,

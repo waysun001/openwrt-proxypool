@@ -189,11 +189,11 @@ func (authorizer *Authorizer) renderAuthorizationPublish(ctx context.Context, le
 		if authorizer.elementExists(ctx, element) {
 			lines = append(lines, fmt.Sprintf("delete element inet proxypool_guard %s { %s }", element.name, element.key))
 		}
-		value := ""
+		elementText := element.key + " timeout " + authorizationTTL
 		if element.value != "" {
-			value = " : " + element.value
+			elementText += " : " + element.value
 		}
-		lines = append(lines, fmt.Sprintf("add element inet proxypool_guard %s { %s%s timeout %s }", element.name, element.key, value, authorizationTTL))
+		lines = append(lines, fmt.Sprintf("add element inet proxypool_guard %s { %s }", element.name, elementText))
 	}
 	return []byte(strings.Join(append(lines, ""), "\n"))
 }
