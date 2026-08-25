@@ -129,6 +129,31 @@ func TestDNSGateFailsClosedBeforePublishingBinding(t *testing.T) {
 	}
 }
 
+func TestDNSFailoverBoundsAStalledPrimaryAndUsesTheBackup(t *testing.T) {
+	query := dnsPreflightQuery()
+	primary := dnsproxy.NodeChannelFunc(func(ctx context.Context, _ []byte) ([]byte, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	backupCalls := 0
+	backup := dnsproxy.NodeChannelFunc(func(_ context.Context, got []byte) ([]byte, error) {
+		backupCalls++
+		response := append([]byte(nil), got...)
+		response[2] |= 0x80
+		return response, nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	response, err := (dnsFailover{primary, backup}).Resolve(ctx, query)
+	if err != nil {
+		t.Fatalf("DNS failover did not reach the backup: %v", err)
+	}
+	if backupCalls != 1 || len(response) != len(query) || response[2]&0x80 == 0 {
+		t.Fatalf("backup result = calls %d response %x", backupCalls, response)
+	}
+}
+
 func TestAuthorizationGateRenewsLeaseAndRevokesAfterFailureOrClose(t *testing.T) {
 	source := &liveConfigSource{config: liveTestConfig()}
 	authorizer := &liveAuthorizer{}

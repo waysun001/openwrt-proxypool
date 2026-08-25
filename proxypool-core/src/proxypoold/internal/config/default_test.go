@@ -61,6 +61,16 @@ func TestImageBuilderDefaultQueuesColdV2ActivationFromStrictV1Baseline(t *testin
 	if desired.Global.RuntimeBackend != "v2_shadow" || len(desired.Nodes) != 0 || len(desired.Devices) != 0 {
 		t.Fatalf("ImageBuilder default must be empty V2 shadow: backend=%q nodes=%d devices=%d", desired.Global.RuntimeBackend, len(desired.Nodes), len(desired.Devices))
 	}
+	if len(desired.Global.DoHEndpoints) != 2 {
+		t.Fatalf("ImageBuilder default DNS endpoint count = %d, want 2", len(desired.Global.DoHEndpoints))
+	}
+	primary, backup := desired.Global.DoHEndpoints[0], desired.Global.DoHEndpoints[1]
+	if primary.URL != "https://dns.alidns.com/dns-query" || primary.BootstrapIP != "223.5.5.5" || primary.ServerName != "dns.alidns.com" {
+		t.Fatalf("ImageBuilder primary DNS endpoint = %#v", primary)
+	}
+	if backup.URL != "https://cloudflare-dns.com/dns-query" || backup.BootstrapIP != "1.1.1.1" || backup.ServerName != "cloudflare-dns.com" {
+		t.Fatalf("ImageBuilder backup DNS endpoint = %#v", backup)
+	}
 	for _, endpoint := range desired.Global.DoHEndpoints {
 		if strings.Contains(endpoint.URL, ".example") || strings.Contains(endpoint.ServerName, ".example") {
 			t.Fatalf("documentation-only DNS hostname shipped as operational default: %#v", endpoint)

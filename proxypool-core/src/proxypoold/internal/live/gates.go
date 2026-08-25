@@ -18,6 +18,7 @@ import (
 const (
 	defaultAuthorizationRenewInterval = 8 * time.Second
 	authorizationLeaseLifetime        = 20 * time.Second
+	dnsChannelAttemptTimeout           = 5 * time.Second
 )
 
 type ConfigSource interface {
@@ -215,8 +216,20 @@ func (gate *DNSGate) renderBindingsLocked() (map[netip.Addr]dnsproxy.NodeChannel
 type dnsFailover []dnsproxy.NodeChannel
 
 func (channels dnsFailover) Resolve(ctx context.Context, query []byte) ([]byte, error) {
-	for _, channel := range channels {
-		response, err := channel.Resolve(ctx, query)
+	for index, channel := range channels {
+		attemptTimeout := dnsChannelAttemptTimeout
+		if deadline, ok := ctx.Deadline(); ok {
+			fairShare := time.Until(deadline) / time.Duration(len(channels)-index)
+			if fairShare < attemptTimeout {
+				attemptTimeout = fairShare
+			}
+		}
+		if attemptTimeout <= 0 {
+			break
+		}
+		attemptCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
+		response, err := channel.Resolve(attemptCtx, query)
+		cancel()
 		if err == nil {
 			return response, nil
 		}
