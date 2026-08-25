@@ -168,6 +168,18 @@ func TestMachinePublishesSafeSpecificL2TPFailures(t *testing.T) {
 	}
 }
 
+func TestMachinePublishesSafeRouteFailure(t *testing.T) {
+	machine := NewMachine(NewRetryPolicy(rand.NewSource(32)))
+	applyMachineEvent(t, machine, "node-a", 1, EventEnable, nil, stateTestEpoch)
+	applyMachineEvent(t, machine, "node-a", 1, EventStart, nil, stateTestEpoch.Add(time.Second))
+	applyMachineEvent(t, machine, "node-a", 1, EventStarted, nil, stateTestEpoch.Add(2*time.Second))
+	status := applyMachineEvent(t, machine, "node-a", 1, EventFailure,
+		&model.CodeError{Code: "route_failed", Message: "raw route command detail"}, stateTestEpoch.Add(3*time.Second))
+	if status.LastError == nil || status.LastError.Code != "route_failed" || status.LastError.Message != "policy route validation failed" {
+		t.Fatalf("LastError = %#v, want sanitized route failure", status.LastError)
+	}
+}
+
 func TestMachineTimeoutEntersBackoff(t *testing.T) {
 	timedOutAt := stateTestEpoch.Add(2 * time.Second)
 	clock := &manualClock{wall: timedOutAt}

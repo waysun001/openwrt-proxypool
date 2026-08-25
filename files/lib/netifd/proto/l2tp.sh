@@ -7,14 +7,32 @@
 [ -n "${INCLUDE_ONLY:-}" ] || [ -x /usr/sbin/xl2tpd ] || exit 0
 
 PROXYPOOL_L2TP_CONTROL="${PROXYPOOL_L2TP_CONTROL:-/usr/sbin/xl2tpd-control}"
+PROXYPOOL_L2TP_CONTROL_PIPE="${PROXYPOOL_L2TP_CONTROL_PIPE:-/var/run/xl2tpd/l2tp-control}"
+PROXYPOOL_L2TP_RUNTIME_DIR="${PROXYPOOL_L2TP_RUNTIME_DIR:-/var/run/proxypool/l2tp-netifd}"
 PROXYPOOL_L2TP_TIMEOUT="${PROXYPOOL_L2TP_TIMEOUT:-/usr/bin/timeout}"
 PROXYPOOL_L2TP_SLEEP="${PROXYPOOL_L2TP_SLEEP:-/bin/sleep}"
 PROXYPOOL_L2TP_KILL="${PROXYPOOL_L2TP_KILL:-/bin/kill}"
 PROXYPOOL_L2TP_SYS_CLASS_NET="${PROXYPOOL_L2TP_SYS_CLASS_NET:-/sys/class/net}"
 PROXYPOOL_L2TP_PROC="${PROXYPOOL_L2TP_PROC:-/proc}"
+if [ -n "${INCLUDE_ONLY:-}" ]; then
+	PROXYPOOL_L2TP_RUNTIME_UID="${PROXYPOOL_L2TP_RUNTIME_UID:-0}"
+	PROXYPOOL_L2TP_RUNTIME_GID="${PROXYPOOL_L2TP_RUNTIME_GID:-0}"
+else
+	PROXYPOOL_L2TP_RUNTIME_UID=0
+	PROXYPOOL_L2TP_RUNTIME_GID=0
+fi
 
 proxypool_l2tp_control() {
 	"$PROXYPOOL_L2TP_TIMEOUT" -s KILL 5 "$PROXYPOOL_L2TP_CONTROL" "$@"
+}
+
+proxypool_l2tp_private_path() {
+	local expected_mode="$1"
+	local path="$2"
+	set -- $(/bin/ls -ldn "$path" 2>/dev/null) || return 1
+	[ "$1" = "$expected_mode" ] &&
+		[ "$3" = "$PROXYPOOL_L2TP_RUNTIME_UID" ] &&
+		[ "$4" = "$PROXYPOOL_L2TP_RUNTIME_GID" ]
 }
 
 proxypool_l2tp_wait_device_removed() {
@@ -99,7 +117,8 @@ proto_l2tp_init_config() {
 
 proto_l2tp_setup() {
 	local interface="$1"
-	local optfile="/tmp/l2tp/options.${interface}"
+	local optfile="$PROXYPOOL_L2TP_RUNTIME_DIR/options.${interface}"
+	local statusfile="$PROXYPOOL_L2TP_RUNTIME_DIR/status.${interface}.log"
 	local ip serv_addr server host
 	json_get_var server server
 	host="${server%:*}"
@@ -114,7 +133,7 @@ proto_l2tp_setup() {
 		exit 1
 	}
 
-	if [ ! -p /var/run/xl2tpd/l2tp-control ] || [ -z "$(pidof xl2tpd)" ]; then
+	if [ ! -p "$PROXYPOOL_L2TP_CONTROL_PIPE" ] || [ -z "$(pidof xl2tpd)" ]; then
 		"$PROXYPOOL_L2TP_TIMEOUT" -s KILL 10 /etc/init.d/xl2tpd restart || {
 			echo "Cannot start xl2tpd." >&2
 			proto_notify_error "$interface" XL2TPD_FAILED
@@ -122,7 +141,7 @@ proto_l2tp_setup() {
 			exit 1
 		}
 		local wait_timeout=0
-		while [ ! -p /var/run/xl2tpd/l2tp-control ]; do
+		while [ ! -p "$PROXYPOOL_L2TP_CONTROL_PIPE" ]; do
 			wait_timeout=$((wait_timeout + 1))
 			[ "$wait_timeout" -gt 5 ] && {
 				echo "Cannot find xl2tpd control file." >&2
@@ -143,10 +162,25 @@ proto_l2tp_setup() {
 	username="${username:+user \"$username\" password \"$password\"}"
 	ipv6="${ipv6:++ipv6}"
 	mtu="${mtu:+mtu $mtu mru $mtu}"
-	mkdir -p /tmp/l2tp
-	cat <<EOF >"$optfile"
+	if ! (
+		umask 077
+		mkdir -p "$PROXYPOOL_L2TP_RUNTIME_DIR" || exit 1
+		[ -d "$PROXYPOOL_L2TP_RUNTIME_DIR" ] && [ ! -L "$PROXYPOOL_L2TP_RUNTIME_DIR" ] || exit 1
+		if [ "$PROXYPOOL_L2TP_RUNTIME_UID:$PROXYPOOL_L2TP_RUNTIME_GID" = 0:0 ]; then
+			chown 0:0 "$PROXYPOOL_L2TP_RUNTIME_DIR" || exit 1
+		fi
+		chmod 700 "$PROXYPOOL_L2TP_RUNTIME_DIR" || exit 1
+		proxypool_l2tp_private_path drwx------ "$PROXYPOOL_L2TP_RUNTIME_DIR" || exit 1
+		rm -f "$optfile" "$statusfile" || exit 1
+		: >"$optfile" || exit 1
+		: >"$statusfile" || exit 1
+		chmod 600 "$optfile" "$statusfile" || exit 1
+		proxypool_l2tp_private_path -rw------- "$optfile" || exit 1
+		proxypool_l2tp_private_path -rw------- "$statusfile" || exit 1
+		cat <<EOF >"$optfile"
 usepeerdns
 nodefaultroute
+logfile "$statusfile"
 ipparam "$interface"
 ifname "l2tp-$interface"
 ip-up-script /lib/netifd/ppp-up
@@ -160,6 +194,15 @@ $ipv6
 $mtu
 $pppd_options
 EOF
+		[ "$?" -eq 0 ] || exit 1
+		proxypool_l2tp_private_path -rw------- "$optfile" || exit 1
+		proxypool_l2tp_private_path -rw------- "$statusfile" || exit 1
+	); then
+		echo "L2TP runtime directory is unsafe." >&2
+		proto_notify_error "$interface" INVALID_CONFIG
+		proto_setup_failed "$interface"
+		exit 1
+	fi
 	proxypool_l2tp_control add-lac "l2tp-${interface}" "pppoptfile=${optfile}" "lns=${server}" || {
 		echo "xl2tpd-control: Add l2tp-$interface failed" >&2
 		proto_notify_error "$interface" INTERFACE_FAILED
@@ -178,9 +221,10 @@ EOF
 proto_l2tp_teardown() {
 	local interface="$1"
 	local device="l2tp-${interface}"
-	local optfile="/tmp/l2tp/options.${interface}"
-	rm -f "$optfile"
-	if [ -p /var/run/xl2tpd/l2tp-control ]; then
+	local optfile="$PROXYPOOL_L2TP_RUNTIME_DIR/options.${interface}"
+	local statusfile="$PROXYPOOL_L2TP_RUNTIME_DIR/status.${interface}.log"
+	rm -f "$optfile" "$statusfile"
+	if [ -p "$PROXYPOOL_L2TP_CONTROL_PIPE" ]; then
 		proxypool_l2tp_control disconnect-lac "l2tp-${interface}" >/dev/null 2>&1 || true
 		proxypool_l2tp_control remove-lac "l2tp-${interface}" >/dev/null 2>&1 || true
 	fi

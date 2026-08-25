@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -25,11 +26,13 @@ import (
 
 const (
 	defaultL2TPManifestPath       = "/var/run/proxypool/l2tp-ownership.json"
+	defaultL2TPStatusDir          = "/var/run/proxypool/l2tp-netifd"
 	defaultBootIDPath             = "/proc/sys/kernel/random/boot_id"
 	l2tpUbusHelperPath            = "/usr/lib/proxypool/ubus-call-stdin.uc"
 	maxL2TPManifestBytes          = 128 << 10
 	l2tpManifestSchema            = 1
 	defaultL2TPNegotiationTimeout = 20 * time.Second
+	maxL2TPStatusLogBytes         = 128 << 10
 )
 
 // L2TPEndpointResolver converts a configured hostname to the exact IPv4
@@ -386,6 +389,9 @@ func (adapter *L2TPAdapter) waitReady(ctx context.Context, logical, l3Device str
 		if status.failureCode != "" {
 			return l2tpFailure(status.failureCode, "L2TP interface reported a connection failure")
 		}
+		if failureCode := adapter.inspectPPPFailure(ctx, logical); failureCode != "" {
+			return l2tpFailure(failureCode, "L2TP PPP negotiation reported a connection failure")
+		}
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("L2TP connection deadline exceeded: %w", ctx.Err())
@@ -394,6 +400,45 @@ func (adapter *L2TPAdapter) waitReady(ctx context.Context, logical, l3Device str
 		case <-poll.C:
 		}
 	}
+}
+
+func (adapter *L2TPAdapter) inspectPPPFailure(ctx context.Context, logical string) string {
+	contents, err := adapter.runner.Run(
+		ctx,
+		"/usr/bin/head",
+		"-c",
+		strconv.Itoa(maxL2TPStatusLogBytes+1),
+		defaultL2TPStatusDir+"/status."+logical+".log",
+	)
+	if err != nil || len(contents) == 0 {
+		return ""
+	}
+	return classifyPPPFailure(contents)
+}
+
+func classifyPPPFailure(contents []byte) string {
+	if len(contents) > maxL2TPStatusLogBytes {
+		return "l2tp_negotiation_failed"
+	}
+	lower := bytes.ToLower(contents)
+	for _, marker := range [][]byte{
+		[]byte("ms-chap authentication failed"),
+		[]byte("chap authentication failed"),
+		[]byte("authentication failed"),
+	} {
+		if bytes.Contains(lower, marker) {
+			return "auth_failed"
+		}
+	}
+	for _, marker := range [][]byte{
+		[]byte("could not determine remote ip address"),
+		[]byte("ipcp: timeout sending config-requests"),
+	} {
+		if bytes.Contains(lower, marker) {
+			return "l2tp_no_address"
+		}
+	}
+	return ""
 }
 
 func (adapter *L2TPAdapter) waitRemoved(ctx context.Context, logical string) error {

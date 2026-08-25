@@ -40,11 +40,11 @@ func (gate *RouteGate) Open(ctx context.Context, request platform.NodeRequest, s
 		return errors.New("live route gate is invalid")
 	}
 	if err := gate.manager.Install(ctx, lease); err != nil {
-		return errors.New("live route installation failed")
+		return &model.CodeError{Code: "route_failed", Message: "live route installation failed"}
 	}
 	if err := gate.manager.Verify(ctx, lease); err != nil {
 		_ = gate.manager.Remove(context.Background(), lease)
-		return errors.New("live route verification failed")
+		return &model.CodeError{Code: "route_failed", Message: "live route verification failed"}
 	}
 	return nil
 }
@@ -108,15 +108,15 @@ func NewDNSGate(source ConfigSource, server DNSBindingServer, factory DNSChannel
 
 func (gate *DNSGate) Open(ctx context.Context, request platform.NodeRequest, session platform.Session) error {
 	if gate == nil || gate.source == nil || gate.server == nil || gate.factory == nil || !exactLiveSession(request, session) {
-		return errors.New("live DNS gate is invalid")
+		return &model.CodeError{Code: "dns_failed", Message: "live DNS gate is invalid"}
 	}
 	desired, err := gate.source.Load()
 	if err != nil {
-		return errors.New("live DNS configuration is unavailable")
+		return &model.CodeError{Code: "dns_failed", Message: "live DNS configuration is unavailable"}
 	}
 	node, devices, err := exactDesiredNode(desired, request)
 	if err != nil || len(desired.Global.DoHEndpoints) == 0 {
-		return errors.New("live DNS configuration is stale")
+		return &model.CodeError{Code: "dns_failed", Message: "live DNS configuration is stale"}
 	}
 	channels := make([]dnsproxy.NodeChannel, 0, len(desired.Global.DoHEndpoints))
 	for _, endpoint := range desired.Global.DoHEndpoints {
@@ -127,11 +127,11 @@ func (gate *DNSGate) Open(ctx context.Context, request platform.NodeRequest, ses
 		channels = append(channels, channel)
 	}
 	if len(channels) == 0 {
-		return errors.New("live DNS channel is unavailable")
+		return &model.CodeError{Code: "dns_failed", Message: "live DNS channel is unavailable"}
 	}
 	channel := dnsFailover(channels)
 	if _, err := channel.Resolve(ctx, dnsPreflightQuery()); err != nil {
-		return errors.New("live DNS preflight failed")
+		return &model.CodeError{Code: "dns_failed", Message: "live DNS preflight failed"}
 	}
 	addresses := make([]netip.Addr, 0, len(devices))
 	for _, device := range devices {

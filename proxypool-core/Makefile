@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=proxypool-core
 PKG_VERSION:=2.0.0
-PKG_RELEASE:=19
+PKG_RELEASE:=20
 
 PKG_MAINTAINER:=ProxyPool maintainers
 PKG_LICENSE:=MIT

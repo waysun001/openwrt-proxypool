@@ -101,7 +101,7 @@ test('all ordinary runtime labels are Chinese and unknown codes stay hidden', ()
   assert.equal(ui.stateLabel('job', 'running'), '执行中');
   assert.equal(ui.stateLabel('diagnostic', 'ready'), '可下载');
   assert.equal(ui.stateLabel('node', 'future_state'), '未知状态');
-  assert.equal(ui.errorLabel('auth_failed'), '节点认证失败');
+  assert.equal(ui.errorLabel('auth_failed'), '节点账号或密码错误');
   assert.equal(ui.errorLabel('l2tp_interface_failed'), 'L2TP 接口创建失败');
   assert.equal(ui.errorLabel('l2tp_daemon_failed'), 'L2TP 服务启动失败');
   assert.equal(ui.errorLabel('l2tp_negotiation_failed'), 'L2TP 协商失败');
@@ -109,6 +109,7 @@ test('all ordinary runtime labels are Chinese and unknown codes stay hidden', ()
   assert.equal(ui.errorLabel('l2tp_no_address'), 'L2TP 未获得 IPv4 地址');
   assert.equal(ui.errorLabel('dataplane_failed'), '网络通道建立失败');
   assert.equal(ui.errorLabel('dns_failed'), 'DNS 检测失败');
+  assert.equal(ui.errorLabel('route_failed'), '节点策略路由建立失败');
   assert.equal(ui.errorLabel('future_code'), '未知错误');
   assert.equal(ui.jobKindLabel('device.bindings.replace'), '更新节点设备绑定');
   assert.equal(ui.jobKindLabel('future.kind'), '未知任务');

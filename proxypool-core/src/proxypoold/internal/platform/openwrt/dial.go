@@ -15,11 +15,12 @@ import (
 	"proxypoold/internal/model"
 )
 
-type boundDialFunc func(context.Context, string, string, string) (net.Conn, error)
+type boundDialFunc func(context.Context, string, string, string, uint32) (net.Conn, error)
 
 type BoundDialer struct {
 	device    string
 	bootstrap netip.Addr
+	mark      uint32
 	dial      boundDialFunc
 }
 
@@ -41,12 +42,12 @@ func (dialer bootstrapDialer) DialContext(ctx context.Context, network, address 
 	return (&net.Dialer{}).DialContext(ctx, network, target)
 }
 
-func newBoundDialer(device, bootstrap string, dial boundDialFunc) (*BoundDialer, error) {
+func newBoundDialer(device, bootstrap string, policyID uint16, dial boundDialFunc) (*BoundDialer, error) {
 	address, err := netip.ParseAddr(bootstrap)
-	if err != nil || !address.Is4() || !address.IsGlobalUnicast() || !safeInterface.MatchString(device) || !strings.HasPrefix(device, "l2tp-ppv2") || dial == nil {
+	if err != nil || !address.Is4() || !address.IsGlobalUnicast() || !safeInterface.MatchString(device) || !strings.HasPrefix(device, "l2tp-ppv2") || policyID == 0 || policyID > 60 || dial == nil {
 		return nil, errors.New("bound dialer configuration is invalid")
 	}
-	return &BoundDialer{device: device, bootstrap: address, dial: dial}, nil
+	return &BoundDialer{device: device, bootstrap: address, mark: policyMark(policyID), dial: dial}, nil
 }
 
 func (dialer *BoundDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
@@ -62,20 +63,20 @@ func (dialer *BoundDialer) DialContext(ctx context.Context, network, address str
 		return nil, errors.New("bound dial request is invalid")
 	}
 	target := net.JoinHostPort(dialer.bootstrap.String(), strconv.FormatUint(port, 10))
-	connection, err := dialer.dial(ctx, network, target, dialer.device)
+	connection, err := dialer.dial(ctx, network, target, dialer.device, dialer.mark)
 	if err != nil {
 		return nil, errors.New("bound interface dial failed")
 	}
 	return connection, nil
 }
 
-func NewDoHTransport(endpoint model.DoHEndpoint, device string) (*http.Transport, error) {
+func NewDoHTransport(endpoint model.DoHEndpoint, device string, policyID uint16) (*http.Transport, error) {
 	parsed, err := url.Parse(endpoint.URL)
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" ||
 		endpoint.ServerName == "" || strings.ContainsAny(endpoint.ServerName, "\x00/\\: ") || !strings.EqualFold(parsed.Hostname(), endpoint.ServerName) {
 		return nil, errors.New("DoH transport endpoint is invalid")
 	}
-	dialer, err := newBoundDialer(device, endpoint.BootstrapIP, dialBoundDevice)
+	dialer, err := newBoundDialer(device, endpoint.BootstrapIP, policyID, dialBoundDevice)
 	if err != nil {
 		return nil, err
 	}

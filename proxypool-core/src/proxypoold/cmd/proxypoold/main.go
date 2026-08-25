@@ -123,8 +123,8 @@ func runLive(ctx context.Context, options daemonOptions, endpointLease *api.Endp
 	dnsServer := dnsproxy.NewServer(netip.MustParseAddrPort("192.168.9.1:53"))
 	l2tp := openwrtplatform.NewL2TPAdapter(runner, resolver, "")
 	routeGate := live.NewRouteGate(openwrtplatform.NewRouteManager(runner))
-	dnsFactory := func(_ model.Node, session platform.Session, endpoint model.DoHEndpoint) (dnsproxy.NodeChannel, error) {
-		transport, err := openwrtplatform.NewDoHTransport(endpoint, session.Interface)
+	dnsFactory := func(node model.Node, session platform.Session, endpoint model.DoHEndpoint) (dnsproxy.NodeChannel, error) {
+		transport, err := openwrtplatform.NewDoHTransport(endpoint, session.Interface, node.PolicyID)
 		if err != nil {
 			return nil, err
 		}

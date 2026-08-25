@@ -11,16 +11,18 @@ import (
 
 func TestDoHTransportDialsBootstrapAddressThroughBoundInterface(t *testing.T) {
 	var gotNetwork, gotAddress, gotInterface string
-	dialer, err := newBoundDialer("l2tp-ppv20042", "1.1.1.1", func(_ context.Context, network, address, device string) (net.Conn, error) {
+	var gotMark uint32
+	dialer, err := newBoundDialer("l2tp-ppv20042", "1.1.1.1", 42, func(_ context.Context, network, address, device string, mark uint32) (net.Conn, error) {
 		gotNetwork, gotAddress, gotInterface = network, address, device
+		gotMark = mark
 		return nil, errors.New("stop after observation")
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, _ = dialer.DialContext(context.Background(), "tcp", "dns.example:443")
-	if gotNetwork != "tcp" || gotAddress != "1.1.1.1:443" || gotInterface != "l2tp-ppv20042" {
-		t.Fatalf("bound dial target = %q/%q/%q", gotNetwork, gotAddress, gotInterface)
+	if gotNetwork != "tcp" || gotAddress != "1.1.1.1:443" || gotInterface != "l2tp-ppv20042" || gotMark != 0x005a002a {
+		t.Fatalf("bound dial target = %q/%q/%q mark %#x", gotNetwork, gotAddress, gotInterface, gotMark)
 	}
 }
 
@@ -34,9 +36,12 @@ func TestNewDoHTransportRequiresHTTPSBootstrapServerNameAndOwnedInterface(t *tes
 	} {
 		endpoint, device := base, "l2tp-ppv20042"
 		mutate(&endpoint, &device)
-		if _, err := NewDoHTransport(endpoint, device); err == nil {
+		if _, err := NewDoHTransport(endpoint, device, 42); err == nil {
 			t.Fatal("unsafe DoH transport configuration was accepted")
 		}
+	}
+	if _, err := NewDoHTransport(base, "l2tp-ppv20042", 0); err == nil {
+		t.Fatal("DoH transport without a node policy was accepted")
 	}
 }
 

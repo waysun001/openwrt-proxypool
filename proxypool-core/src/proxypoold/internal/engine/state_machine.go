@@ -28,6 +28,7 @@ const (
 	ErrorCodeResolveFailed         = "resolve_failed"
 	ErrorCodeProbeFailed           = "probe_failed"
 	ErrorCodeDataplaneFailed       = "dataplane_failed"
+	ErrorCodeRouteFailed           = "route_failed"
 	ErrorCodeDNSFailed             = "dns_failed"
 	ErrorCodeL2TPInterfaceFailed   = "l2tp_interface_failed"
 	ErrorCodeL2TPDaemonFailed      = "l2tp_daemon_failed"
@@ -759,6 +760,8 @@ func publicErrorForCode(code string) *PublicError {
 		message = "WAN is unavailable"
 	case ErrorCodeDataplaneFailed:
 		message = "dataplane update failed"
+	case ErrorCodeRouteFailed:
+		message = "policy route validation failed"
 	case ErrorCodeDNSFailed:
 		message = "DNS validation failed"
 	case ErrorCodeL2TPInterfaceFailed:

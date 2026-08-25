@@ -98,6 +98,16 @@ func TestRouteGateCleanupDerivesOwnedL2TPInterfaceAfterRestart(t *testing.T) {
 	}
 }
 
+func TestRouteGateReportsAStableRouteFailureCode(t *testing.T) {
+	routes := &liveRouteManager{installErr: errors.New("raw route detail")}
+	request, session := liveRequestAndSession()
+	err := NewRouteGate(routes).Open(context.Background(), request, session)
+	var coded *model.CodeError
+	if !errors.As(err, &coded) || coded.Code != "route_failed" {
+		t.Fatalf("error = %v, want route_failed", err)
+	}
+}
+
 func TestDNSGateFailsClosedBeforePublishingBinding(t *testing.T) {
 	source := &liveConfigSource{config: liveTestConfig()}
 	bindings := &liveBindingServer{}
@@ -107,8 +117,10 @@ func TestDNSGateFailsClosedBeforePublishingBinding(t *testing.T) {
 		}), nil
 	}
 	request, session := liveRequestAndSession()
-	if err := NewDNSGate(source, bindings, factory).Open(context.Background(), request, session); err == nil {
-		t.Fatal("unverified node DNS was admitted")
+	err := NewDNSGate(source, bindings, factory).Open(context.Background(), request, session)
+	var coded *model.CodeError
+	if !errors.As(err, &coded) || coded.Code != "dns_failed" {
+		t.Fatalf("error = %v, want dns_failed", err)
 	}
 	bindings.mu.Lock()
 	defer bindings.mu.Unlock()
@@ -270,11 +282,12 @@ func (server *liveBindingServer) SetBindings(bindings map[netip.Addr]dnsproxy.No
 type liveRouteManager struct {
 	installs, verifies, removes int
 	lastRemoved                 platform.RouteLease
+	installErr                  error
 }
 
 func (manager *liveRouteManager) Install(context.Context, platform.RouteLease) error {
 	manager.installs++
-	return nil
+	return manager.installErr
 }
 func (manager *liveRouteManager) Verify(context.Context, platform.RouteLease) error {
 	manager.verifies++

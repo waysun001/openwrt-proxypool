@@ -31,7 +31,7 @@
         })
     });
     var ERROR_LABELS = Object.freeze({
-        invalid_request: '请求内容格式错误', internal: '内部服务错误', auth_failed: '节点认证失败',
+        invalid_request: '请求内容格式错误', internal: '内部服务错误', auth_failed: '节点账号或密码错误',
         invalid_config: '配置未通过安全校验', unsupported: '当前版本不支持此协议', wan_down: '外网连接不可用',
         connect_timeout: '节点连接超时', stop_timeout: '节点停止超时', capacity_exceeded: '节点数量已达到上限（60）',
         revision_conflict: '配置已变化，请刷新页面后重试', duplicate: '操作重复，请刷新页面后重试',
@@ -39,7 +39,7 @@
         l2tp_interface_failed: 'L2TP 接口创建失败', l2tp_daemon_failed: 'L2TP 服务启动失败',
         l2tp_negotiation_failed: 'L2TP 协商失败', l2tp_server_no_response: 'L2TP 服务器无响应，请检查节点地址、端口或上游网络',
         l2tp_no_address: 'L2TP 未获得 IPv4 地址',
-        dataplane_failed: '网络通道建立失败', dns_failed: 'DNS 检测失败', service_unavailable: 'ZeanLink 服务暂时不可用',
+        dataplane_failed: '网络通道建立失败', route_failed: '节点策略路由建立失败', dns_failed: 'DNS 检测失败', service_unavailable: 'ZeanLink 服务暂时不可用',
         bad_gateway: 'ZeanLink 服务响应异常', operation_timeout: '操作超时', unknown_method: '功能接口不可用',
         collection_failed: '诊断包生成失败', collection_cancelled: '诊断包生成已取消', unavailable: '信息不可用',
         invalid_protocol: '协议不受支持', invalid_fields: '字段数量或格式错误', invalid_server: '服务器地址格式错误',

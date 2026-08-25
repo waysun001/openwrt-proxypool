@@ -172,6 +172,41 @@ func TestL2TPStartReturnsSafeSpecificFailureCodes(t *testing.T) {
 	}
 }
 
+func TestL2TPStartDetectsInterfaceScopedPPPAuthenticationFailure(t *testing.T) {
+	runner := newL2TPRunner()
+	runner.pppLog = "pppd[1234]: MS-CHAP authentication failed: bad username or password\n"
+	adapter := newTestL2TPAdapter(t, runner, &l2tpResolver{address: netip.MustParseAddr("203.0.113.17")}, WithL2TPNegotiationTimeout(20*time.Millisecond))
+
+	_, err := adapter.Start(context.Background(), validL2TPRequest())
+	var coded *model.CodeError
+	if !errors.As(err, &coded) || coded.Code != "auth_failed" {
+		t.Fatalf("error = %v, want interface-scoped auth_failed", err)
+	}
+}
+
+func TestClassifyPPPFailureUsesStableFailureCodes(t *testing.T) {
+	tests := []struct {
+		name string
+		log  []byte
+		want string
+	}{
+		{name: "MS-CHAP", log: []byte("MS-CHAP authentication failed: rejected\n"), want: "auth_failed"},
+		{name: "CHAP", log: []byte("CHAP authentication failed\n"), want: "auth_failed"},
+		{name: "PAP", log: []byte("PAP authentication failed\n"), want: "auth_failed"},
+		{name: "remote address", log: []byte("Could not determine remote IP address\n"), want: "l2tp_no_address"},
+		{name: "IPCP timeout", log: []byte("IPCP: timeout sending Config-Requests\n"), want: "l2tp_no_address"},
+		{name: "bounded overflow", log: make([]byte, maxL2TPStatusLogBytes+1), want: "l2tp_negotiation_failed"},
+		{name: "unrelated", log: []byte("connection terminated\n")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := classifyPPPFailure(test.log); got != test.want {
+				t.Fatalf("code = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestL2TPRejectsUnsafeCredentialsAndForeignInterfaceBeforeMutation(t *testing.T) {
 	for _, mutate := range []func(*platform.NodeRequest){
 		func(request *platform.NodeRequest) { request.Node.Protocol = model.ProtocolSOCKS5 },
@@ -469,6 +504,7 @@ type l2tpRunner struct {
 	listAllErr             error
 	addErr                 error
 	statusError            string
+	pppLog                 string
 }
 
 func newL2TPRunner() *l2tpRunner {
@@ -485,6 +521,12 @@ func (runner *l2tpRunner) Run(_ context.Context, name string, args ...string) ([
 			return nil, nil
 		}
 		return nil, errors.New("not running")
+	}
+	if name == "/usr/bin/head" && len(args) == 3 && args[0] == "-c" && args[1] == "131073" && args[2] == defaultL2TPStatusDir+"/status.ppv20042.log" {
+		if runner.pppLog == "" {
+			return nil, errors.New("not found")
+		}
+		return []byte(runner.pppLog), nil
 	}
 	if name == "/bin/ubus" && len(args) == 2 && args[0] == "-S" && args[1] == "list" {
 		if runner.listAllErr != nil {
