@@ -65,9 +65,9 @@ cmp -s \
 	"$DESTINATION/usr/lib/proxypool/v2-image-activation-authority"
 cmp -s "$SOURCE/etc/uci-defaults/keep" "$DESTINATION/etc/uci-defaults/keep"
 cmp -s "$SOURCE/lib/netifd/proto/l2tp.sh" "$DESTINATION/lib/netifd/proto/l2tp.sh"
-[ "$(stat -c '%a' "$SOURCE/etc/config/proxypool")" = 644 ]
-[ "$(stat -c '%a' "$SOURCE/etc/config/proxypool_v2")" = 644 ]
-[ "$(stat -c '%a' "$SOURCE/etc/config/proxypool_runtime")" = 644 ]
+[ "$(stat -c '%a' "$SOURCE/etc/config/proxypool")" = 664 ]
+[ "$(stat -c '%a' "$SOURCE/etc/config/proxypool_v2")" = 664 ]
+[ "$(stat -c '%a' "$SOURCE/etc/config/proxypool_runtime")" = 664 ]
 [ "$(stat -c '%a' "$DESTINATION/etc/uci-defaults/keep")" = 755 ]
 case "$(uname -s)" in
 	Linux*)
