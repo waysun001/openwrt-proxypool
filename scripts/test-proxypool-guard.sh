@@ -237,14 +237,14 @@ require_fixed "$TEST_TMP/guard-prerouting.block" \
 	'type filter hook prerouting priority -310; policy accept;' \
 	'guard_prerouting is not the unique priority -310 mark scrub chain'
 
-# Router input whitelist: DHCP, LuCI HTTP/HTTPS, and DNS only for a current
-# daemon-owned MAC+IPv4 lease. SSH is intentionally absent. Transparent proxy input remains a separate exact tuple path
+# Router input whitelist: DHCP, router SSH/LuCI management, and DNS only for a
+# current daemon-owned MAC+IPv4 lease.  SSH shares the same br-lan ingress used
+# by wired LAN and bridged Wi-Fi clients. Transparent proxy input remains a separate exact tuple path
 # requiring mark provenance and DNAT provenance together.
 require_rule "$TEST_TMP/guard-input.block" 'missing exact DHCP input allowance' \
 	'iifname "br-lan"' 'meta nfproto ipv4' 'udp sport 68' 'udp dport 67' 'accept'
-require_rule "$TEST_TMP/guard-input.block" 'management input is not limited to TCP 80/443' \
-	'iifname "br-lan"' 'meta nfproto ipv4' 'ip daddr 192.168.9.1' 'tcp dport' '80' '443' 'accept'
-reject_regex "$TEST_TMP/guard-input.block" '(^|[^0-9])22([^0-9]|$)' 'SSH port 22 is present in the LAN input whitelist'
+require_rule "$TEST_TMP/guard-input.block" 'management input is not limited to TCP 22/80/443' \
+	'iifname "br-lan"' 'meta nfproto ipv4' 'ip daddr 192.168.9.1' 'tcp dport' '22' '80' '443' 'accept'
 require_rule "$TEST_TMP/guard-input.block" 'router DNS is not limited to an admitted MAC+IPv4 tuple' \
 	'iifname "br-lan"' 'meta nfproto ipv4' 'ip daddr 192.168.9.1' \
 	'ether saddr . ip saddr @v2_dns_clients' 'tcp, udp' 'th dport 53' 'accept'
@@ -252,7 +252,7 @@ require_rule "$TEST_TMP/guard-input.block" 'router DNS is not limited to an admi
 while IFS= read -r input_accept; do
 	case "$input_accept" in
 		*'udp sport 68'*'udp dport 67'*'accept'*) : ;;
-		*'tcp dport {'*'80'*'443'*'accept'*)
+		*'tcp dport {'*'22'*'80'*'443'*'accept'*)
 			case "$input_accept" in
 				*'ip daddr 192.168.9.1'*) : ;;
 				*) fail "router service allowance is not bound to the phase-1 management IP: $input_accept" ;;
@@ -264,8 +264,8 @@ done <"$TEST_TMP/guard-input.block"
 
 dhcp_input_line=$(rule_line "$TEST_TMP/guard-input.block" 'missing exact DHCP input allowance' \
 	'iifname "br-lan"' 'meta nfproto ipv4' 'udp sport 68' 'udp dport 67' 'accept')
-management_input_line=$(rule_line "$TEST_TMP/guard-input.block" 'management input is not limited to TCP 80/443' \
-	'iifname "br-lan"' 'meta nfproto ipv4' 'ip daddr 192.168.9.1' 'tcp dport' '80' '443' 'accept')
+management_input_line=$(rule_line "$TEST_TMP/guard-input.block" 'management input is not limited to TCP 22/80/443' \
+	'iifname "br-lan"' 'meta nfproto ipv4' 'ip daddr 192.168.9.1' 'tcp dport' '22' '80' '443' 'accept')
 dns_input_line=$(rule_line "$TEST_TMP/guard-input.block" 'router DNS is not limited to an admitted MAC+IPv4 tuple' \
 	'iifname "br-lan"' 'ip daddr 192.168.9.1' 'ether saddr . ip saddr @v2_dns_clients' 'th dport 53' 'accept')
 blocked_input_line=$(rule_line "$TEST_TMP/guard-input.block" \

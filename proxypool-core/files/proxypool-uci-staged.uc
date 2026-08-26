@@ -925,6 +925,7 @@ cursor.foreach("firewall", "rule", section => {
 for (let name in [
 	"proxypool_allow_dhcp",
 	"proxypool_allow_dns",
+	"proxypool_allow_admin_ssh",
 	"proxypool_allow_admin_http",
 	"proxypool_allow_admin_https"
 ])
@@ -942,6 +943,16 @@ recreate_named("firewall", "proxypool_allow_dhcp", "rule", {
 	proto: "udp",
 	src_port: "68",
 	dest_port: "67",
+	family: "ipv4",
+	target: "ACCEPT"
+});
+
+recreate_named("firewall", "proxypool_allow_admin_ssh", "rule", {
+	name: "ProxyPool Allow SSH Management",
+	src: "lan",
+	proto: "tcp",
+	dest_ip: "192.168.9.1",
+	dest_port: "22",
 	family: "ipv4",
 	target: "ACCEPT"
 });

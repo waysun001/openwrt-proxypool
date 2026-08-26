@@ -834,7 +834,7 @@ verify_guard_inet_runtime() {
 
 			expected["guard_input",1]="type filter hook input priority filter + 10; policy drop;"
 			expected["guard_input",2]="iifname \"br-lan\" meta nfproto ipv4 udp sport 68 udp dport 67 accept"
-			expected["guard_input",3]="iifname \"br-lan\" ip daddr 192.168.9.1 tcp dport { 80, 443 } accept"
+			expected["guard_input",3]="iifname \"br-lan\" ip daddr 192.168.9.1 tcp dport { 22, 80, 443 } accept"
 			expected["guard_input",4]="iifname \"br-lan\" ip daddr 192.168.9.1 ether saddr . ip saddr @v2_dns_clients meta l4proto { tcp, udp } th dport 53 accept"
 			expected["guard_input",5]="iifname \"br-lan\" meta nfproto ipv4 ct original ip daddr @blocked_v4_destinations drop"
 			expected["guard_input",6]="iifname \"br-lan\" meta mark & 0x00ff0000 == 0x005a0000 ct status dnat ip saddr . tcp dport @v1_tcp_redirects accept"

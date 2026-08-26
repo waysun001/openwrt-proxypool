@@ -465,6 +465,14 @@ run_staged_ucode_contracts() {
 	run_real_staged_ucode apply-defaults "$stage" "$delta" "$trace" "$stdout_file" ||
 		fail 'real staged UCI rejected array-valued br-lan ports'
 	[ ! -s "$stdout_file" ] || fail 'apply-defaults wrote unexpected stdout'
+	assert_json_value "$stage/firewall" proxypool_allow_admin_ssh .type rule
+	assert_json_value "$stage/firewall" proxypool_allow_admin_ssh name 'ProxyPool Allow SSH Management'
+	assert_json_value "$stage/firewall" proxypool_allow_admin_ssh src lan
+	assert_json_value "$stage/firewall" proxypool_allow_admin_ssh proto tcp
+	assert_json_value "$stage/firewall" proxypool_allow_admin_ssh dest_ip 192.168.9.1
+	assert_json_value "$stage/firewall" proxypool_allow_admin_ssh dest_port 22
+	assert_json_value "$stage/firewall" proxypool_allow_admin_ssh family ipv4
+	assert_json_value "$stage/firewall" proxypool_allow_admin_ssh target ACCEPT
 	assert_json_value "$stage/network" existing_lan1 isolate 1
 	assert_json_value "$stage/network" existing_lan1 mtu 1500
 	assert_json_value "$stage/network" proxypool_lan_port_02 .type device
@@ -1275,6 +1283,7 @@ done
 
 for section in \
 	proxypool_allow_dhcp proxypool_allow_dns \
+	proxypool_allow_admin_ssh \
 	proxypool_allow_admin_http proxypool_allow_admin_https; do
 	delete_value "firewall.$section"
 done
@@ -1289,6 +1298,7 @@ set_value firewall.proxypool_allow_dhcp.family ipv4
 set_value firewall.proxypool_allow_dhcp.target ACCEPT
 
 for spec in \
+	'proxypool_allow_admin_ssh|ProxyPool Allow SSH Management|22' \
 	'proxypool_allow_admin_http|ProxyPool Allow HTTP Management|80' \
 	'proxypool_allow_admin_https|ProxyPool Allow HTTPS Management|443'; do
 	section=${spec%%|*}
@@ -1452,7 +1462,7 @@ RUNTIME_GUARD_BODY
 	chain guard_input {
 		type filter hook input priority filter + 10; policy drop;
 		iifname "br-lan" meta nfproto ipv4 udp sport 68 udp dport 67 accept
-		iifname "br-lan" ip daddr 192.168.9.1 tcp dport { 80, 443 } accept
+		iifname "br-lan" ip daddr 192.168.9.1 tcp dport { 22, 80, 443 } accept
 		iifname "br-lan" ip daddr 192.168.9.1 ether saddr . ip saddr @v2_dns_clients meta l4proto { tcp, udp } th dport 53 accept
 		iifname "br-lan" meta nfproto ipv4 ct original ip daddr @blocked_v4_destinations drop
 		iifname "br-lan" meta mark & 0x00ff0000 == 0x005a0000 ct status dnat ip saddr . tcp dport @v1_tcp_redirects accept
@@ -1954,7 +1964,7 @@ assert_only_named_lan_whitelist() {
 				target=$(get_value "$config_dir" "firewall.$section.target" 2>/dev/null || true)
 				[ "$src" = lan ] && [ -z "$dest" ] || continue
 				case "$section" in
-					proxypool_allow_dhcp|proxypool_allow_admin_http|proxypool_allow_admin_https)
+					proxypool_allow_dhcp|proxypool_allow_admin_ssh|proxypool_allow_admin_http|proxypool_allow_admin_https)
 						[ "$target" = ACCEPT ] || fail "named LAN input whitelist has non-ACCEPT target: $section"
 						;;
 					*) fail "non-whitelisted LAN input rule survived: $section" ;;
@@ -2029,19 +2039,18 @@ assert_success_state() {
 	done
 
 	assert_named_rule "$config_dir" proxypool_allow_dhcp 'ProxyPool Allow DHCP' udp 67
+	assert_named_rule "$config_dir" proxypool_allow_admin_ssh 'ProxyPool Allow SSH Management' tcp 22
 	assert_named_rule "$config_dir" proxypool_allow_admin_http 'ProxyPool Allow HTTP Management' tcp 80
 	assert_named_rule "$config_dir" proxypool_allow_admin_https 'ProxyPool Allow HTTPS Management' tcp 443
 	assert_value "$config_dir" firewall.proxypool_allow_dhcp.src_port 68
-	for section in proxypool_allow_admin_http proxypool_allow_admin_https; do
+	for section in proxypool_allow_admin_ssh proxypool_allow_admin_http proxypool_allow_admin_https; do
 		assert_value "$config_dir" "firewall.$section.dest_ip" 192.168.9.1
 	done
 	assert_missing_value "$config_dir" firewall.proxypool_allow_dhcp.dest_ip
 	assert_missing_value "$config_dir" firewall.proxypool_allow_dns
 	assert_only_named_lan_whitelist "$config_dir"
-	for section in proxypool_allow_dhcp proxypool_allow_admin_http proxypool_allow_admin_https; do
-		port=$(get_value "$config_dir" "firewall.$section.dest_port")
-		[ "$port" != 22 ] || fail "ProxyPool whitelist exposes SSH in $section"
-	done
+	[ "$(get_value "$config_dir" firewall.proxypool_allow_admin_ssh.dest_port)" = 22 ] ||
+		fail 'ProxyPool SSH management rule does not expose TCP 22'
 
 	assert_value "$config_dir" "firewall.$defaults_section.flow_offloading" 0
 	assert_all_offload_disabled "$config_dir"
@@ -2571,6 +2580,13 @@ firewall.proxypool_allow_dhcp.src_port=68
 firewall.proxypool_allow_dhcp.dest_port=67
 firewall.proxypool_allow_dhcp.family=ipv4
 firewall.proxypool_allow_dhcp.target=ACCEPT
+firewall.proxypool_allow_admin_ssh=rule
+firewall.proxypool_allow_admin_ssh.src=lan
+firewall.proxypool_allow_admin_ssh.proto=tcp
+firewall.proxypool_allow_admin_ssh.dest_port=22
+firewall.proxypool_allow_admin_ssh.dest_ip=192.168.9.1
+firewall.proxypool_allow_admin_ssh.family=ipv4
+firewall.proxypool_allow_admin_ssh.target=ACCEPT
 firewall.proxypool_allow_admin_http=rule
 firewall.proxypool_allow_admin_http.src=lan
 firewall.proxypool_allow_admin_http.proto=tcp

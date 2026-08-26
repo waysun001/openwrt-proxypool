@@ -63,7 +63,7 @@ workflow_jobs() {
 
 require_fixed "$MAKEFILE" 'PKG_BUILD_DEPENDS:=golang/host'
 require_fixed "$MAKEFILE" 'PKG_VERSION:=2.0.0'
-require_fixed "$MAKEFILE" 'PKG_RELEASE:=25'
+require_fixed "$MAKEFILE" 'PKG_RELEASE:=26'
 require_fixed "$LUCI_MAKEFILE" 'PKG_VERSION:=2.2.4'
 require_fixed "$LUCI_MAKEFILE" 'PKG_RELEASE:=1'
 require_fixed "$THEME_MAKEFILE" 'PKG_VERSION:=2.2.1'
@@ -139,6 +139,11 @@ fi
 [ -f "$UPGRADE_KEEP" ] || { echo 'missing sysupgrade keep list for overlay-only configs' >&2; exit 1; }
 expected_keep=$(printf '/etc/config/proxypool_v2\n/etc/proxypool/migration-v1.json\n/etc/proxypool/backups/\n')
 [ "$(cat "$UPGRADE_KEEP")" = "$expected_keep" ] || { echo 'unexpected ProxyPool sysupgrade keep list' >&2; exit 1; }
+for v2_default in "$IMAGE_OVERLAY_V2" "$PACKAGED_V2_DEFAULT"; do
+	require_fixed "$v2_default" "list management_port '22'"
+	require_fixed "$v2_default" "list management_port '80'"
+	require_fixed "$v2_default" "list management_port '443'"
+done
 require_fixed "$IPK_INSPECTOR" 'for runtime_state in activated-backend cleanup-required firewall-transaction firewall-safety-activated wireless-quarantine; do'
 require_fixed "$IPK_INSPECTOR" '/etc/proxypool/migration-v1.json'
 require_fixed "$IPK_INSPECTOR" 'usr/lib/proxypool/proxypool-migrate.sh'
