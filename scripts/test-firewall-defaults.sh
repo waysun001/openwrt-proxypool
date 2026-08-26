@@ -294,7 +294,7 @@ JSON_FIREWALL
 	cat >"$directory/dhcp" <<'JSON_DHCP'
 {
   "dnsmasq_main": { ".type": "dnsmasq", "noresolv": "0", "port": "53", "server": "/tmp/resolv.conf" },
-  "lan_dhcp": { ".type": "dhcp", "interface": "lan", "ra": "server", "dhcpv6": "server", "ndp": "relay" }
+  "lan_dhcp": { ".type": "dhcp", "interface": "lan", "ra": "server", "dhcpv6": "server", "ndp": "relay", "dhcp_option": ["3,192.168.9.254", "6,8.8.8.8"] }
 }
 JSON_DHCP
 	cat >"$directory/network" <<JSON_NETWORK
@@ -465,6 +465,7 @@ run_staged_ucode_contracts() {
 	run_real_staged_ucode apply-defaults "$stage" "$delta" "$trace" "$stdout_file" ||
 		fail 'real staged UCI rejected array-valued br-lan ports'
 	[ ! -s "$stdout_file" ] || fail 'apply-defaults wrote unexpected stdout'
+	assert_json_value "$stage/dhcp" lan_dhcp dhcp_option '["6,192.168.9.1"]'
 	assert_json_value "$stage/firewall" proxypool_allow_admin_ssh .type rule
 	assert_json_value "$stage/firewall" proxypool_allow_admin_ssh name 'ProxyPool Allow SSH Management'
 	assert_json_value "$stage/firewall" proxypool_allow_admin_ssh src lan
@@ -1320,6 +1321,7 @@ install_owned_includes
 set_value "dhcp.$lan_dhcp.ra" disabled
 set_value "dhcp.$lan_dhcp.dhcpv6" disabled
 set_value "dhcp.$lan_dhcp.ndp" disabled
+set_value "dhcp.$lan_dhcp.dhcp_option" 6,192.168.9.1
 set_value "dhcp.$dnsmasq.noresolv" 1
 set_value "dhcp.$dnsmasq.port" 0
 delete_value "dhcp.$dnsmasq.server"
@@ -2058,6 +2060,7 @@ assert_success_state() {
 	assert_value "$config_dir" "dhcp.$lan_dhcp.ra" disabled
 	assert_value "$config_dir" "dhcp.$lan_dhcp.dhcpv6" disabled
 	assert_value "$config_dir" "dhcp.$lan_dhcp.ndp" disabled
+	assert_value "$config_dir" "dhcp.$lan_dhcp.dhcp_option" 6,192.168.9.1
 	assert_value "$config_dir" dhcp.dnsmasq_main.noresolv 1
 	assert_value "$config_dir" dhcp.dnsmasq_main.port 0
 	assert_missing_value "$config_dir" dhcp.dnsmasq_main.server

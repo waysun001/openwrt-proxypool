@@ -997,6 +997,14 @@ install_owned_includes();
 set_option("dhcp", lan_dhcp, "ra", "disabled");
 set_option("dhcp", lan_dhcp, "dhcpv6", "disabled");
 set_option("dhcp", lan_dhcp, "ndp", "disabled");
+/*
+ * dnsmasq is intentionally not the DNS listener (port=0): proxypoold owns
+ * 192.168.9.1:53 so every bound client query follows its node channel.  In
+ * this mode dnsmasq does not synthesize DHCP option 6, therefore advertise
+ * the appliance resolver explicitly and replace any inherited DNS/router
+ * options that could bypass it.
+ */
+set_option("dhcp", lan_dhcp, "dhcp_option", [ "6,192.168.9.1" ]);
 set_option("dhcp", dnsmasq[0], "noresolv", "1");
 set_option("dhcp", dnsmasq[0], "port", "0");
 

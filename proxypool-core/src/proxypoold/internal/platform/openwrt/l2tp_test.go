@@ -384,6 +384,26 @@ func TestL2TPStopUsesDurableOwnershipAfterNodeWasDisabledAndRevisionAdvanced(t *
 	}
 }
 
+func TestL2TPStopIsIdempotentAfterOwnedInterfaceWasAlreadyRemoved(t *testing.T) {
+	runner := newL2TPRunner()
+	runner.ready = true
+	adapter := newTestL2TPAdapter(t, runner, &l2tpResolver{address: netip.MustParseAddr("203.0.113.17")})
+	request := validL2TPRequest()
+	session, err := adapter.Start(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.Stop(context.Background(), request, session); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.Stop(context.Background(), request, platform.Session{}); err != nil {
+		t.Fatalf("repeated owned cleanup failed: %v", err)
+	}
+	if runner.removes != 1 {
+		t.Fatalf("idempotent stop removed interface %d times, want 1", runner.removes)
+	}
+}
+
 func TestL2TPOwnershipPersistsPrivatelyAndRecoversSameGeneration(t *testing.T) {
 	directory := t.TempDir()
 	manifest := filepath.Join(directory, "l2tp.json")

@@ -247,6 +247,126 @@ func TestSchedulerDeleteKeepsTombstoneWhenGateRevocationFails(t *testing.T) {
 	t.Fatal("gate revocation failure was not retained as cleanup_failed")
 }
 
+func TestSchedulerDeleteRetriesCleanupWithOriginalSessionGeneration(t *testing.T) {
+	jobIDs := []string{"job-connect-cleanup-retry", "job-stop-cleanup-retry", "job-delete-cleanup-retry"}
+	desiredStore := &memoryDesiredStore{cfg: controllerConfig()}
+	controller, err := NewController(
+		desiredStore, &memoryRuntimePersistence{}, NewMachine(nil), NewJobStore(),
+		WithControllerJobIDSource(func() string {
+			id := jobIDs[0]
+			jobIDs = jobIDs[1:]
+			return id
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := &schedulerAdapter{}
+	gate := &schedulerGate{closeFailures: 1}
+	scheduler := NewScheduler(controller, adapter, SchedulerConfig{}, gate)
+	controller.AttachScheduler(scheduler)
+
+	assertControllerSuccess(t, controller.Handle(context.Background(), controllerRequest(
+		"connect-cleanup-retry", "node.action", `{"node_id":"node_a","action":"connect","expected_revision":3}`,
+	)))
+	scheduler.runNode(context.Background(), scheduledNode{jobID: "job-connect-cleanup-retry", nodeID: "node_a"})
+	status, exists := controller.schedulerStatus("node_a")
+	if !exists || status.State != model.StateOnline {
+		t.Fatalf("connected status = %#v exists=%t", status, exists)
+	}
+	ownedGeneration := status.Generation
+	adapter.mu.Lock()
+	adapter.requiredStopGeneration = ownedGeneration
+	adapter.rejectWrongStopGeneration = true
+	adapter.mu.Unlock()
+
+	assertControllerSuccess(t, controller.Handle(context.Background(), controllerRequest(
+		"stop-cleanup-retry", "node.action", `{"node_id":"node_a","action":"stop","expected_revision":3}`,
+	)))
+	scheduler.runNode(context.Background(), scheduledNode{jobID: "job-stop-cleanup-retry", nodeID: "node_a"})
+	status, exists = controller.schedulerStatus("node_a")
+	if !exists || status.State != model.StateRecovering || !status.CleanupPending {
+		t.Fatalf("failed cleanup status = %#v exists=%t", status, exists)
+	}
+
+	assertControllerSuccess(t, controller.Handle(context.Background(), controllerRequest(
+		"delete-cleanup-retry", "node.delete", `{"node_id":"node_a","expected_revision":4}`,
+	)))
+	scheduler.runNode(context.Background(), scheduledNode{jobID: "job-delete-cleanup-retry", nodeID: "node_a"})
+	job, _ := controller.jobs.Get("job-delete-cleanup-retry")
+	if job.State != JobSucceeded {
+		adapter.mu.Lock()
+		gotGenerations := append([]uint64(nil), adapter.stopGenerations...)
+		adapter.mu.Unlock()
+		t.Fatalf("delete after partial cleanup state=%s progress=%#v stop_generations=%v gate_closes=%d", job.State, job.Nodes, gotGenerations, gate.closeCalls)
+	}
+	stored, _ := desiredStore.Load()
+	if _, exists := stored.Nodes["node_a"]; exists {
+		t.Fatal("successful cleanup retry retained the delete tombstone")
+	}
+	adapter.mu.Lock()
+	gotGenerations := append([]uint64(nil), adapter.stopGenerations...)
+	adapter.mu.Unlock()
+	wantGenerations := []uint64{ownedGeneration, ownedGeneration}
+	if !reflect.DeepEqual(gotGenerations, wantGenerations) {
+		t.Fatalf("cleanup retry generations = %v, want %v", gotGenerations, wantGenerations)
+	}
+}
+
+func TestSchedulerReconnectTakesOverFailedCleanupAndStartsFreshGeneration(t *testing.T) {
+	jobIDs := []string{"job-connect-recovery-retry", "job-stop-recovery-retry", "job-reconnect-recovery-retry"}
+	controller, err := NewController(
+		&memoryDesiredStore{cfg: controllerConfig()}, &memoryRuntimePersistence{}, NewMachine(nil), NewJobStore(),
+		WithControllerJobIDSource(func() string {
+			id := jobIDs[0]
+			jobIDs = jobIDs[1:]
+			return id
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := &schedulerAdapter{}
+	gate := &schedulerGate{closeFailures: 1}
+	scheduler := NewScheduler(controller, adapter, SchedulerConfig{}, gate)
+	controller.AttachScheduler(scheduler)
+
+	assertControllerSuccess(t, controller.Handle(context.Background(), controllerRequest(
+		"connect-recovery-retry", "node.action", `{"node_id":"node_a","action":"connect","expected_revision":3}`,
+	)))
+	scheduler.runNode(context.Background(), scheduledNode{jobID: "job-connect-recovery-retry", nodeID: "node_a"})
+	status, _ := controller.schedulerStatus("node_a")
+	ownedGeneration := status.Generation
+	adapter.mu.Lock()
+	adapter.requiredStopGeneration = ownedGeneration
+	adapter.rejectWrongStopGeneration = true
+	adapter.mu.Unlock()
+
+	assertControllerSuccess(t, controller.Handle(context.Background(), controllerRequest(
+		"stop-recovery-retry", "node.action", `{"node_id":"node_a","action":"stop","expected_revision":3}`,
+	)))
+	scheduler.runNode(context.Background(), scheduledNode{jobID: "job-stop-recovery-retry", nodeID: "node_a"})
+	assertControllerSuccess(t, controller.Handle(context.Background(), controllerRequest(
+		"reconnect-recovery-retry", "node.action", `{"node_id":"node_a","action":"reconnect","expected_revision":4}`,
+	)))
+	scheduler.runNode(context.Background(), scheduledNode{jobID: "job-reconnect-recovery-retry", nodeID: "node_a"})
+	status, exists := controller.schedulerStatus("node_a")
+	if !exists || status.State != model.StateOnline || status.Generation <= ownedGeneration {
+		t.Fatalf("reconnected status = %#v exists=%t", status, exists)
+	}
+	job, _ := controller.jobs.Get("job-reconnect-recovery-retry")
+	if job.State != JobSucceeded {
+		t.Fatalf("reconnect after failed cleanup state=%s progress=%#v", job.State, job.Nodes)
+	}
+	adapter.mu.Lock()
+	starts := adapter.startCalls
+	gotGenerations := append([]uint64(nil), adapter.stopGenerations...)
+	adapter.mu.Unlock()
+	if starts != 2 || !reflect.DeepEqual(gotGenerations, []uint64{ownedGeneration, ownedGeneration}) {
+		t.Fatalf("cleanup takeover starts=%d stop_generations=%v", starts, gotGenerations)
+	}
+}
+
 func TestSchedulerDeleteDoesNotSucceedWhenTombstoneFinalizationFails(t *testing.T) {
 	desiredStore := &memoryDesiredStore{cfg: controllerConfig(), failReplaceAt: 2}
 	controller, err := NewController(
@@ -1283,21 +1403,24 @@ func (store *memoryRuntimePersistence) Save(_ context.Context, snapshot RuntimeS
 }
 
 type schedulerAdapter struct {
-	mu                     sync.Mutex
-	startRelease           <-chan struct{}
-	blockUntilContext      bool
-	failNode               string
-	startErr               error
-	runtimeSaves           func() int
-	onStop                 func()
-	active                 int
-	maxActive              int
-	startCalls             int
-	probeCalls             int
-	probeFailures          int
-	stopCalls              int
-	stopGenerationMismatch bool
-	saveCountAtStart       int
+	mu                        sync.Mutex
+	startRelease              <-chan struct{}
+	blockUntilContext         bool
+	failNode                  string
+	startErr                  error
+	runtimeSaves              func() int
+	onStop                    func()
+	active                    int
+	maxActive                 int
+	startCalls                int
+	probeCalls                int
+	probeFailures             int
+	stopCalls                 int
+	stopGenerationMismatch    bool
+	requiredStopGeneration    uint64
+	rejectWrongStopGeneration bool
+	stopGenerations           []uint64
+	saveCountAtStart          int
 }
 
 type schedulerTrafficReader struct {
@@ -1402,25 +1525,31 @@ func (adapter *schedulerAdapter) failNextProbes(count int) {
 func (adapter *schedulerAdapter) Stop(_ context.Context, request platform.NodeRequest, session platform.Session) error {
 	adapter.mu.Lock()
 	adapter.stopCalls++
+	adapter.stopGenerations = append(adapter.stopGenerations, request.Generation)
 	if session.Generation != 0 && request.Generation != session.Generation {
 		adapter.stopGenerationMismatch = true
 	}
+	reject := adapter.rejectWrongStopGeneration && request.Generation != adapter.requiredStopGeneration
 	adapter.mu.Unlock()
 	if adapter.onStop != nil {
 		adapter.onStop()
+	}
+	if reject {
+		return errors.New("owned session generation mismatch")
 	}
 	return nil
 }
 
 type schedulerGate struct {
-	name        string
-	openRelease <-chan struct{}
-	openErr     error
-	closeErr    error
-	order       *[]string
-	orderMu     *sync.Mutex
-	openCalls   int
-	closeCalls  int
+	name          string
+	openRelease   <-chan struct{}
+	openErr       error
+	closeErr      error
+	closeFailures int
+	order         *[]string
+	orderMu       *sync.Mutex
+	openCalls     int
+	closeCalls    int
 }
 
 type orderedRebindGate struct {
@@ -1468,6 +1597,10 @@ func (gate *schedulerGate) Open(ctx context.Context, _ platform.NodeRequest, _ p
 func (gate *schedulerGate) Close(_ context.Context, _ platform.NodeRequest, _ platform.Session) error {
 	gate.closeCalls++
 	gate.record("close:" + gate.name)
+	if gate.closeFailures > 0 {
+		gate.closeFailures--
+		return errors.New("one-shot close failure")
+	}
 	return gate.closeErr
 }
 

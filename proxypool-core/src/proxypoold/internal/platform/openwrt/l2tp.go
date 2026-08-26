@@ -35,6 +35,8 @@ const (
 	maxL2TPStatusLogBytes         = 128 << 10
 )
 
+var errL2TPOwnershipAbsent = errors.New("L2TP ownership is absent")
+
 // L2TPEndpointResolver converts a configured hostname to the exact IPv4
 // endpoint handed to netifd. Implementations must not silently return an IPv6
 // address or use a proxy node that has not been admitted yet.
@@ -189,6 +191,16 @@ func (adapter *L2TPAdapter) Stop(ctx context.Context, request platform.NodeReque
 	}
 	entry, err := adapter.stopOwnership(request, session, logical, l3Device)
 	if err != nil {
+		if !errors.Is(err, errL2TPOwnershipAbsent) {
+			return errors.New("L2TP ownership verification failed")
+		}
+		status, statusErr := adapter.inspectStatus(ctx, logical)
+		if statusErr != nil {
+			return statusErr
+		}
+		if !status.exists {
+			return nil
+		}
 		return errors.New("L2TP ownership verification failed")
 	}
 	status, err := adapter.inspectStatus(ctx, logical)
@@ -608,7 +620,7 @@ func (adapter *L2TPAdapter) stopOwnership(request platform.NodeRequest, session 
 		}
 		return entry, nil
 	}
-	return l2tpOwnership{}, errors.New("L2TP ownership is absent")
+	return l2tpOwnership{}, errL2TPOwnershipAbsent
 }
 
 func (adapter *L2TPAdapter) reserveDormantOwnership(entry l2tpOwnership) error {

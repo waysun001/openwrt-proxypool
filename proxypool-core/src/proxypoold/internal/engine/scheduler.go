@@ -337,8 +337,8 @@ func (scheduler *Scheduler) deleteNode(ctx context.Context, work scheduledNode, 
 	if err != nil {
 		return
 	}
-	if !scheduler.closeOwnedSession(work, node, status.Generation) {
-		_, _ = scheduler.controller.schedulerApply(ctx, work.jobID, work.nodeID, updated.Generation, EventFailure, &model.CodeError{Code: ErrorCodeStopTimeout}, "cleanup_failed")
+	if !scheduler.closeOwnedSession(work, node, cleanupOwnershipGeneration(updated)) {
+		scheduler.recordCleanupFailure(ctx, work, updated)
 		return
 	}
 	finalized, err := scheduler.controller.schedulerFinalizeNodeDelete(ctx, work.nodeID)
@@ -346,7 +346,7 @@ func (scheduler *Scheduler) deleteNode(ctx context.Context, work scheduledNode, 
 		_ = scheduler.controller.schedulerFailNode(ctx, work.jobID, work.nodeID, "delete_finalize_failed")
 		return
 	}
-	if _, err := scheduler.controller.schedulerApply(ctx, work.jobID, work.nodeID, updated.Generation, EventStopped, nil, "deleted"); err != nil {
+	if _, completed := scheduler.finishCleanupTransition(ctx, work, updated); !completed {
 		if completed := scheduler.completeNodeDurably(ctx, work, "desired_removed"); completed && finalized {
 			_ = scheduler.controller.schedulerForgetDeletedNode(ctx, work.nodeID)
 		}
@@ -447,7 +447,7 @@ func (scheduler *Scheduler) prepareReconnect(ctx context.Context, work scheduled
 	if updated.State == model.StateQueued {
 		return updated
 	}
-	return scheduler.cleanupBarrier(ctx, work, node, updated, status.Generation)
+	return scheduler.cleanupBarrier(ctx, work, node, updated)
 }
 
 func (scheduler *Scheduler) stopNode(ctx context.Context, work scheduledNode, node model.Node, status NodeStatus, exists, reconnect bool) {
@@ -464,14 +464,34 @@ func (scheduler *Scheduler) stopNode(ctx context.Context, work scheduledNode, no
 	if err != nil {
 		return
 	}
-	_ = scheduler.cleanupBarrier(ctx, work, node, updated, status.Generation)
+	_ = scheduler.cleanupBarrier(ctx, work, node, updated)
 }
 
-func (scheduler *Scheduler) cleanupBarrier(ctx context.Context, work scheduledNode, node model.Node, status NodeStatus, ownershipGeneration uint64) NodeStatus {
-	if !scheduler.closeOwnedSession(work, node, ownershipGeneration) {
-		failed, _ := scheduler.controller.schedulerApply(ctx, work.jobID, work.nodeID, status.Generation, EventFailure, &model.CodeError{Code: ErrorCodeStopTimeout}, "cleanup_failed")
-		return failed
+func (scheduler *Scheduler) cleanupBarrier(ctx context.Context, work scheduledNode, node model.Node, status NodeStatus) NodeStatus {
+	if !scheduler.closeOwnedSession(work, node, cleanupOwnershipGeneration(status)) {
+		return scheduler.recordCleanupFailure(ctx, work, status)
 	}
+	updated, _ := scheduler.finishCleanupTransition(ctx, work, status)
+	return updated
+}
+
+func (scheduler *Scheduler) recordCleanupFailure(ctx context.Context, work scheduledNode, status NodeStatus) NodeStatus {
+	ownerJobID := status.JobID
+	if ownerJobID == "" {
+		ownerJobID = work.jobID
+	}
+	failed, err := scheduler.controller.schedulerApply(ctx, ownerJobID, work.nodeID, status.Generation, EventFailure,
+		&model.CodeError{Code: ErrorCodeStopTimeout}, "cleanup_failed")
+	if err != nil {
+		return status
+	}
+	if ownerJobID != work.jobID {
+		_ = scheduler.recordNodeDurably(ctx, work, failed, "cleanup_failed")
+	}
+	return failed
+}
+
+func (scheduler *Scheduler) finishCleanupTransition(ctx context.Context, work scheduledNode, status NodeStatus) (NodeStatus, bool) {
 	complete := EventStopped
 	if status.State == model.StateRecovering {
 		if status.CleanupPending {
@@ -480,8 +500,54 @@ func (scheduler *Scheduler) cleanupBarrier(ctx context.Context, work scheduledNo
 			complete = EventRecovered
 		}
 	}
-	updated, _ := scheduler.controller.schedulerApply(ctx, work.jobID, work.nodeID, status.Generation, complete, nil, "cleanup_complete")
-	return updated
+	ownerJobID := status.JobID
+	if ownerJobID == "" {
+		ownerJobID = work.jobID
+	}
+	updated, err := scheduler.controller.schedulerApply(ctx, ownerJobID, work.nodeID, status.Generation, complete, nil, "cleanup_complete")
+	if err != nil {
+		return status, false
+	}
+	if ownerJobID == work.jobID {
+		return updated, true
+	}
+	if updated.State == model.StateQueued {
+		ownerWork := scheduledNode{jobID: ownerJobID, nodeID: work.nodeID}
+		if job, exists := scheduler.controller.jobs.Get(ownerJobID); exists && !isTerminalJob(job.State) &&
+			!scheduler.completeNodeDurably(ctx, ownerWork, "cleanup_superseded") {
+			return updated, false
+		}
+	}
+	return updated, scheduler.recordNodeDurably(ctx, work, updated, "cleanup_complete")
+}
+
+func (scheduler *Scheduler) recordNodeDurably(ctx context.Context, work scheduledNode, status NodeStatus, step string) bool {
+	const retryDelay = 25 * time.Millisecond
+	for {
+		if err := scheduler.controller.schedulerRecordStatus(ctx, work.jobID, status, step); err == nil {
+			return true
+		}
+		timer := time.NewTimer(retryDelay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return false
+		case <-timer.C:
+		}
+	}
+}
+
+func cleanupOwnershipGeneration(status NodeStatus) uint64 {
+	// Stop and recovery transitions advance the runtime generation before
+	// cleanup begins.  The interface, route and nft ownership still belongs to
+	// the immediately preceding generation, including every retry after a
+	// partial cleanup failure or daemon restart.
+	if (status.State == model.StateStopping || status.State == model.StateRecovering) && status.Generation > 1 {
+		return status.Generation - 1
+	}
+	return 0
 }
 
 func (scheduler *Scheduler) closeOwnedSession(work scheduledNode, node model.Node, ownershipGeneration uint64) bool {
