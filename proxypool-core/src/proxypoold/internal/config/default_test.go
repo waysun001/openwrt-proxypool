@@ -68,7 +68,7 @@ func TestImageBuilderDefaultQueuesColdV2ActivationFromStrictV1Baseline(t *testin
 	if primary.URL != "https://dns.alidns.com/dns-query" || primary.BootstrapIP != "223.5.5.5" || primary.ServerName != "dns.alidns.com" {
 		t.Fatalf("ImageBuilder primary DNS endpoint = %#v", primary)
 	}
-	if backup.URL != "https://cloudflare-dns.com/dns-query" || backup.BootstrapIP != "1.1.1.1" || backup.ServerName != "cloudflare-dns.com" {
+	if backup.URL != "https://dns.alidns.com/dns-query" || backup.BootstrapIP != "223.6.6.6" || backup.ServerName != "dns.alidns.com" {
 		t.Fatalf("ImageBuilder backup DNS endpoint = %#v", backup)
 	}
 	for _, endpoint := range desired.Global.DoHEndpoints {
