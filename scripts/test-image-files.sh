@@ -42,6 +42,18 @@ chmod 644 "$SOURCE/etc/config/proxypool_runtime"
 chmod 755 "$SOURCE/etc/uci-defaults/keep"
 chmod 644 "$SOURCE/lib/netifd/proto/l2tp.sh"
 
+# Model a checkout created under umask 0002.  The full-image overlay is copied
+# with metadata preservation, so the staging helper must remove group/other
+# write bits from every directory and file before OpenWrt builds the squashfs.
+find "$SOURCE" -type d -exec chmod 775 {} +
+chmod 664 \
+	"$SOURCE/etc/config/proxypool" \
+	"$SOURCE/etc/config/proxypool_v2" \
+	"$SOURCE/etc/config/proxypool_runtime" \
+	"$SOURCE/etc/proxypool/v2-activation-request" \
+	"$SOURCE/usr/lib/proxypool/v2-image-activation-authority"
+chmod 775 "$SOURCE/etc/uci-defaults/keep" "$SOURCE/lib/netifd/proto/l2tp.sh"
+
 sh "$PREPARE" "$SOURCE" "$DESTINATION"
 
 cmp -s "$SOURCE/etc/config/proxypool" "$DESTINATION/etc/config/proxypool"
@@ -59,13 +71,37 @@ cmp -s "$SOURCE/lib/netifd/proto/l2tp.sh" "$DESTINATION/lib/netifd/proto/l2tp.sh
 [ "$(stat -c '%a' "$DESTINATION/etc/uci-defaults/keep")" = 755 ]
 case "$(uname -s)" in
 	Linux*)
-		for config_name in proxypool proxypool_v2 proxypool_runtime; do
-			[ "$(stat -c '%a' "$DESTINATION/etc/config/$config_name")" = 600 ]
-		done
-		[ "$(stat -c '%a' "$DESTINATION/etc/proxypool")" = 700 ]
-		[ "$(stat -c '%a' "$DESTINATION/etc/proxypool/v2-activation-request")" = 600 ]
-		[ "$(stat -c '%a' "$DESTINATION/lib/netifd/proto/l2tp.sh")" = 755 ]
-		;;
+	for config_name in proxypool proxypool_v2 proxypool_runtime; do
+		[ "$(stat -c '%a' "$DESTINATION/etc/config/$config_name")" = 600 ]
+	done
+	for public_dir in \
+		"$DESTINATION" \
+		"$DESTINATION/etc" \
+		"$DESTINATION/etc/config" \
+		"$DESTINATION/etc/uci-defaults" \
+		"$DESTINATION/lib" \
+		"$DESTINATION/lib/netifd" \
+		"$DESTINATION/lib/netifd/proto" \
+		"$DESTINATION/usr" \
+		"$DESTINATION/usr/lib" \
+		"$DESTINATION/usr/lib/proxypool"; do
+		[ "$(stat -c '%a' "$public_dir")" = 755 ] || {
+			printf 'staged public overlay directory has unsafe mode: %s %s\n' \
+				"$(stat -c '%a' "$public_dir")" "$public_dir" >&2
+			exit 1
+		}
+	done
+	[ "$(stat -c '%a' "$DESTINATION/etc/proxypool")" = 700 ]
+	[ "$(stat -c '%a' "$DESTINATION/etc/proxypool/v2-activation-request")" = 600 ]
+	[ "$(stat -c '%a' "$DESTINATION/etc/uci-defaults/keep")" = 755 ]
+	[ "$(stat -c '%a' "$DESTINATION/usr/lib/proxypool/v2-image-activation-authority")" = 644 ]
+	[ "$(stat -c '%a' "$DESTINATION/lib/netifd/proto/l2tp.sh")" = 755 ]
+	unsafe_path=$(find "$DESTINATION" -perm /022 -print -quit)
+	[ -z "$unsafe_path" ] || {
+		printf 'staged image overlay remains group/other writable: %s\n' "$unsafe_path" >&2
+		exit 1
+	}
+	;;
 	*) echo 'SKIP: staged config mode assertion requires a POSIX filesystem' ;;
 esac
 
