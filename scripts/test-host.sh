@@ -52,6 +52,7 @@ for shell_file in \
 	proxypool-core/files/proxypool-migrate.sh \
 	proxypool-core/files/proxypool-safety-uci-default \
 	proxypool-core/files/status.sh \
+	files/usr/lib/zeanlink/time-bootstrap.sh \
 	scripts/check-whitespace-range.sh \
 	scripts/inspect-ipk.sh \
 	scripts/inspect-luci-ipk.sh \
