@@ -991,31 +991,63 @@ if PROXYPOOL_TEST_MODE=readiness run_helper >/dev/null 2>&1; then
 	fail 'persistent wireless quarantine was reported LAN-ready'
 fi
 
-# A later cold invocation must recognize the exact installed fallback and
-# keep it disabled without repeatedly replacing the active file.  It may let
-# S20 start wired management, while readiness continues to deny ProxyPool.
+# A runtime reload may re-prove the exact installed fallback, but it must not
+# guess that an operator intended to restore the quarantined radio state.
 : >"$TRACE"
-PROXYPOOL_TEST_MODE=boot run_helper ||
-	fail 'verified disabled fallback did not release the wired-management boot'
+PROXYPOOL_TEST_MODE=configure run_helper ||
+	fail 'runtime quarantine re-entry could not retain the disabled fallback'
 if grep -Fxq 'wireless:install' "$TRACE"; then
-	fail 'wireless quarantine re-entry replaced an already verified fallback'
+	fail 'runtime quarantine re-entry replaced an already verified fallback'
 fi
-grep -Fxq 'wifi:down' "$TRACE" || fail 'wireless quarantine re-entry did not re-prove shutdown'
+grep -Fxq 'wifi:down' "$TRACE" || fail 'runtime quarantine re-entry did not re-prove shutdown'
+[ -d "$WIRELESS_QUARANTINE_ROOT" ] ||
+	fail 'runtime quarantine re-entry retired the persistent recovery boundary'
 
-# Wired administration may replace the disabled fallback with a fully valid,
-# already-isolated topology.  Only a byte-different file plus the complete
-# normal validator may retire the persistent quarantine.
-reset_wireless_config
-sed -i 's/\.isolate=0$/.isolate=1/; s/\.bridge_isolate=0$/.bridge_isolate=1/' \
-	"$CONFIG_DIR/wireless"
+# A later cold boot is the safe recovery boundary: Wi-Fi is independently
+# proven down, the preserved pre-quarantine bytes are passed through the full
+# isolation transaction, and only the validated result may replace the inert
+# fallback and retire the quarantine.
 rm -rf "$REBOOT_MARKER" "$LAN_STATE_ROOT"
 : >"$TRACE"
 PROXYPOOL_TEST_MODE=boot run_helper ||
-	fail 'fully validated wired repair could not retire wireless quarantine'
+	fail 'cold boot could not validate and restore the preserved wireless config'
 [ ! -e "$WIRELESS_QUARANTINE_ROOT" ] && [ ! -L "$WIRELESS_QUARANTINE_ROOT" ] ||
-	fail 'fully validated wired repair retained persistent wireless quarantine'
+	fail 'validated cold recovery retained persistent wireless quarantine'
+for section in radio0 ap_lan anonymous0; do
+	[ "$(wireless_value "$section.disabled")" = 0 ] ||
+		fail "validated cold recovery left $section disabled"
+done
+for option_file in ap_lan.isolate ap_lan.bridge_isolate anonymous0.isolate anonymous0.bridge_isolate; do
+	[ "$(wireless_value "$option_file")" = 1 ] ||
+		fail "validated cold recovery did not isolate $option_file"
+done
+grep -Fxq 'wifi:down' "$TRACE" || fail 'validated cold recovery did not prove runtime Wi-Fi down'
+grep -Fxq 'wireless:install' "$TRACE" || fail 'validated cold recovery did not atomically install its result'
 
+# A damaged preserved recovery file must never be installed.  Re-enter the
+# quarantine, corrupt only the recovery candidate, and require the cold path
+# to keep the exact disabled fallback and persistent hold.
 rm -rf "$REBOOT_MARKER" "$LAN_STATE_ROOT"
+reset_wireless_config
+: >"$TRACE"
+if PROXYPOOL_TEST_MODE=boot run_helper PROXYPOOL_TEST_FORCE_ISOLATION_FAIL=1 \
+	>/dev/null 2>&1; then
+	fail 'second cold-start wireless validation failure was accepted'
+fi
+cp "$CONFIG_DIR/wireless" "$TEST_TMP/wireless-disabled.before"
+printf '%s\n' 'not valid UCI {' >"$WIRELESS_QUARANTINE_ROOT/recovery"
+chmod 600 "$WIRELESS_QUARANTINE_ROOT/recovery"
+rm -rf "$REBOOT_MARKER" "$LAN_STATE_ROOT"
+: >"$TRACE"
+if PROXYPOOL_TEST_MODE=boot run_helper >/dev/null 2>&1; then
+	fail 'malformed preserved wireless recovery was accepted'
+fi
+cmp -s "$TEST_TMP/wireless-disabled.before" "$CONFIG_DIR/wireless" ||
+	fail 'malformed preserved recovery changed the disabled fallback'
+[ "$(cat "$WIRELESS_QUARANTINE_ROOT/state")" = DISABLED ] ||
+	fail 'malformed preserved recovery lost the persistent DISABLED hold'
+
+rm -rf "$WIRELESS_QUARANTINE_ROOT" "$REBOOT_MARKER" "$LAN_STATE_ROOT"
 printf '%s\n' 'not valid UCI {' >"$CONFIG_DIR/wireless"
 chmod 600 "$CONFIG_DIR/wireless"
 cp "$CONFIG_DIR/wireless" "$TEST_TMP/wireless-malformed.before"

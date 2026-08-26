@@ -30,6 +30,7 @@ WIRELESS_DELTA_DIR=
 WIRELESS_STAGE_DIR=
 WIRELESS_QUARANTINE_REPAIR=0
 WIRELESS_QUARANTINE_SAFE_DISABLED=0
+WIRELESS_QUARANTINE_COLD_RECOVERY=0
 PHASE1_LAN_PORTS='lan1 lan2 lan3 lan4 lan5'
 
 fail() {
@@ -578,6 +579,13 @@ handle_existing_wireless_quarantine() {
 			publish_wireless_quarantine_state DISABLED || return 1
 		fi
 		stop_wireless
+		if [ "$quarantine_state" = DISABLED ] && [ "$MODE" = boot ]; then
+			recovery_file=$(wireless_quarantine_recovery_file)
+			secure_wireless_file "$recovery_file" || return 1
+			WIRELESS_QUARANTINE_REPAIR=1
+			WIRELESS_QUARANTINE_COLD_RECOVERY=1
+			return 0
+		fi
 		WIRELESS_QUARANTINE_SAFE_DISABLED=1
 		return 0
 	fi
@@ -735,6 +743,12 @@ fail_wireless_closed() {
 }
 
 prepare_wireless_stage() {
+	wireless_stage_source=$CONFIG_DIR/wireless
+	if [ "$WIRELESS_QUARANTINE_COLD_RECOVERY" -eq 1 ]; then
+		wireless_stage_source=$(wireless_quarantine_recovery_file)
+		secure_wireless_file "$wireless_stage_source" ||
+			fail_wireless_closed 'persistent wireless recovery file is unsafe'
+	fi
 	case "$WIRELESS_STAGE_ROOT" in
 		/*) : ;;
 		*) fail_wireless_closed "unsafe wireless staging root: $WIRELESS_STAGE_ROOT" ;;
@@ -764,7 +778,7 @@ prepare_wireless_stage() {
 		fail_wireless_closed 'cannot inspect UCI config filesystem'
 	[ "${stage_metadata##* }" = "${config_metadata##* }" ] ||
 		fail_wireless_closed 'wireless stage is not on the live UCI overlay filesystem'
-	cp -p "$CONFIG_DIR/wireless" "$WIRELESS_STAGE_DIR/wireless" ||
+	cp -p "$wireless_stage_source" "$WIRELESS_STAGE_DIR/wireless" ||
 		fail_wireless_closed 'cannot copy wireless config into the private stage'
 	secure_wireless_file "$WIRELESS_STAGE_DIR/wireless" ||
 		fail_wireless_closed 'staged wireless config is not a private single-link root-owned file'
@@ -871,20 +885,26 @@ configure_wireless() {
 	secure_wireless_file "$WIRELESS_STAGE_DIR/wireless" ||
 		fail_wireless_closed 'staged wireless helper returned an unsafe config file'
 	[ -x "$CMP" ] || fail_wireless_closed "cmp is not executable: $CMP"
+	wireless_comparison_file=$CONFIG_DIR/wireless
+	if [ "$WIRELESS_QUARANTINE_COLD_RECOVERY" -eq 1 ]; then
+		wireless_comparison_file=$(wireless_quarantine_recovery_file)
+		secure_wireless_file "$wireless_comparison_file" ||
+			fail_wireless_closed 'persistent wireless recovery file changed during staging'
+	fi
 	case "$wireless_result" in
 		changed)
-			"$CMP" -s "$CONFIG_DIR/wireless" "$WIRELESS_STAGE_DIR/wireless" &&
+			"$CMP" -s "$wireless_comparison_file" "$WIRELESS_STAGE_DIR/wireless" &&
 				fail_wireless_closed 'staged wireless helper reported changed without changing its stage'
 			WIRELESS_CHANGED=1
 			;;
 		unchanged)
-			"$CMP" -s "$CONFIG_DIR/wireless" "$WIRELESS_STAGE_DIR/wireless" ||
+			"$CMP" -s "$wireless_comparison_file" "$WIRELESS_STAGE_DIR/wireless" ||
 				fail_wireless_closed 'staged wireless helper changed its stage but reported unchanged'
 			;;
 		*) fail_wireless_closed 'staged wireless helper returned an invalid success state' ;;
 	esac
 
-	if [ "$WIRELESS_CHANGED" -eq 1 ]; then
+	if [ "$WIRELESS_CHANGED" -eq 1 ] && [ "$WIRELESS_QUARANTINE_COLD_RECOVERY" -eq 0 ]; then
 		# The marker precedes every operation that can make runtime Wi-Fi
 		# unavailable or replace persistent configuration.  Any later failure
 		# therefore leaves an unambiguous cold-reboot requirement.
@@ -897,6 +917,18 @@ configure_wireless() {
 	}
 	if [ -n "$pending" ]; then
 		fail_wireless_closed 'wireless gained a pending UCI delta after staging'
+	fi
+
+	if [ "$WIRELESS_QUARANTINE_COLD_RECOVERY" -eq 1 ]; then
+		"$CMP" -s "$CONFIG_DIR/wireless" "$WIRELESS_STAGE_DIR/wireless" &&
+			fail_wireless_closed 'persistent wireless recovery did not replace the disabled fallback'
+		install_staged_wireless ||
+			fail_wireless_closed 'cannot atomically install recovered wireless isolation'
+		cleanup_wireless_stage || fail 'cannot remove the recovered wireless stage'
+		cleanup_wireless_delta || fail 'cannot remove private wireless UCI savedir'
+		clear_wireless_quarantine_after_repair ||
+			fail_wireless_closed 'cannot retire the recovered wireless quarantine'
+		return 0
 	fi
 
 	if [ "$WIRELESS_CHANGED" -eq 0 ]; then
