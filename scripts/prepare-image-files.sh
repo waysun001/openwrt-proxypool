@@ -46,6 +46,15 @@ source_l2tp="$source_dir/lib/netifd/proto/l2tp.sh"
 mkdir -p "$destination_dir"
 cp -a "$source_dir/." "$destination_dir/"
 
+# GitHub-hosted and self-hosted runners may check the repository out under
+# umask 0002.  `cp -a` preserves those 0775/0664 modes into OpenWrt's files
+# overlay, where group-writable /etc/config is correctly rejected by the
+# fail-closed boot guard.  Normalize the public overlay boundary before
+# applying the smaller private modes below; preserve executable bits already
+# carried by regular files while removing every group/other write bit.
+find "$destination_dir" -type d -exec chmod 755 {} +
+find "$destination_dir" -type f -exec chmod go-w {} +
+
 for config_name in proxypool proxypool_v2 proxypool_runtime; do
 	config_file="$destination_dir/etc/config/$config_name"
 	[ -f "$config_file" ] || {
