@@ -1430,7 +1430,7 @@ RUNTIME_GUARD_BODY
 		timeout 20s
 	}
 	set v2_proxy_uploads {
-		type ether_addr . ipv4_addr
+		type ether_addr . ipv4_addr . mark
 		timeout 20s
 		counter
 	}
@@ -1477,7 +1477,7 @@ RUNTIME_GUARD_BODY
 	}
 	chain guard_proxy_redirect {
 		type nat hook prerouting priority dstnat; policy accept;
-		iifname "br-lan" ip daddr != @blocked_v4_destinations meta l4proto tcp ether saddr . ip saddr @v2_proxy_uploads redirect to :ether saddr . ip saddr map @v2_tcp_redirect_ports
+		iifname "br-lan" ip daddr != @blocked_v4_destinations meta l4proto tcp ether saddr . ip saddr . meta mark @v2_proxy_uploads redirect to :ether saddr . ip saddr map @v2_tcp_redirect_ports
 	}
 	chain guard_proxy_output {
 		type filter hook output priority filter + 10; policy accept;

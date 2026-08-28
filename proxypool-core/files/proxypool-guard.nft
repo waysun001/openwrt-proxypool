@@ -38,7 +38,7 @@ table inet proxypool_guard {
 	}
 
 	set v2_proxy_uploads {
-		type ether_addr . ipv4_addr;
+		type ether_addr . ipv4_addr . mark;
 		flags timeout;
 		timeout 20s;
 		counter;
@@ -99,7 +99,7 @@ table inet proxypool_guard {
 
 	chain guard_proxy_redirect {
 		type nat hook prerouting priority -100; policy accept;
-		iifname "br-lan" meta nfproto ipv4 meta l4proto tcp ip daddr != @blocked_v4_destinations ether saddr . ip saddr @v2_proxy_uploads redirect to : ether saddr . ip saddr map @v2_tcp_redirect_ports
+		iifname "br-lan" meta nfproto ipv4 meta l4proto tcp ip daddr != @blocked_v4_destinations ether saddr . ip saddr . meta mark @v2_proxy_uploads redirect to : ether saddr . ip saddr map @v2_tcp_redirect_ports
 	}
 
 	chain guard_proxy_output {

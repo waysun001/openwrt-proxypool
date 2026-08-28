@@ -134,7 +134,7 @@ func runLive(ctx context.Context, options daemonOptions, endpointLease *api.Endp
 	dnsGate := live.NewDNSGate(desiredStore, dnsServer, dnsFactory)
 	authorizer := openwrtplatform.NewAuthorizer(runner, "/var/run/proxypool/authorization.json")
 	authorizationGate := live.NewAuthorizationGate(desiredStore, authorizer)
-	trafficReader := openwrtplatform.NewSysfsTrafficReader("/sys/class/net")
+	trafficReader := openwrtplatform.NewProtocolTrafficReader("/sys/class/net", runner)
 	scheduler := engine.NewSchedulerWithTraffic(controller, adapter, trafficReader, engine.SchedulerConfig{
 		L2TPConcurrency: desired.Global.L2TPConcurrency, ProxyConcurrency: desired.Global.ProxyConcurrency,
 		ConnectTimeout: desired.Global.ConnectTimeout, StopTimeout: desired.Global.StopTimeout,

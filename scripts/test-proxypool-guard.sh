@@ -200,8 +200,8 @@ require_regex "$GUARD_FLAT" 'map v2_policy_marks \{[^}]*type ether_addr[[:space:
 	'V2 policy mark map is not keyed by exact MAC and IPv4'
 require_regex "$GUARD_FLAT" 'map v2_tcp_redirect_ports \{[^}]*type ether_addr[[:space:]]*\.[[:space:]]*ipv4_addr[[:space:]]*:[[:space:]]*inet_service[[:space:]]*;' \
 	'V2 proxy redirect map is not keyed by exact MAC and IPv4'
-require_regex "$GUARD_FLAT" 'set v2_proxy_uploads \{[^}]*type ether_addr[[:space:]]*\.[[:space:]]*ipv4_addr[[:space:]]*;[^}]*counter[[:space:]]*;' \
-	'V2 proxy upload accounting is not an exact per-device counter set'
+require_regex "$GUARD_FLAT" 'set v2_proxy_uploads \{[^}]*type ether_addr[[:space:]]*\.[[:space:]]*ipv4_addr[[:space:]]*\.[[:space:]]*mark[[:space:]]*;[^}]*counter[[:space:]]*;' \
+	'V2 proxy upload accounting is not keyed by exact device and policy mark'
 require_regex "$GUARD_FLAT" 'set v2_proxy_downloads \{[^}]*type ipv4_addr[[:space:]]*\.[[:space:]]*inet_service[[:space:]]*;[^}]*counter[[:space:]]*;' \
 	'V2 proxy download accounting is not keyed by device IPv4 and listener port'
 
@@ -243,7 +243,7 @@ assert_chain_shape "$TEST_TMP/guard-forward.block" 12 4 guard_forward
 assert_chain_shape "$TEST_TMP/guard-l2-forward.block" 1 0 guard_l2_forward
 require_rule "$TEST_TMP/guard-proxy-redirect.block" 'SOCKS5 TCP is not redirected by exact expiring device map' \
 	'iifname "br-lan"' 'meta nfproto ipv4' 'meta l4proto tcp' 'ip daddr != @blocked_v4_destinations' \
-	'ether saddr . ip saddr @v2_proxy_uploads' 'redirect to :' 'ether saddr . ip saddr map @v2_tcp_redirect_ports'
+	'ether saddr . ip saddr . meta mark @v2_proxy_uploads' 'redirect to :' 'ether saddr . ip saddr map @v2_tcp_redirect_ports'
 require_rule "$TEST_TMP/guard-proxy-output.block" 'SOCKS5 replies are not counted by exact client/listener tuple' \
 	'oifname "br-lan"' 'meta nfproto ipv4' 'ct status dnat' 'ct direction reply' 'meta l4proto tcp' \
 	'ip daddr . tcp sport @v2_proxy_downloads'

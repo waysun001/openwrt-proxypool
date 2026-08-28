@@ -70,7 +70,7 @@ func TestAuthorizerPublishesExpiringSOCKS5RedirectAndCounterElements(t *testing.
 	for _, exact := range []string{
 		"add element inet proxypool_guard v2_tcp_redirect_ports { aa:bb:cc:dd:ee:02 . 192.168.9.23 timeout 20s : 12002 }",
 		"add element inet proxypool_guard v2_tcp_redirects { aa:bb:cc:dd:ee:02 . 192.168.9.23 . 12002 timeout 20s }",
-		"add element inet proxypool_guard v2_proxy_uploads { aa:bb:cc:dd:ee:02 . 192.168.9.23 timeout 20s }",
+		"add element inet proxypool_guard v2_proxy_uploads { aa:bb:cc:dd:ee:02 . 192.168.9.23 . 0x005a0002 timeout 20s }",
 		"add element inet proxypool_guard v2_proxy_downloads { 192.168.9.23 . 12002 timeout 20s }",
 	} {
 		if !strings.Contains(transaction, exact) {
