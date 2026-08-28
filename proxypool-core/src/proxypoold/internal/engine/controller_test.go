@@ -601,18 +601,45 @@ func TestControllerStoredMutationMatchIncludesNodeSecrets(t *testing.T) {
 	}
 }
 
-func TestControllerNodeSaveRejectsUnsupportedProtocolAndSixtyFirstNodeWithoutMutation(t *testing.T) {
+func TestControllerNodeSaveAcceptsAnonymousSOCKS5(t *testing.T) {
+	configPath := writeControllerConfig(t, controllerConfig())
+	jobs := NewJobStore()
+	controller, err := NewController(config.NewStore(configPath), NewRuntimeStore(filepath.Join(t.TempDir(), "runtime.json")), NewMachine(nil), jobs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := controller.Handle(context.Background(), controllerRequest(
+		"node-socks5", "node.save", `{"name":"Proxy","protocol":"socks5","enabled":false,"server":"proxy.example","port":1080,"username":"","password":"","expected_revision":3}`,
+	))
+	assertControllerSuccess(t, response)
+	stored, err := config.NewStore(configPath).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Revision != 4 || len(stored.Nodes) != 3 {
+		t.Fatalf("stored SOCKS5 config = revision %d nodes %#v", stored.Revision, stored.Nodes)
+	}
+	var saved model.Node
+	for _, node := range stored.Nodes {
+		if node.Protocol == model.ProtocolSOCKS5 {
+			saved = node
+		}
+	}
+	if saved.ID == "" || saved.Server != "proxy.example" || saved.Port != 1080 || saved.Username != "" || saved.Password != "" {
+		t.Fatalf("saved SOCKS5 node = %#v", saved)
+	}
+	if len(jobs.List()) != 1 || jobs.List()[0].State != JobSucceeded {
+		t.Fatalf("metadata-only SOCKS5 job = %#v", jobs.List())
+	}
+}
+
+func TestControllerNodeSaveRejectsSixtyFirstNodeWithoutMutation(t *testing.T) {
 	tests := []struct {
 		name   string
 		cfg    model.DesiredConfig
 		params string
 		code   string
-	}{
-		{
-			name: "socks5 is not yet implemented", cfg: controllerConfig(), code: ErrorCodeUnsupported,
-			params: `{"name":"Proxy","protocol":"socks5","enabled":false,"server":"proxy.example","port":1080,"username":"","password":"","expected_revision":3}`,
-		},
-	}
+	}{}
 	full := controllerConfig()
 	full.Nodes = make(map[string]model.Node, 60)
 	for index := 1; index <= 60; index++ {

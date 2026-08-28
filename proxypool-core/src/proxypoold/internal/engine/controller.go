@@ -1072,7 +1072,7 @@ func (controller *Controller) handleNodeSave(ctx context.Context, request api.Re
 		params.Port == 0 {
 		return controllerError(request.ID, ErrorCodeInvalidRequest)
 	}
-	if params.Protocol != model.ProtocolL2TP {
+	if params.Protocol != model.ProtocolL2TP && params.Protocol != model.ProtocolSOCKS5 {
 		return controllerError(request.ID, ErrorCodeUnsupported)
 	}
 	var expiresAt *time.Time
@@ -1121,7 +1121,7 @@ func (controller *Controller) handleNodeSave(ctx context.Context, request api.Re
 	if updating && username == "" {
 		username = previous.Username
 	}
-	if username == "" {
+	if username == "" && params.Protocol == model.ProtocolL2TP {
 		return controllerError(request.ID, ErrorCodeInvalidRequest)
 	}
 	password := params.Password
