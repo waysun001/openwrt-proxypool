@@ -50,6 +50,35 @@ func TestAuthorizerPublishesExactExpiringL2TPTupleAndReadsItBack(t *testing.T) {
 	}
 }
 
+func TestAuthorizerPublishesExpiringSOCKS5RedirectAndCounterElements(t *testing.T) {
+	runner := &inputRecordingRunner{}
+	lease := platform.AuthorizationLease{
+		NodeID: "node_proxy", MAC: "AA:BB:CC:DD:EE:02", IPv4: netip.MustParseAddr("192.168.9.23"),
+		PolicyID: 2, Generation: 10, Protocol: model.ProtocolSOCKS5, Interface: "psx0002", RedirectPort: 12002,
+	}
+	runner.readback = []byte(strings.Join([]string{
+		"aa:bb:cc:dd:ee:02", "192.168.9.23", "12002", "0x005a0002", "v2_policy_marks", "v2_dns_clients",
+		"v2_tcp_redirect_ports", "v2_tcp_redirects", "v2_proxy_uploads", "v2_proxy_downloads",
+	}, " "))
+	authorizer := NewAuthorizer(runner, filepath.Join(t.TempDir(), "leases.json"))
+	if err := authorizer.Publish(context.Background(), lease); err != nil {
+		t.Fatal(err)
+	}
+	runner.mu.Lock()
+	transaction := runner.inputs[1]
+	runner.mu.Unlock()
+	for _, exact := range []string{
+		"add element inet proxypool_guard v2_tcp_redirect_ports { aa:bb:cc:dd:ee:02 . 192.168.9.23 timeout 20s : 12002 }",
+		"add element inet proxypool_guard v2_tcp_redirects { aa:bb:cc:dd:ee:02 . 192.168.9.23 . 12002 timeout 20s }",
+		"add element inet proxypool_guard v2_proxy_uploads { aa:bb:cc:dd:ee:02 . 192.168.9.23 timeout 20s }",
+		"add element inet proxypool_guard v2_proxy_downloads { 192.168.9.23 . 12002 timeout 20s }",
+	} {
+		if !strings.Contains(transaction, exact) {
+			t.Fatalf("transaction is missing %q:\n%s", exact, transaction)
+		}
+	}
+}
+
 func TestAuthorizerRejectsStaleGenerationWithoutCallingNft(t *testing.T) {
 	runner := &inputRecordingRunner{}
 	lease := validAuthorizationLease()

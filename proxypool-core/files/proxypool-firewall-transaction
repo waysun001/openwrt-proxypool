@@ -795,11 +795,19 @@ verify_guard_inet_runtime() {
 			set_type["v2_tcp_redirects"]="type ether_addr . ipv4_addr . inet_service"
 			set_type["v2_dns_clients"]="type ether_addr . ipv4_addr"
 			set_type["v2_policy_marks"]="type ether_addr . ipv4_addr : mark"
+			set_type["v2_tcp_redirect_ports"]="type ether_addr . ipv4_addr : inet_service"
+			set_type["v2_proxy_uploads"]="type ether_addr . ipv4_addr"
+			set_type["v2_proxy_downloads"]="type ipv4_addr . inet_service"
 			expiring["v2_l2tp_paths"]=1
 			expiring["v2_l2tp_return_paths"]=1
 			expiring["v2_tcp_redirects"]=1
 			expiring["v2_dns_clients"]=1
 			expiring["v2_policy_marks"]=1
+			expiring["v2_tcp_redirect_ports"]=1
+			expiring["v2_proxy_uploads"]=1
+			expiring["v2_proxy_downloads"]=1
+			counted["v2_proxy_uploads"]=1
+			counted["v2_proxy_downloads"]=1
 			set_type["blocked_v4_destinations"]="type ipv4_addr"
 
 			required_blocked["0.0.0.0/8"]=1
@@ -831,6 +839,14 @@ verify_guard_inet_runtime() {
 			expected["guard_postrouting",1]="type nat hook postrouting priority srcnat; policy accept;"
 			expected["guard_postrouting",2]="meta mark & 0x00ff0000 == 0x005a0000 meta l4proto tcp ip saddr . oifname @v2_l2tp_return_paths masquerade"
 			maximum["guard_postrouting"]=2
+
+			expected["guard_proxy_redirect",1]="type nat hook prerouting priority dstnat; policy accept;"
+			expected["guard_proxy_redirect",2]="iifname \"br-lan\" ip daddr != @blocked_v4_destinations meta l4proto tcp ether saddr . ip saddr @v2_proxy_uploads redirect to :ether saddr . ip saddr map @v2_tcp_redirect_ports"
+			maximum["guard_proxy_redirect"]=2
+
+			expected["guard_proxy_output",1]="type filter hook output priority filter + 10; policy accept;"
+			expected["guard_proxy_output",2]="oifname \"br-lan\" ct status dnat ct direction reply meta l4proto tcp ip daddr . tcp sport @v2_proxy_downloads"
+			maximum["guard_proxy_output"]=2
 
 			expected["guard_input",1]="type filter hook input priority filter + 10; policy drop;"
 			expected["guard_input",2]="iifname \"br-lan\" meta nfproto ipv4 udp sport 68 udp dport 67 accept"
@@ -882,6 +898,8 @@ verify_guard_inet_runtime() {
 						# from runtime dumps while retaining the timeout value.
 						if (timeout_flags > 1 || timeout_default != 1) reject()
 					}
+					if ((set_name in counted) && counter_count != 1) reject()
+					if (!(set_name in counted) && counter_count != 0) reject()
 					if (set_name == "blocked_v4_destinations") {
 						if (blocked_flags != 1 || blocked_merge != 1 || blocked_elements != 1 ||
 						    !validate_blocked(blocked_text)) reject()
@@ -892,6 +910,7 @@ verify_guard_inet_runtime() {
 				if (set_name != "blocked_v4_destinations") {
 					if (set_name in expiring && line == "flags timeout") { timeout_flags++; next }
 					if (set_name in expiring && line == "timeout 20s") { timeout_default++; next }
+					if (set_name in counted && line == "counter") { counter_count++; next }
 					if (line == "elements = { }" || line == "elements = {}") next
 					reject(); next
 				}
@@ -927,7 +946,7 @@ verify_guard_inet_runtime() {
 				set_name=line; sub(/^(set|map) /, "", set_name); sub(/ \{$/, "", set_name)
 				if (!(set_name in set_type) || ++set_seen[set_name] != 1) reject()
 				state="set"; set_type_count=0
-				timeout_flags=0; timeout_default=0
+				timeout_flags=0; timeout_default=0; counter_count=0
 				blocked_flags=0; blocked_merge=0; blocked_elements=0; blocked_text=""
 				next
 			}

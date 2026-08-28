@@ -1425,6 +1425,20 @@ RUNTIME_GUARD_BODY
 		type ether_addr . ipv4_addr . inet_service
 		timeout 20s
 	}
+	map v2_tcp_redirect_ports {
+		type ether_addr . ipv4_addr : inet_service
+		timeout 20s
+	}
+	set v2_proxy_uploads {
+		type ether_addr . ipv4_addr
+		timeout 20s
+		counter
+	}
+	set v2_proxy_downloads {
+		type ipv4_addr . inet_service
+		timeout 20s
+		counter
+	}
 	set v2_dns_clients {
 		type ether_addr . ipv4_addr
 		timeout 20s
@@ -1460,6 +1474,14 @@ RUNTIME_GUARD_BODY
 	chain guard_postrouting {
 		type nat hook postrouting priority srcnat; policy accept;
 		meta mark & 0x00ff0000 == 0x005a0000 meta l4proto tcp ip saddr . oifname @v2_l2tp_return_paths masquerade
+	}
+	chain guard_proxy_redirect {
+		type nat hook prerouting priority dstnat; policy accept;
+		iifname "br-lan" ip daddr != @blocked_v4_destinations meta l4proto tcp ether saddr . ip saddr @v2_proxy_uploads redirect to :ether saddr . ip saddr map @v2_tcp_redirect_ports
+	}
+	chain guard_proxy_output {
+		type filter hook output priority filter + 10; policy accept;
+		oifname "br-lan" ct status dnat ct direction reply meta l4proto tcp ip daddr . tcp sport @v2_proxy_downloads
 	}
 	chain guard_input {
 		type filter hook input priority filter + 10; policy drop;

@@ -198,14 +198,20 @@ require_regex "$GUARD_FLAT" 'set v2_dns_clients \{[^}]*type ether_addr[[:space:]
 	'V2 router DNS admission is not keyed by exact MAC and IPv4'
 require_regex "$GUARD_FLAT" 'map v2_policy_marks \{[^}]*type ether_addr[[:space:]]*\.[[:space:]]*ipv4_addr[[:space:]]*:[[:space:]]*mark[[:space:]]*;' \
 	'V2 policy mark map is not keyed by exact MAC and IPv4'
+require_regex "$GUARD_FLAT" 'map v2_tcp_redirect_ports \{[^}]*type ether_addr[[:space:]]*\.[[:space:]]*ipv4_addr[[:space:]]*:[[:space:]]*inet_service[[:space:]]*;' \
+	'V2 proxy redirect map is not keyed by exact MAC and IPv4'
+require_regex "$GUARD_FLAT" 'set v2_proxy_uploads \{[^}]*type ether_addr[[:space:]]*\.[[:space:]]*ipv4_addr[[:space:]]*;[^}]*counter[[:space:]]*;' \
+	'V2 proxy upload accounting is not an exact per-device counter set'
+require_regex "$GUARD_FLAT" 'set v2_proxy_downloads \{[^}]*type ipv4_addr[[:space:]]*\.[[:space:]]*inet_service[[:space:]]*;[^}]*counter[[:space:]]*;' \
+	'V2 proxy download accounting is not keyed by device IPv4 and listener port'
 
-tuple_count=$(grep -Eo '(set|map) (v1_l2tp_paths|v1_tcp_redirects|v2_l2tp_paths|v2_l2tp_return_paths|v2_tcp_redirects|v2_dns_clients|v2_policy_marks)[[:space:]]*\{' "$GUARD_FLAT" | wc -l | tr -d ' ')
-[ "$tuple_count" -eq 7 ] || fail "expected exactly seven named authorization sets/maps, found $tuple_count"
-for tuple_set in v1_l2tp_paths v1_tcp_redirects v2_l2tp_paths v2_l2tp_return_paths v2_tcp_redirects v2_dns_clients v2_policy_marks; do
+tuple_count=$(grep -Eo '(set|map) (v1_l2tp_paths|v1_tcp_redirects|v2_l2tp_paths|v2_l2tp_return_paths|v2_tcp_redirects|v2_dns_clients|v2_policy_marks|v2_tcp_redirect_ports|v2_proxy_uploads|v2_proxy_downloads)[[:space:]]*\{' "$GUARD_FLAT" | wc -l | tr -d ' ')
+[ "$tuple_count" -eq 10 ] || fail "expected exactly ten named authorization sets/maps, found $tuple_count"
+for tuple_set in v1_l2tp_paths v1_tcp_redirects v2_l2tp_paths v2_l2tp_return_paths v2_tcp_redirects v2_dns_clients v2_policy_marks v2_tcp_redirect_ports v2_proxy_uploads v2_proxy_downloads; do
 	reject_regex "$GUARD_FLAT" "set $tuple_set \\{[^}]*elements[[:space:]]*=" \
 		"$tuple_set is pre-authorized instead of empty after reload"
 done
-for expiring_set in v2_l2tp_paths v2_l2tp_return_paths v2_tcp_redirects v2_dns_clients v2_policy_marks; do
+for expiring_set in v2_l2tp_paths v2_l2tp_return_paths v2_tcp_redirects v2_dns_clients v2_policy_marks v2_tcp_redirect_ports v2_proxy_uploads v2_proxy_downloads; do
 	require_regex "$GUARD_FLAT" "(set|map) $expiring_set \\{[^}]*flags timeout[[:space:]]*;[^}]*timeout 20s[[:space:]]*;" \
 		"$expiring_set is not a 20-second crash-expiring lease"
 done
@@ -228,11 +234,19 @@ extract_chain "$GUARD_NORM" guard_prerouting "$TEST_TMP/guard-prerouting.block"
 extract_chain "$GUARD_NORM" guard_input "$TEST_TMP/guard-input.block"
 extract_chain "$GUARD_NORM" guard_forward "$TEST_TMP/guard-forward.block"
 extract_chain "$GUARD_NORM" guard_postrouting "$TEST_TMP/guard-postrouting.block"
+extract_chain "$GUARD_NORM" guard_proxy_redirect "$TEST_TMP/guard-proxy-redirect.block"
+extract_chain "$GUARD_NORM" guard_proxy_output "$TEST_TMP/guard-proxy-output.block"
 extract_chain "$GUARD_NORM" guard_l2_forward "$TEST_TMP/guard-l2-forward.block"
 assert_chain_shape "$TEST_TMP/guard-prerouting.block" 2 0 guard_prerouting
 assert_chain_shape "$TEST_TMP/guard-input.block" 10 8 guard_input
 assert_chain_shape "$TEST_TMP/guard-forward.block" 12 4 guard_forward
 assert_chain_shape "$TEST_TMP/guard-l2-forward.block" 1 0 guard_l2_forward
+require_rule "$TEST_TMP/guard-proxy-redirect.block" 'SOCKS5 TCP is not redirected by exact expiring device map' \
+	'iifname "br-lan"' 'meta nfproto ipv4' 'meta l4proto tcp' 'ip daddr != @blocked_v4_destinations' \
+	'ether saddr . ip saddr @v2_proxy_uploads' 'redirect to :' 'ether saddr . ip saddr map @v2_tcp_redirect_ports'
+require_rule "$TEST_TMP/guard-proxy-output.block" 'SOCKS5 replies are not counted by exact client/listener tuple' \
+	'oifname "br-lan"' 'meta nfproto ipv4' 'ct status dnat' 'ct direction reply' 'meta l4proto tcp' \
+	'ip daddr . tcp sport @v2_proxy_downloads'
 require_fixed "$TEST_TMP/guard-prerouting.block" \
 	'type filter hook prerouting priority -310; policy accept;' \
 	'guard_prerouting is not the unique priority -310 mark scrub chain'

@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -125,6 +126,9 @@ func (authorizer *Authorizer) RevokeAll(ctx context.Context) error {
 		"flush set inet proxypool_guard v2_l2tp_paths",
 		"flush set inet proxypool_guard v2_l2tp_return_paths",
 		"flush set inet proxypool_guard v2_tcp_redirects",
+		"flush map inet proxypool_guard v2_tcp_redirect_ports",
+		"flush set inet proxypool_guard v2_proxy_uploads",
+		"flush set inet proxypool_guard v2_proxy_downloads",
 		"",
 	}, "\n"))
 	if _, err := authorizer.runner.RunInput(ctx, transaction, nftPath, "-f", "-"); err != nil {
@@ -178,7 +182,12 @@ func authorizationElements(lease platform.AuthorizationLease) []nftLeaseElement 
 			nftLeaseElement{name: "v2_l2tp_return_paths", key: fmt.Sprintf("%s . %q", lease.IPv4, lease.Interface)},
 		)
 	} else {
-		elements = append(elements, nftLeaseElement{name: "v2_tcp_redirects", key: fmt.Sprintf("%s . %s . %d", lease.MAC, lease.IPv4, lease.RedirectPort)})
+		elements = append(elements,
+			nftLeaseElement{name: "v2_tcp_redirect_ports", key: fmt.Sprintf("%s . %s", lease.MAC, lease.IPv4), value: strconv.Itoa(int(lease.RedirectPort))},
+			nftLeaseElement{name: "v2_tcp_redirects", key: fmt.Sprintf("%s . %s . %d", lease.MAC, lease.IPv4, lease.RedirectPort)},
+			nftLeaseElement{name: "v2_proxy_uploads", key: fmt.Sprintf("%s . %s", lease.MAC, lease.IPv4)},
+			nftLeaseElement{name: "v2_proxy_downloads", key: fmt.Sprintf("%s . %d", lease.IPv4, lease.RedirectPort)},
+		)
 	}
 	return elements
 }
