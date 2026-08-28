@@ -31,7 +31,8 @@
         })
     });
     var ERROR_LABELS = Object.freeze({
-        invalid_request: '请求内容格式错误', internal: '内部服务错误', auth_failed: '节点账号或密码错误',
+        invalid_request: '请求内容格式错误', credentials_mismatch: 'SOCKS5 账号和密码必须同时填写或同时留空',
+        internal: '内部服务错误', auth_failed: '节点账号或密码错误',
         invalid_config: '配置未通过安全校验', unsupported: '当前版本不支持此协议', wan_down: '外网连接不可用',
         connect_timeout: '节点连接超时', stop_timeout: '节点停止超时', capacity_exceeded: '节点数量已达到上限（60）',
         revision_conflict: '配置已变化，请刷新页面后重试', duplicate: '操作重复，请刷新页面后重试',
@@ -246,7 +247,7 @@
         var expiresAt = String(form.expires_at || '');
         var creating = nodeID === '';
 
-        if (protocol !== 'l2tp') errors.push('unsupported_protocol');
+        if (protocol !== 'l2tp' && protocol !== 'socks5') errors.push('unsupported_protocol');
         if (!name || name.length > 128) errors.push('invalid_name');
         if (Array.from(note).length > 200 || /[\u0000-\u001F\u007F-\u009F]/.test(note)) errors.push('invalid_note');
         if (!server || server.length > 253) errors.push('invalid_server');
@@ -255,8 +256,10 @@
         if (!Number.isInteger(Number(revision)) || Number(revision) < 1) errors.push('invalid_revision');
         if (/^\d{4}-\d{2}-\d{2}$/.test(expiresAt)) expiresAt += 'T23:59:59Z';
         else if (expiresAt && !Number.isFinite(Date.parse(expiresAt))) errors.push('invalid_expiry');
-        if ((creating || !form.has_username) && !username) errors.push('credentials_required');
-        if ((creating || !form.has_password) && !password && !errors.includes('credentials_required')) errors.push('credentials_required');
+        var hasUsername = username !== '' || (!creating && !!form.has_username);
+        var hasPassword = password !== '' || (!creating && !!form.has_password);
+        if (protocol === 'l2tp' && (!hasUsername || !hasPassword)) errors.push('credentials_required');
+        if (protocol === 'socks5' && hasUsername !== hasPassword) errors.push('credentials_mismatch');
 
         return {
             errors: errors,
@@ -454,7 +457,7 @@
 
     function buildImportPreviewRequest(raw, revision, protocol) {
         protocol = String(protocol || 'l2tp');
-        if (['l2tp', 'socks5', 'slp'].indexOf(protocol) === -1) protocol = 'l2tp';
+        if (['l2tp', 'socks5'].indexOf(protocol) === -1) protocol = 'l2tp';
         return { protocol: protocol, raw: String(raw || ''), expected_revision: Number(revision) };
     }
 
@@ -798,15 +801,16 @@
             form.elements.node_id.value = node && node.id || '';
             form.elements.name.value = node && node.name || '';
             form.elements.note.value = node && node.note || '';
+            form.elements.protocol.value = node && node.protocol || 'l2tp';
             form.elements.server.value = node && node.server || '';
-            form.elements.port.value = node && node.port || 1701;
+            form.elements.port.value = node && node.port || (form.elements.protocol.value === 'socks5' ? 1080 : 1701);
             form.elements.enabled.checked = node ? !!node.enabled : true;
             form.elements.expires_at.value = node && node.expires_at ? String(node.expires_at).slice(0, 10) : '';
             form.elements.username.value = '';
             form.elements.password.value = '';
             form.setAttribute('data-has-username', node && node.has_username ? '1' : '0');
             form.setAttribute('data-has-password', node && node.has_password ? '1' : '0');
-            document.getElementById('pp-v2-node-modal-title').textContent = node ? '编辑节点' : '新增 L2TP 节点';
+            document.getElementById('pp-v2-node-modal-title').textContent = node ? '编辑节点' : '新增节点';
             modal.hidden = false;
         }
 
@@ -1016,6 +1020,13 @@
         });
         document.getElementById('pp-v2-add-node').addEventListener('click', function() { openNodeEditor(null); });
         document.getElementById('pp-v2-node-cancel').addEventListener('click', function() { document.getElementById('pp-v2-node-modal').hidden = true; });
+        document.querySelector('#pp-v2-node-form [name="protocol"]').addEventListener('change', function(event) {
+            var form = event.currentTarget.form;
+            if (form.elements.node_id.value !== '') return;
+            var port = String(form.elements.port.value || '');
+            if (event.currentTarget.value === 'socks5' && (port === '' || port === '1701')) form.elements.port.value = '1080';
+            if (event.currentTarget.value === 'l2tp' && (port === '' || port === '1080')) form.elements.port.value = '1701';
+        });
         document.getElementById('pp-v2-node-form').addEventListener('submit', function(event) {
             event.preventDefault();
             var form = event.currentTarget;
@@ -1023,7 +1034,7 @@
                 node_id: form.elements.node_id.value,
                 name: form.elements.name.value,
                 note: form.elements.note.value,
-                protocol: 'l2tp',
+                protocol: form.elements.protocol.value,
                 enabled: form.elements.enabled.checked,
                 server: form.elements.server.value,
                 port: form.elements.port.value,
@@ -1034,7 +1045,8 @@
                 has_password: form.getAttribute('data-has-password') === '1'
             }, state.revision);
             if (validation.errors.length) {
-                showError({ code: validation.errors[0] === 'unsupported_protocol' ? 'unsupported' : 'invalid_request' });
+                var validationCode = validation.errors[0];
+                showError({ code: validationCode === 'unsupported_protocol' ? 'unsupported' : validationCode === 'credentials_mismatch' ? 'credentials_mismatch' : 'invalid_request' });
                 return;
             }
             document.getElementById('pp-v2-node-modal').hidden = true;

@@ -30,7 +30,7 @@
 
     <section data-pp-panel="nodes">
         <div class="pp-v2-toolbar">
-            <div><h3>节点管理</h3><p>当前可拨号协议为 L2TP；账号和密码不会回显。</p></div>
+            <div><h3>节点管理</h3><p>当前支持 L2TP 与 SOCKS5（仅 TCP）；账号和密码不会回显，SOCKS5 不转发 UDP。</p></div>
             <div class="pp-v2-actions">
                 <button id="pp-v2-export-safe" type="button" class="cbi-button">导出脱敏 JSON</button>
                 <button id="pp-v2-import-open" type="button" class="cbi-button cbi-button-apply">批量导入</button>
@@ -72,12 +72,12 @@
 
     <div id="pp-v2-node-modal" class="pp-v2-modal" hidden>
         <div class="pp-v2-dialog" role="dialog" aria-modal="true" aria-labelledby="pp-v2-node-modal-title">
-            <h3 id="pp-v2-node-modal-title">新增 L2TP 节点</h3>
+            <h3 id="pp-v2-node-modal-title">新增节点</h3>
             <form id="pp-v2-node-form">
                 <input type="hidden" name="node_id" />
                 <div class="pp-v2-form-grid">
                     <label>名称<input name="name" maxlength="128" required /></label>
-                    <label>协议<select name="protocol" disabled><option value="l2tp">L2TP</option></select></label>
+                    <label>协议<select name="protocol"><option value="l2tp">L2TP</option><option value="socks5">SOCKS5</option></select></label>
                     <label class="pp-v2-form-wide">备注<input name="note" maxlength="200" placeholder="例如：香港微信专用" /></label>
                     <label>服务器<input name="server" maxlength="253" required /></label>
                     <label>端口<input name="port" type="number" min="1" max="65535" value="1701" required /></label>
@@ -113,9 +113,9 @@
 
     <div id="pp-v2-import-modal" class="pp-v2-modal" hidden>
         <div class="pp-v2-dialog" role="dialog" aria-modal="true" aria-labelledby="pp-v2-import-title">
-            <h3 id="pp-v2-import-title">批量导入 L2TP 节点</h3>
-            <p><label>协议 <select id="pp-v2-import-protocol"><option value="l2tp">L2TP</option><option value="socks5">SOCKS5（仅迁移保存）</option><option value="slp">SLP（仅迁移保存）</option></select></label></p>
-            <p>L2TP 每行一个：<code>服务器|用户名|密码</code>，或 <code>服务器|端口|用户名|密码|到期日期</code>。SOCKS5/SLP 可保留旧配置，当前版本不会让设备通过它们上网。单次最多 60 个。</p>
+            <h3 id="pp-v2-import-title">批量导入节点</h3>
+            <p><label>协议 <select id="pp-v2-import-protocol"><option value="l2tp">L2TP</option><option value="socks5">SOCKS5</option></select></label></p>
+            <p>L2TP 每行一个：<code>服务器|用户名|密码</code>，或 <code>服务器|端口|用户名|密码|到期日期</code>。SOCKS5 每行一个：<code>服务器|端口|用户名|密码|到期日期</code>，匿名节点的用户名和密码同时留空。SOCKS5 仅转发 TCP，单次最多 60 个。</p>
             <textarea id="pp-v2-import-raw" class="pp-v2-import-raw" maxlength="1048576" autocomplete="off" placeholder="vpn.example.com|username|password"></textarea>
             <div id="pp-v2-import-result" class="pp-v2-import-result" aria-live="polite"></div>
             <div class="pp-v2-dialog-actions">

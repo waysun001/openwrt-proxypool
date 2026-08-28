@@ -224,10 +224,28 @@ test('node validation trims and bounds notes by Unicode code point', () => {
   }
 });
 
-test('node validation rejects unsupported protocol and missing create credentials', () => {
-  const unsupported = ui.validateNodeForm({
+test('node validation admits SOCKS5 anonymous or paired auth and rejects SLP', () => {
+  const anonymous = ui.validateNodeForm({
     node_id: '', name: 'Proxy', protocol: 'socks5', enabled: true,
+    server: 'proxy.example', port: '1080', username: '', password: '', expires_at: '',
+  }, 2);
+  assert.deepEqual(anonymous.errors, []);
+
+  const authenticated = ui.validateNodeForm({
+    node_id: '', name: 'Proxy Auth', protocol: 'socks5', enabled: true,
     server: 'proxy.example', port: '1080', username: 'u', password: 'p', expires_at: '',
+  }, 2);
+  assert.deepEqual(authenticated.errors, []);
+
+  const unpaired = ui.validateNodeForm({
+    node_id: '', name: 'Proxy Bad', protocol: 'socks5', enabled: true,
+    server: 'proxy.example', port: '1080', username: 'u', password: '', expires_at: '',
+  }, 2);
+  assert.ok(unpaired.errors.includes('credentials_mismatch'));
+
+  const unsupported = ui.validateNodeForm({
+    node_id: '', name: 'SLP', protocol: 'slp', enabled: true,
+    server: 'slp.example', port: '443', username: 'u', password: 'p', expires_at: '',
   }, 2);
   assert.ok(unsupported.errors.includes('unsupported_protocol'));
 
@@ -292,6 +310,9 @@ test('import preview sends untouched raw text without browser credential parsing
   });
   assert.deepEqual(ui.buildImportPreviewRequest(raw, 17, 'socks5'), {
     protocol: 'socks5', raw, expected_revision: 17,
+  });
+  assert.deepEqual(ui.buildImportPreviewRequest(raw, 17, 'slp'), {
+    protocol: 'l2tp', raw, expected_revision: 17,
   });
 });
 

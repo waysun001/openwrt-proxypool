@@ -47,6 +47,13 @@ test('node notes cross the Lua bridge with bounded control-safe text', () => {
   assert.match(mainView, /<input name="note" maxlength="200"/);
 });
 
+test('node editor and importer expose live L2TP and SOCKS5 without SLP migration claims', () => {
+  assert.match(mainView, /<select name="protocol">\s*<option value="l2tp">L2TP<\/option>\s*<option value="socks5">SOCKS5<\/option>/);
+  assert.match(mainView, /id="pp-v2-import-protocol"><option value="l2tp">L2TP<\/option><option value="socks5">SOCKS5<\/option>/);
+  assert.doesNotMatch(mainView, /value="slp"|仅迁移保存|不会让设备通过它们上网/);
+  assert.match(v2Script, /protocol:\s*form\.elements\.protocol\.value/);
+});
+
 test('node table exposes compact traffic columns and text-only note rendering', () => {
   assert.match(mainView, /<th>累计流量<\/th><th>实时速度<\/th>/);
   assert.match(v2Script, /pp-v2-node-note[^\n]+node\.note/);
