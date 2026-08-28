@@ -36,8 +36,14 @@ type RouteGate struct{ manager platform.RouteManager }
 func NewRouteGate(manager platform.RouteManager) *RouteGate { return &RouteGate{manager: manager} }
 
 func (gate *RouteGate) Open(ctx context.Context, request platform.NodeRequest, session platform.Session) error {
+	if gate == nil || !exactLiveSession(request, session) {
+		return errors.New("live route gate is invalid")
+	}
+	if request.Node.Protocol == model.ProtocolSOCKS5 {
+		return nil
+	}
 	lease, err := routeLease(request, session)
-	if err != nil || gate == nil || gate.manager == nil {
+	if err != nil || gate.manager == nil {
 		return errors.New("live route gate is invalid")
 	}
 	if err := gate.manager.Install(ctx, lease); err != nil {
@@ -51,16 +57,31 @@ func (gate *RouteGate) Open(ctx context.Context, request platform.NodeRequest, s
 }
 
 func (gate *RouteGate) Close(ctx context.Context, request platform.NodeRequest, session platform.Session) error {
+	if gate == nil {
+		return errors.New("live route gate is invalid")
+	}
+	if request.Node.Protocol == model.ProtocolSOCKS5 {
+		if !exactLiveSession(request, session) {
+			return errors.New("live route gate is invalid")
+		}
+		return nil
+	}
 	lease, err := routeCleanupLease(request, session)
-	if err != nil || gate == nil || gate.manager == nil {
+	if err != nil || gate.manager == nil {
 		return errors.New("live route gate is invalid")
 	}
 	return gate.manager.Remove(ctx, lease)
 }
 
 func (gate *RouteGate) Verify(ctx context.Context, request platform.NodeRequest, session platform.Session) error {
+	if gate == nil || !exactLiveSession(request, session) {
+		return errors.New("live route gate is invalid")
+	}
+	if request.Node.Protocol == model.ProtocolSOCKS5 {
+		return nil
+	}
 	lease, err := routeLease(request, session)
-	if err != nil || gate == nil || gate.manager == nil {
+	if err != nil || gate.manager == nil {
 		return errors.New("live route gate is invalid")
 	}
 	if err := gate.manager.Verify(ctx, lease); err != nil {

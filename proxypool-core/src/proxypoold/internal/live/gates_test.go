@@ -98,6 +98,31 @@ func TestRouteGateCleanupDerivesOwnedL2TPInterfaceAfterRestart(t *testing.T) {
 	}
 }
 
+func TestRouteGateIsAValidatedNoOpForSOCKS5(t *testing.T) {
+	routes := &liveRouteManager{}
+	request := platform.NodeRequest{
+		Node:  model.Node{ID: "node_proxy", Protocol: model.ProtocolSOCKS5, Enabled: true, PolicyID: 2, Revision: 4},
+		JobID: "job_proxy", Generation: 5,
+	}
+	session := platform.Session{
+		NodeID: "node_proxy", Protocol: model.ProtocolSOCKS5, Generation: 5,
+		Interface: "psx0002", LocalPort: 12002, RemoteAddress: "203.0.113.8:1080", OwnershipDigest: "owned",
+	}
+	gate := NewRouteGate(routes)
+	if err := gate.Open(context.Background(), request, session); err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if err := gate.Verify(context.Background(), request, session); err != nil {
+		t.Fatalf("Verify() error = %v", err)
+	}
+	if err := gate.Close(context.Background(), request, session); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if routes.installs != 0 || routes.verifies != 0 || routes.removes != 0 {
+		t.Fatalf("SOCKS5 route calls = install %d verify %d remove %d", routes.installs, routes.verifies, routes.removes)
+	}
+}
+
 func TestRouteGateReportsAStableRouteFailureCode(t *testing.T) {
 	routes := &liveRouteManager{installErr: errors.New("raw route detail")}
 	request, session := liveRequestAndSession()

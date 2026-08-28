@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/netip"
 	"os"
 	"os/signal"
@@ -122,19 +123,19 @@ func runLive(ctx context.Context, options daemonOptions, endpointLease *api.Endp
 	}
 	dnsServer := dnsproxy.NewServer(netip.MustParseAddrPort("192.168.9.1:53"))
 	l2tp := openwrtplatform.NewL2TPAdapter(runner, resolver, "")
+	socks5 := openwrtplatform.NewSOCKS5Adapter(runner, resolver, "")
+	adapter := platform.NewProtocolDispatcher(map[model.Protocol]platform.NodeAdapter{
+		model.ProtocolL2TP: l2tp, model.ProtocolSOCKS5: socks5,
+	})
 	routeGate := live.NewRouteGate(openwrtplatform.NewRouteManager(runner))
 	dnsFactory := func(node model.Node, session platform.Session, endpoint model.DoHEndpoint) (dnsproxy.NodeChannel, error) {
-		transport, err := openwrtplatform.NewDoHTransport(endpoint, session.Interface, node.PolicyID)
-		if err != nil {
-			return nil, err
-		}
-		return dnsproxy.NewDoHChannel(endpoint, transport)
+		return newNodeDNSChannel(node, session, endpoint)
 	}
 	dnsGate := live.NewDNSGate(desiredStore, dnsServer, dnsFactory)
 	authorizer := openwrtplatform.NewAuthorizer(runner, "/var/run/proxypool/authorization.json")
 	authorizationGate := live.NewAuthorizationGate(desiredStore, authorizer)
 	trafficReader := openwrtplatform.NewSysfsTrafficReader("/sys/class/net")
-	scheduler := engine.NewSchedulerWithTraffic(controller, l2tp, trafficReader, engine.SchedulerConfig{
+	scheduler := engine.NewSchedulerWithTraffic(controller, adapter, trafficReader, engine.SchedulerConfig{
 		L2TPConcurrency: desired.Global.L2TPConcurrency, ProxyConcurrency: desired.Global.ProxyConcurrency,
 		ConnectTimeout: desired.Global.ConnectTimeout, StopTimeout: desired.Global.StopTimeout,
 	}, routeGate, dnsGate, authorizationGate)
@@ -145,6 +146,31 @@ func runLive(ctx context.Context, options daemonOptions, endpointLease *api.Endp
 		Methods: liveControlMethods(),
 	}
 	return serveLive(ctx, controller, scheduler, dnsServer, authorizationGate, authorizer, server, desired.Global.StopTimeout)
+}
+
+func newNodeDNSChannel(node model.Node, session platform.Session, endpoint model.DoHEndpoint) (dnsproxy.NodeChannel, error) {
+	if node.Protocol != session.Protocol {
+		return nil, errors.New("node DNS session protocol is stale")
+	}
+	var (
+		transport *http.Transport
+		err       error
+	)
+	switch node.Protocol {
+	case model.ProtocolL2TP:
+		transport, err = openwrtplatform.NewDoHTransport(endpoint, session.Interface, node.PolicyID)
+	case model.ProtocolSOCKS5:
+		if session.RemoteAddress == "" {
+			return nil, errors.New("SOCKS5 DNS endpoint ownership is missing")
+		}
+		transport, err = openwrtplatform.NewSOCKSDoHTransport(endpoint, session.RemoteAddress, node.Username, node.Password)
+	default:
+		return nil, errors.New("node DNS protocol is unsupported")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return dnsproxy.NewDoHChannel(endpoint, transport)
 }
 
 func liveControlMethods() map[string]struct{} {

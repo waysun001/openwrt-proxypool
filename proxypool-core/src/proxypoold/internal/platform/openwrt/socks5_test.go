@@ -33,7 +33,7 @@ func TestSOCKS5AdapterStartsPrivateTCPOnlyProcessAndProbesExactEndpoint(t *testi
 		t.Fatalf("Start() error = %v", err)
 	}
 	if session.NodeID != request.Node.ID || session.Generation != request.Generation || session.Protocol != model.ProtocolSOCKS5 ||
-		session.Interface != "psx0001" || session.LocalPort != 12001 || session.OwnershipDigest == "" {
+		session.Interface != "psx0001" || session.LocalPort != 12001 || session.RemoteAddress != "203.0.113.7:1080" || session.OwnershipDigest == "" {
 		t.Fatalf("session = %#v", session)
 	}
 	configPath := filepath.Join(fixture.stateDir, request.Node.ID, "redsocks.conf")

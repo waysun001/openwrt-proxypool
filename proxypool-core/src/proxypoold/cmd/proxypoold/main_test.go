@@ -15,6 +15,8 @@ import (
 	"proxypoold/internal/api"
 	"proxypoold/internal/buildinfo"
 	"proxypoold/internal/diagnostics"
+	"proxypoold/internal/model"
+	"proxypoold/internal/platform"
 )
 
 func TestRunPreservesVersionAndStrictlyRequiresShadow(t *testing.T) {
@@ -63,6 +65,43 @@ func TestLiveControlMethodsExposeTypedNodeMutations(t *testing.T) {
 		if _, exists := methods[method]; !exists {
 			t.Fatalf("live daemon method allowlist omitted %q", method)
 		}
+	}
+}
+
+func TestNewNodeDNSChannelRequiresProtocolSpecificSessionEvidence(t *testing.T) {
+	endpoint := model.DoHEndpoint{
+		URL: "https://dns.alidns.com/dns-query", BootstrapIP: "223.5.5.5", ServerName: "dns.alidns.com",
+	}
+	tests := []struct {
+		name    string
+		node    model.Node
+		session platform.Session
+		wantErr bool
+	}{
+		{
+			name: "l2tp", node: model.Node{Protocol: model.ProtocolL2TP, PolicyID: 1},
+			session: platform.Session{Protocol: model.ProtocolL2TP, Interface: "l2tp-ppv20001"},
+		},
+		{
+			name: "socks5", node: model.Node{Protocol: model.ProtocolSOCKS5},
+			session: platform.Session{Protocol: model.ProtocolSOCKS5, RemoteAddress: "127.0.0.1:1080"},
+		},
+		{
+			name: "socks5 missing owned endpoint", node: model.Node{Protocol: model.ProtocolSOCKS5},
+			session: platform.Session{Protocol: model.ProtocolSOCKS5}, wantErr: true,
+		},
+		{
+			name: "unsupported", node: model.Node{Protocol: model.ProtocolSLP},
+			session: platform.Session{Protocol: model.ProtocolSLP}, wantErr: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			channel, err := newNodeDNSChannel(test.node, test.session, endpoint)
+			if (err != nil) != test.wantErr || (!test.wantErr && channel == nil) {
+				t.Fatalf("channel = %#v, error = %v", channel, err)
+			}
+		})
 	}
 }
 

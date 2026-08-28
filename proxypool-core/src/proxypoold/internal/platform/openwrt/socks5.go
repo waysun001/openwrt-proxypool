@@ -130,7 +130,7 @@ func (adapter *SOCKS5Adapter) Start(ctx context.Context, request platform.NodeRe
 	identity.digest = socks5OwnershipDigest(request, identity)
 	session := platform.Session{
 		NodeID: request.Node.ID, Generation: request.Generation, Protocol: model.ProtocolSOCKS5,
-		Interface: identity.interfaceName, LocalPort: identity.localPort,
+		Interface: identity.interfaceName, LocalPort: identity.localPort, RemoteAddress: identity.proxyAddress,
 		StartedAt: adapter.now().UTC().Round(0), OwnershipDigest: identity.digest,
 	}
 
@@ -216,7 +216,7 @@ func (adapter *SOCKS5Adapter) Probe(ctx context.Context, request platform.NodeRe
 		return err
 	}
 	if session.NodeID != request.Node.ID || session.Generation != request.Generation || session.Protocol != model.ProtocolSOCKS5 ||
-		session.Interface != identity.interfaceName || session.LocalPort != identity.localPort || session.OwnershipDigest == "" {
+		session.Interface != identity.interfaceName || session.LocalPort != identity.localPort || session.RemoteAddress == "" || session.OwnershipDigest == "" {
 		return errors.New("SOCKS5 session ownership is stale")
 	}
 	entry, err := adapter.loadOwnership(identity)
@@ -231,7 +231,7 @@ func (adapter *SOCKS5Adapter) Probe(ctx context.Context, request platform.NodeRe
 	identity.endpoint = parsedEndpoint
 	identity.proxyAddress = entry.ProxyEndpoint
 	identity.digest = socks5OwnershipDigest(request, identity)
-	if !entry.matches(request, identity) || entry.OwnershipDigest != session.OwnershipDigest {
+	if !entry.matches(request, identity) || entry.ProxyEndpoint != session.RemoteAddress || entry.OwnershipDigest != session.OwnershipDigest {
 		return errors.New("SOCKS5 process ownership verification failed")
 	}
 	configuration, renderErr := renderSOCKS5Config(identity, request.Node.Username, request.Node.Password)
@@ -269,7 +269,8 @@ func (adapter *SOCKS5Adapter) Stop(ctx context.Context, request platform.NodeReq
 	}
 	if entry.NodeID != request.Node.ID || entry.PolicyID != request.Node.PolicyID || entry.Generation > request.Generation ||
 		(session != (platform.Session{}) && (session.NodeID != entry.NodeID || session.Generation != entry.Generation ||
-			session.Protocol != model.ProtocolSOCKS5 || session.LocalPort != identity.localPort || session.OwnershipDigest != entry.OwnershipDigest)) {
+			session.Protocol != model.ProtocolSOCKS5 || session.LocalPort != identity.localPort || session.RemoteAddress != entry.ProxyEndpoint ||
+			session.OwnershipDigest != entry.OwnershipDigest)) {
 		return errors.New("SOCKS5 process ownership verification failed")
 	}
 	pid := entry.PID

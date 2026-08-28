@@ -76,6 +76,7 @@ type Session struct {
 	Protocol        model.Protocol
 	Interface       string
 	LocalPort       uint16
+	RemoteAddress   string
 	StartedAt       time.Time
 	OwnershipDigest string
 }
